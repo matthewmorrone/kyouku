@@ -18,10 +18,23 @@ enum JapaneseFuriganaBuilder {
         return try? Tokenizer(dictionary: IPADic())
     }()
 
-    static func buildAttributedText(text: String, showFurigana: Bool) -> NSAttributedString {
-        let baseFont = UIFont.preferredFont(forTextStyle: .body)
+    @MainActor
+    static func buildAttributedText(
+        text: String,
+        showFurigana: Bool,
+        baseFontSize: CGFloat,
+        rubyFontSize: CGFloat,
+        lineSpacing: CGFloat
+    ) -> NSAttributedString {
+        let baseFont = UIFont.systemFont(ofSize: baseFontSize)
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = lineSpacing
+
         let baseAttributes: [NSAttributedString.Key: Any] = [
-            .font: baseFont
+            .font: baseFont,
+            .paragraphStyle: paragraph,
+            .foregroundColor: UIColor.label
         ]
 
         // Begin with plain text
@@ -33,20 +46,15 @@ enum JapaneseFuriganaBuilder {
 
         let annotations = tokenizer.tokenize(text: text)
 
-        // Slightly smaller than body font → Apple Books-like ruby size
-        let rubyFont = UIFont.systemFont(ofSize: baseFont.pointSize * 0.55)
+        let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
 
         for ann in annotations {
-            // Only add furigana when:
-            // 1) token has kanji
-            // 2) reading ≠ surface
             if !ann.containsKanji { continue }
             if ann.reading == String(text[ann.range]) { continue }
 
             let reading = ann.reading
             let nsRange = NSRange(ann.range, in: text)
 
-            // Build a CTRubyAnnotation for furigana
             let ruby = CTRubyAnnotationCreateWithAttributes(
                 .auto,
                 .auto,
@@ -63,5 +71,22 @@ enum JapaneseFuriganaBuilder {
         }
 
         return attributed
+    }
+
+    @MainActor
+    static func buildAttributedText(text: String, showFurigana: Bool) -> NSAttributedString {
+        let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
+        let defaults = UserDefaults.standard
+        let baseSize = defaults.object(forKey: "readingTextSize") as? Double ?? Double(baseDefault)
+        let rubySize = defaults.object(forKey: "readingFuriganaSize") as? Double ?? (baseSize * 0.55)
+        let spacing = defaults.object(forKey: "readingLineSpacing") as? Double ?? 0
+
+        return buildAttributedText(
+            text: text,
+            showFurigana: showFurigana,
+            baseFontSize: CGFloat(baseSize),
+            rubyFontSize: CGFloat(rubySize),
+            lineSpacing: CGFloat(spacing)
+        )
     }
 }

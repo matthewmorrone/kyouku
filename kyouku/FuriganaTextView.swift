@@ -1,13 +1,14 @@
 //
 //  FuriganaTextView.swift
-//  Otokoto
+//  Kyouku
 //
-//  Created by Matthew Morrone on 12/7/25.
+//  Created by Matthew Morrone on 12/9/25.
 //
 
 import SwiftUI
 import UIKit
 
+@MainActor
 struct FuriganaTextView: UIViewRepresentable {
     let attributedText: NSAttributedString
 
@@ -39,3 +40,4 @@ struct FuriganaTextView: UIViewRepresentable {
         uiView.attributedText = attributedText
     }
 }
+

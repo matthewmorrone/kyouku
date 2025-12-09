@@ -5,11 +5,9 @@
 //  Created by Matthew Morrone on 12/9/25.
 //
 
-
 import Foundation
 import SQLite3
 
-// SQLite3 module in Swift doesn't export SQLITE_TRANSIENT; define it here.
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 struct DictionaryEntry: Identifiable, Hashable {
@@ -18,16 +16,6 @@ struct DictionaryEntry: Identifiable, Hashable {
     let reading: String
     let gloss: String
 }
-
-// MARK: - Dictionary Entry Model
-
-//struct DictionaryEntry: Identifiable, Codable {
-//    let id: String                     // Usually the ent_seq
-//    let kanji: [String]?
-//    let reading: [String]
-//    let meanings: [String]
-//}
-
 
 enum DictionarySQLiteError: Error, CustomStringConvertible {
     case resourceNotFound
@@ -88,10 +76,27 @@ actor DictionarySQLiteStore {
             return []
         }
 
+        // Use the actual schema: entries, kanji(text), readings(text), senses, glosses.
+        // Pick a representative kanji/reading via correlated subqueries (prefer common), and aggregate glosses.
         let sql = """
-        SELECT id, COALESCE(kanji, ''), COALESCE(reading, ''), COALESCE(gloss, '')
-        FROM entries
-        WHERE kanji = ?1 OR reading = ?1
+        SELECT e.id,
+               COALESCE((SELECT k.text
+                         FROM kanji k
+                         WHERE k.entry_id = e.id
+                         ORDER BY k.is_common DESC, k.id ASC
+                         LIMIT 1), '') AS kanji_text,
+               COALESCE((SELECT r.text
+                         FROM readings r
+                         WHERE r.entry_id = e.id
+                         ORDER BY r.is_common DESC, r.id ASC
+                         LIMIT 1), '') AS reading_text,
+               COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
+                         FROM senses s
+                         JOIN glosses g ON g.sense_id = s.id
+                         WHERE s.entry_id = e.id), '') AS gloss_text
+        FROM entries e
+        WHERE EXISTS (SELECT 1 FROM kanji k2 WHERE k2.entry_id = e.id AND k2.text = ?1)
+           OR EXISTS (SELECT 1 FROM readings r2 WHERE r2.entry_id = e.id AND r2.text = ?1)
         LIMIT ?2;
         """
 
@@ -109,7 +114,6 @@ actor DictionarySQLiteStore {
 
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
-
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
             let reading = String(cString: sqlite3_column_text(stmt, 2))
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
@@ -132,3 +136,4 @@ actor DictionarySQLiteStore {
         }
     }
 }
+
