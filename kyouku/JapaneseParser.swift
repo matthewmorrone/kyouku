@@ -14,8 +14,8 @@ enum JapaneseParser {
             return []
         }
         
-        // For now: treat the whole text as a single token.
-        // We’ll replace this with MeCab later.
+        // Temporary fake tokenizer
+        // MeCab will replace this entirely.
         return [
             ParsedToken(
                 surface: trimmed,

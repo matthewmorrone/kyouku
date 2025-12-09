@@ -15,8 +15,10 @@ struct FuriganaTokenView: View {
             Text(token.reading)
                 .font(.caption)
                 .foregroundColor(.secondary)
+            
             Text(token.surface)
                 .font(.title3)
+            
             if let meaning = token.meaning, !meaning.isEmpty {
                 Text(meaning)
                     .font(.caption)

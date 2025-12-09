@@ -1,5 +1,5 @@
 //
-//  PasteView.swift
+//  ContentView.swift
 //  kyouku
 //
 //  Created by Matthew Morrone on 12/9/25.
@@ -16,6 +16,7 @@ struct PasteView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
+                
                 TextEditor(text: $inputText)
                     .frame(minHeight: 160)
                     .overlay(
