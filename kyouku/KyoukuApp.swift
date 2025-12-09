@@ -9,14 +9,14 @@ import SwiftUI
 
 @main
 struct KyoukuApp: App {
-    @StateObject private var store = WordStore()
-    
+    @StateObject var notes = NotesStore()
+    @StateObject var store = WordStore()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(notes)
                 .environmentObject(store)
         }
     }
 }
-
-
