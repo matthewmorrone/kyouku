@@ -6,6 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		E392E5502EE816450069963A /* CharacterFilter in Frameworks */ = {isa = PBXBuildFile; productRef = E392E54F2EE816450069963A /* CharacterFilter */; };
+		E392E5522EE816450069963A /* IPADic in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5512EE816450069963A /* IPADic */; };
+		E392E5542EE816450069963A /* Mecab-Swift in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5532EE816450069963A /* Mecab-Swift */; };
+		E392E5562EE816450069963A /* StringTools in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5552EE816450069963A /* StringTools */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		E392E52A2EE804A50069963A /* kyouku.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = kyouku.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +30,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E392E5522EE816450069963A /* IPADic in Frameworks */,
+				E392E5502EE816450069963A /* CharacterFilter in Frameworks */,
+				E392E5542EE816450069963A /* Mecab-Swift in Frameworks */,
+				E392E5562EE816450069963A /* StringTools in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +76,10 @@
 			);
 			name = kyouku;
 			packageProductDependencies = (
+				E392E54F2EE816450069963A /* CharacterFilter */,
+				E392E5512EE816450069963A /* IPADic */,
+				E392E5532EE816450069963A /* Mecab-Swift */,
+				E392E5552EE816450069963A /* StringTools */,
 			);
 			productName = kyouku;
 			productReference = E392E52A2EE804A50069963A /* kyouku.app */;
@@ -94,6 +109,9 @@
 			);
 			mainGroup = E392E5212EE804A50069963A;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E392E54E2EE816450069963A /* XCRemoteSwiftPackageReference "Mecab-Swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E392E52B2EE804A50069963A /* Products */;
 			projectDirPath = "";
@@ -332,6 +350,40 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E392E54E2EE816450069963A /* XCRemoteSwiftPackageReference "Mecab-Swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/shinjukunian/Mecab-Swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.8.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E392E54F2EE816450069963A /* CharacterFilter */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E392E54E2EE816450069963A /* XCRemoteSwiftPackageReference "Mecab-Swift" */;
+			productName = CharacterFilter;
+		};
+		E392E5512EE816450069963A /* IPADic */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E392E54E2EE816450069963A /* XCRemoteSwiftPackageReference "Mecab-Swift" */;
+			productName = IPADic;
+		};
+		E392E5532EE816450069963A /* Mecab-Swift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E392E54E2EE816450069963A /* XCRemoteSwiftPackageReference "Mecab-Swift" */;
+			productName = "Mecab-Swift";
+		};
+		E392E5552EE816450069963A /* StringTools */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E392E54E2EE816450069963A /* XCRemoteSwiftPackageReference "Mecab-Swift" */;
+			productName = StringTools;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = E392E5222EE804A50069963A /* Project object */;
 }

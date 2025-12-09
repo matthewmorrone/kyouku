@@ -4,24 +4,44 @@
 //
 //  Created by Matthew Morrone on 12/9/25.
 //
-
 import Foundation
+import Mecab_Swift
+import IPADic
 
 enum JapaneseParser {
+
     static func parse(text: String) -> [ParsedToken] {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+
+        // Tokenizer may throw
+        guard let tokenizer = try? Tokenizer(dictionary: IPADic()) else {
             return []
         }
-        
-        // Temporary fake tokenizer
-        // MeCab will replace this entirely.
-        return [
-            ParsedToken(
-                surface: trimmed,
-                reading: trimmed,
-                meaning: ""
+
+        // This version of tokenize does NOT throw
+        let ann = tokenizer.tokenize(text: text)
+
+        var tokens: [ParsedToken] = []
+
+        for a in ann {
+
+            // Pull out exactly what your Annotation type provides
+            let surface = a.description
+            let reading = a.reading
+            let lemma = a.base
+            let pos = a.partOfSpeech
+
+            // Skip BOS/EOS if they appear
+            if surface == "BOS" || surface == "EOS" { continue }
+
+            tokens.append(
+                ParsedToken(
+                    surface: surface,
+                    reading: reading,
+                    meaning: nil
+                )
             )
-        ]
+        }
+
+        return tokens
     }
 }
