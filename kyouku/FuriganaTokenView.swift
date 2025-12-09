@@ -1,3 +1,10 @@
+//
+//  FuriganaTokenView.swift
+//  kyouku
+//
+//  Created by Matthew Morrone on 12/9/25.
+//
+
 import SwiftUI
 
 struct FuriganaTokenView: View {
