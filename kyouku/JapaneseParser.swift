@@ -25,7 +25,7 @@ enum JapaneseParser {
         for a in ann {
 
             // Pull out exactly what your Annotation type provides
-            let surface = a.description
+            let surface = String(text[a.range])
             let reading = a.reading
             let lemma = a.base
             let pos = a.partOfSpeech
