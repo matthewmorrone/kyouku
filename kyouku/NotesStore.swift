@@ -5,9 +5,9 @@
 //  Created by Matthew Morrone on 12/9/25.
 //
 
-import Foundation
 import SwiftUI
 import Combine
+import Foundation
 
 class NotesStore: ObservableObject {
     @Published var notes: [Note] = []
@@ -21,8 +21,19 @@ class NotesStore: ObservableObject {
         load()
     }
 
+    // Backward-compatible convenience: still allows adding just text
     func addNote(_ text: String) {
-        let note = Note(id: UUID(), text: text, createdAt: Date())
+        addNote(title: nil, text: text)
+    }
+
+    func addNote(title: String?, text: String) {
+        let cleanTitle = (title?.isEmpty == true) ? nil : title
+        let note = Note(
+            id: UUID(),
+            title: cleanTitle,
+            text: text,
+            createdAt: Date()
+        )
         notes.insert(note, at: 0)
         save()
     }
