@@ -51,50 +51,41 @@ struct ExtractWordsView: View {
         .sheet(isPresented: $showingDefinition) {
             if let token = selectedToken {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(token.surface)
-                        .font(.title).bold()
-                    if !token.reading.isEmpty {
-                        Text("\(token.reading)")
-                            .font(.headline)
-                    }
-                    if isLookingUp {
-                        ProgressView("Looking up definitions…")
-                    } else if let err = lookupError {
-                        Text(err).foregroundStyle(.secondary)
-                    } else if dictResults.isEmpty {
-                        Text("No definitions found.")
-                            .foregroundStyle(.secondary)
-                    } else if let entry = dictResults.first {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    Text(entry.kanji.isEmpty ? entry.reading : entry.kanji)
-                                        .font(.headline)
-                                    if !entry.reading.isEmpty && entry.reading != entry.kanji {
-                                        Text("【\(entry.reading)】")
-                                            .font(.subheadline)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                let firstGloss = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
-                                Text(firstGloss)
-                                    .font(.body)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .padding(.vertical, 4)
-                        }
-                    }
                     HStack {
-                        Button("Add to Words") {
+                        Button(action: {
                             if let token = selectedToken,
                                !store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }) {
                                 store.add(from: token)
                             }
                             showingDefinition = false
+                        }) {
+                            Image(systemName: "plus.circle.fill").font(.title3)
                         }
-                        .buttonStyle(.borderedProminent)
                         Spacer()
-                        Button("Close") { showingDefinition = false }
+                        Button(action: { showingDefinition = false }) {
+                            Image(systemName: "xmark.circle.fill").font(.title3)
+                        }
+                    }
+
+                    if isLookingUp {
+                        ProgressView("Looking up definitions…")
+                    } else if let err = lookupError {
+                        Text(err).foregroundStyle(.secondary)
+                    } else if let entry = dictResults.first {
+                        Text(entry.kanji.isEmpty ? entry.reading : entry.kanji)
+                            .font(.title2).bold()
+                        if !entry.reading.isEmpty {
+                            Text(entry.reading)
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                        }
+                        let firstGloss = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
+                        Text(firstGloss)
+                            .font(.body)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("No definitions found.")
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .padding()

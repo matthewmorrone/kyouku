@@ -42,6 +42,15 @@ class NotesStore: ObservableObject {
         notes.remove(atOffsets: offsets)
         save()
     }
+    
+    func delete(_ offsets: IndexSet) {
+        deleteNote(at: offsets)
+    }
+    
+    func updateNote(_ note: Note) {
+        notes = notes.map { $0.id == note.id ? note : $0 }
+        save()
+    }
 
     func save() {
         do {

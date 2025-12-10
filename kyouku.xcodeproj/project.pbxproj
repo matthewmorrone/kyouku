@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E30C34DC2EE8BE1B008118E4 /* FlashcardsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34DB2EE8BE1B008118E4 /* FlashcardsView.swift */; };
+		E30C34DE2EE8BF28008118E4 /* ReviewPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34DD2EE8BF28008118E4 /* ReviewPersistence.swift */; };
+		E30C34E02EE8EB37008118E4 /* AppRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34DF2EE8EB37008118E4 /* AppRouter.swift */; };
 		E392E5502EE816450069963A /* CharacterFilter in Frameworks */ = {isa = PBXBuildFile; productRef = E392E54F2EE816450069963A /* CharacterFilter */; };
 		E392E5522EE816450069963A /* IPADic in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5512EE816450069963A /* IPADic */; };
 		E392E5542EE816450069963A /* Mecab-Swift in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5532EE816450069963A /* Mecab-Swift */; };
@@ -14,6 +17,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		E30C34DB2EE8BE1B008118E4 /* FlashcardsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashcardsView.swift; sourceTree = "<group>"; };
+		E30C34DD2EE8BF28008118E4 /* ReviewPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPersistence.swift; sourceTree = "<group>"; };
+		E30C34DF2EE8EB37008118E4 /* AppRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRouter.swift; sourceTree = "<group>"; };
 		E392E52A2EE804A50069963A /* kyouku.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = kyouku.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -45,6 +51,9 @@
 			children = (
 				E392E52C2EE804A50069963A /* kyouku */,
 				E392E52B2EE804A50069963A /* Products */,
+				E30C34DB2EE8BE1B008118E4 /* FlashcardsView.swift */,
+				E30C34DD2EE8BF28008118E4 /* ReviewPersistence.swift */,
+				E30C34DF2EE8EB37008118E4 /* AppRouter.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -137,6 +146,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E30C34E02EE8EB37008118E4 /* AppRouter.swift in Sources */,
+				E30C34DE2EE8BF28008118E4 /* ReviewPersistence.swift in Sources */,
+				E30C34DC2EE8BE1B008118E4 /* FlashcardsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -37,6 +37,10 @@ final class WordStore: ObservableObject {
         save()
     }
     
+    func delete(_ offsets: IndexSet) {
+        delete(at: offsets)
+    }
+    
     func randomWord() -> Word? {
         words.randomElement()
     }
@@ -78,3 +82,4 @@ final class WordStore: ObservableObject {
         }
     }
 }
+
