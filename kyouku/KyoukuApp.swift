@@ -19,6 +19,12 @@ struct KyoukuApp: App {
                 .environmentObject(notes)
                 .environmentObject(store)
                 .environmentObject(router)
+                .onOpenURL { url in
+                    // Expect kyouku://inbox to route to Paste tab; PasteView will ingest on appear/activation
+                    if url.scheme == "kyouku" && url.host == "inbox" {
+                        router.selectedTab = .paste
+                    }
+                }
         }
     }
 }

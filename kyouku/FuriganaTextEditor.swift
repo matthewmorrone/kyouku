@@ -36,6 +36,13 @@ struct FuriganaTextEditor: UIViewRepresentable {
         tv.isSelectable = true
         tv.textColor = .label
 
+        // Improve selection look & feel
+        tv.tintColor = UIColor(named: "AccentColor") ?? .systemBlue
+        tv.keyboardDismissMode = .interactive
+        tv.delaysContentTouches = false
+        tv.canCancelContentTouches = true
+        tv.layoutManager.allowsNonContiguousLayout = false
+
         // Disable smart substitutions to avoid conflicts with IME
         tv.autocorrectionType = .no
         tv.smartQuotesType = .no
@@ -44,6 +51,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
         // Tap recognizer to detect token taps
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        tap.cancelsTouchesInView = true
         context.coordinator.tapRecognizer = tap
         tv.addGestureRecognizer(tap)
 
@@ -53,7 +61,35 @@ struct FuriganaTextEditor: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
+        // Ensure enough top inset for ruby annotations when furigana is on
+        let currentInsets = uiView.textContainerInset
+        let baseTop: CGFloat = 8
+        if showFurigana {
+            // Give extra room for ruby above the first line; use ruby size if provided
+            let ruby = CGFloat(self.rubyFontSize ?? 10)
+            let extraTop = ruby + 6 // small cushion above ruby
+            let newTop = max(baseTop, extraTop)
+            if abs(currentInsets.top - newTop) > 0.5 {
+                uiView.textContainerInset = UIEdgeInsets(top: newTop, left: currentInsets.left, bottom: currentInsets.bottom, right: currentInsets.right)
+            }
+        } else {
+            if abs(currentInsets.top - baseTop) > 0.5 {
+                uiView.textContainerInset = UIEdgeInsets(top: baseTop, left: currentInsets.left, bottom: currentInsets.bottom, right: currentInsets.right)
+            }
+        }
+
         context.coordinator.updateTextView(uiView, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap)
+
+        // Auto-focus when editable and not showing furigana; resign otherwise
+        if !showFurigana && isEditable {
+            if uiView.window != nil && !uiView.isFirstResponder {
+                uiView.becomeFirstResponder()
+            }
+        } else {
+            if uiView.isFirstResponder {
+                uiView.resignFirstResponder()
+            }
+        }
     }
 
     // MARK: - Coordinator
@@ -61,6 +97,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
         private let parent: FuriganaTextEditor
         private var isProgrammaticUpdate = false
         var tapRecognizer: UITapGestureRecognizer?
+        private var highlightedRange: NSRange? = nil
 
         init(_ parent: FuriganaTextEditor) {
             self.parent = parent
@@ -76,6 +113,11 @@ struct FuriganaTextEditor: UIViewRepresentable {
         // Update helper to rebuild attributed or plain text while preserving selection
         func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool, isEditable: Bool, allowTokenTap: Bool) {
             tapRecognizer?.isEnabled = allowTokenTap
+
+            // Clear highlight when token taps are disabled or furigana is off
+            if !showFurigana || !allowTokenTap {
+                highlightedRange = nil
+            }
 
             // If there is active IME composition, avoid replacing content
             if textView.markedTextRange != nil {
@@ -101,7 +143,20 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 } else {
                     attributed = JapaneseFuriganaBuilder.buildAttributedText(text: text, showFurigana: true)
                 }
-                textView.attributedText = attributed
+                let mutable = NSMutableAttributedString(attributedString: attributed)
+                if let hr = highlightedRange, hr.location != NSNotFound, hr.location + hr.length <= mutable.length {
+                    mutable.addAttribute(.backgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.3), range: hr)
+                } else {
+                    // If stored highlight is invalid for current text, clear it
+                    highlightedRange = nil
+                }
+                if highlightedRange != nil {
+                    UIView.transition(with: textView, duration: 0.12, options: .transitionCrossDissolve, animations: {
+                        textView.attributedText = mutable
+                    }, completion: nil)
+                } else {
+                    textView.attributedText = mutable
+                }
                 textView.isEditable = false
             } else {
                 // Plain text mode: only assign if changed
@@ -119,6 +174,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
                     textView.font = desiredFont
                 }
                 textView.isEditable = isEditable
+                highlightedRange = nil
             }
 
             // Restore selection if still valid
@@ -146,15 +202,15 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 point.y -= tv.textContainerInset.top
                 let glyphIndex = lm.glyphIndex(for: point, in: tv.textContainer)
                 let charIndex = lm.characterIndexForGlyph(at: glyphIndex)
-                lookupToken(at: charIndex, in: tv.text)
+                lookupToken(at: charIndex, in: tv.text, textView: tv)
                 return
             }
 
             let start = tv.offset(from: tv.beginningOfDocument, to: range.start)
-            lookupToken(at: start, in: tv.text)
+            lookupToken(at: start, in: tv.text, textView: tv)
         }
 
-        private func lookupToken(at charIndex: Int, in fullText: String) {
+        private func lookupToken(at charIndex: Int, in fullText: String, textView: UITextView) {
             // Tokenize and find the annotation that contains the tapped index
             guard let tokenizer = try? Tokenizer(dictionary: IPADic()) else { return }
             let annotations = tokenizer.tokenize(text: fullText)
@@ -167,6 +223,9 @@ struct FuriganaTextEditor: UIViewRepresentable {
                     let surface = String(fullText[ann.range])
                     let reading = ann.reading
                     let token = ParsedToken(surface: surface, reading: reading, meaning: nil)
+                    highlightedRange = ns
+                    updateTextView(textView, with: parent.text, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     parent.onTokenTap(token)
                     break
                 }

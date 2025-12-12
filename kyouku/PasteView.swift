@@ -29,6 +29,7 @@ struct PasteView: View {
     @State private var goExtract = false
     @State private var hasInitialized: Bool = false
     @State private var isEditing: Bool = false
+    @State private var lookupTask: Task<Void, Never>? = nil
 
     @State private var selectedEntryIndex: Int? = nil
     @State private var showAllDefinitions: Bool = false
@@ -52,57 +53,73 @@ struct PasteView: View {
                     furiganaSize: furiganaSize,
                     lineSpacing: lineSpacing,
                     furiganaGap: furiganaGap,
+                    highlightedToken: selectedToken,
                     onTokenTap: { token in
                         selectedToken = token
                         showingDefinition = true
-                        Task { await lookupDefinitions(for: token) }
+                        lookupTask?.cancel()
+                        lookupTask = Task { @MainActor in
+                            // flip UI state immediately on main actor
+                            isLookingUp = true
+                            lookupError = nil
+                            dictResults = []
+                            selectedEntryIndex = nil
+                            showAllDefinitions = false
+                        }
+                        lookupTask = Task {
+                            await lookupDefinitions(for: token)
+                        }
                     }
                 )
                 
-                HStack {
-                    Spacer()
-                    HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    ControlCell {
                         Button { hideKeyboard() } label: {
-                            Image(systemName: "keyboard.chevron.compact.down")
-                                .font(.title2)
+                            Image(systemName: "keyboard.chevron.compact.down").font(.title2)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.regular)
-                        .padding(.horizontal, 1)
                         .accessibilityLabel("Hide keyboard")
+                    }
 
-                        // PASTE
+                    ControlCell {
                         Button {
                             if let str = UIPasteboard.general.string {
                                 inputText = str
+                                // Update current note's title to the first line of the pasted text
+                                let firstLine = str.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                                if let existing = currentNote {
+                                    // Update the note's title and text in the store
+                                    notes.notes = notes.notes.map { n in
+                                        if n.id == existing.id {
+                                            return Note(id: n.id, title: firstLine.isEmpty ? nil : firstLine, text: str, createdAt: n.createdAt)
+                                        } else {
+                                            return n
+                                        }
+                                    }
+                                    notes.save()
+                                    // Keep our local currentNote in sync
+                                    if let updated = notes.notes.first(where: { $0.id == existing.id }) {
+                                        currentNote = updated
+                                    }
+                                }
                             }
                         } label: {
-                            Image(systemName: "doc.on.clipboard")
-                                .font(.title2)
+                            Image(systemName: "doc.on.clipboard").font(.title2)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.regular)
-                        .padding(.horizontal, 1)
                         .accessibilityLabel("Paste")
+                    }
 
-
-                        // EXTRACT
-                        Button {
-                            goExtract = true
-                        } label: {
-                            Image(systemName: "arrowshape.turn.up.right")
-                                .font(.title2)
+                    ControlCell {
+                        Button { goExtract = true } label: {
+                            Image(systemName: "arrowshape.turn.up.right").font(.title2)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.regular)
-                        .padding(.horizontal, 1)
                         .accessibilityLabel("Extract Words")
+                        .disabled(isEditing)
+                    }
 
-                        // SAVE NOTE
+                    ControlCell {
                         Button {
                             guard !inputText.isEmpty else { return }
                             if let existing = currentNote {
-                                // Update existing note's text, keep its title and createdAt
                                 notes.notes = notes.notes.map { n in
                                     if n.id == existing.id {
                                         return Note(id: n.id, title: n.title, text: inputText, createdAt: n.createdAt)
@@ -112,21 +129,18 @@ struct PasteView: View {
                                 }
                                 notes.save()
                             } else {
-                                // Create new note and set as current
                                 let firstLine = inputText.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)
                                 let title = firstLine?.trimmingCharacters(in: .whitespacesAndNewlines)
                                 notes.addNote(title: (title?.isEmpty == true) ? nil : title, text: inputText)
                                 currentNote = notes.notes.first
                             }
                         } label: {
-                            Image(systemName: "square.and.pencil")
-                                .font(.title2)
+                            Image(systemName: "square.and.pencil").font(.title2)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.regular)
-                        .padding(.horizontal, 1)
                         .accessibilityLabel("Save")
+                    }
 
+                    ControlCell {
                         Toggle(isOn: $isEditing) {
                             if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
                                 Image(systemName: "character.cursor.ibeam.ja")
@@ -134,127 +148,72 @@ struct PasteView: View {
                                 Image(systemName: "character.cursor.ibeam")
                             }
                         }
+                        .labelsHidden()
                         .toggleStyle(.button)
                         .tint(.accentColor)
                         .font(.title2)
-                        .controlSize(.regular)
-                        .padding(.horizontal, 1)
                         .accessibilityLabel("Edit mode")
+                    }
 
+                    ControlCell {
                         Toggle(isOn: $showFurigana) {
                             Image(showFurigana ? Self.furiganaSymbolOn : Self.furiganaSymbolOff)
                         }
+                        .labelsHidden()
                         .toggleStyle(.button)
                         .tint(.accentColor)
                         .font(.title2)
-                        .controlSize(.regular)
-                        .padding(.horizontal, 4)
+                        .disabled(isEditing)
                         .accessibilityLabel("Show Furigana")
-
-                        Button { inputText = "" } label: {
-                            Image(systemName: "trash")
-                                .font(.title2)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.regular)
-                        .padding(.horizontal, 4)
-                        .accessibilityLabel("Clear")
-
                     }
-                    Spacer()
+
+                    ControlCell {
+                        Button { inputText = "" } label: {
+                            Image(systemName: "trash").font(.title2)
+                        }
+                        .accessibilityLabel("Clear")
+                    }
                 }
+                .controlSize(.small)
+                .padding(.horizontal)
 
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 24) }
             .sheet(isPresented: $showingDefinition) {
-                if let token = selectedToken {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Button(action: {
-                                if let idx = selectedEntryIndex, dictResults.indices.contains(idx) {
-                                    let e = dictResults[idx]
-                                    let surface = e.kanji.isEmpty ? e.reading : e.kanji
-                                    let firstGloss = e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
-                                    let t = ParsedToken(surface: surface, reading: e.reading, meaning: firstGloss)
-                                    store.add(from: t)
-                                } else if let first = dictResults.first {
-                                    let surface = first.kanji.isEmpty ? first.reading : first.kanji
-                                    let firstGloss = first.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? first.gloss
-                                    let t = ParsedToken(surface: surface, reading: first.reading, meaning: firstGloss)
-                                    store.add(from: t)
-                                } else {
-                                    store.add(from: token)
-                                }
-                                showingDefinition = false
-                                selectedEntryIndex = nil
-                                showAllDefinitions = false
-                            }) {
-                                Image(systemName: "plus.circle.fill").font(.title3)
-                            }
-                            Spacer()
-                            Button(action: { showingDefinition = false }) {
-                                Image(systemName: "xmark.circle.fill").font(.title3)
-                            }
+                DefinitionSheetContent(
+                    selectedToken: $selectedToken,
+                    showingDefinition: $showingDefinition,
+                    dictResults: $dictResults,
+                    isLookingUp: $isLookingUp,
+                    lookupError: $lookupError,
+                    selectedEntryIndex: $selectedEntryIndex,
+                    showAllDefinitions: $showAllDefinitions,
+                    onAdd: { token, filteredResults in
+                        let hasKanjiInToken: Bool = token.surface.contains { ch in
+                            ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
                         }
-
-                        // Determine display values from selected entry if available, else token
-                        let displayIndex = selectedEntryIndex ?? 0
-                        let entry = dictResults.indices.contains(displayIndex) ? dictResults[displayIndex] : dictResults.first
-                        let displayKanji = entry.map { $0.kanji.isEmpty ? $0.reading : $0.kanji } ?? token.surface
-                        let displayKana = entry?.reading ?? token.reading
-
-                        Text(displayKanji)
-                            .font(.title2).bold()
-
-                        if !displayKana.isEmpty && displayKana != displayKanji {
-                            Text(displayKana)
-                                .font(.headline)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        if isLookingUp {
-                            ProgressView("Looking up definitions…")
-                        } else if let err = lookupError {
-                            Text(err).foregroundStyle(.secondary)
-                        } else if dictResults.isEmpty {
-                            Text("No definitions found.")
-                                .foregroundStyle(.secondary)
+                        if !hasKanjiInToken {
+                            if let first = filteredResults.first {
+                                let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
+                                let firstGloss = first.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? first.gloss
+                                let t = ParsedToken(surface: kanaSurface, reading: first.reading, meaning: firstGloss)
+                                store.add(from: t)
+                            } else {
+                                store.add(from: token)
+                            }
                         } else {
-                            // Show a few definitions with option to view more
-                            let maxShown = showAllDefinitions ? dictResults.count : min(3, dictResults.count)
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(0..<maxShown, id: \.self) { idx in
-                                    let e = dictResults[idx]
-                                    let title = e.kanji.isEmpty ? e.reading : e.kanji
-                                    let firstGloss = e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
-                                    Button(action: { selectedEntryIndex = idx }) {
-                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                            Image(systemName: selectedEntryIndex == idx ? "checkmark.circle.fill" : "circle")
-                                                .foregroundStyle(selectedEntryIndex == idx ? Color.accentColor : .secondary)
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(title).font(.body)
-                                                Text(firstGloss).font(.callout).foregroundStyle(.secondary)
-                                            }
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                if dictResults.count > 3 {
-                                    Button(showAllDefinitions ? "Show fewer" : "View more") {
-                                        showAllDefinitions.toggle()
-                                    }
-                                    .font(.callout)
-                                }
+                            if let first = filteredResults.first {
+                                let surface = first.kanji.isEmpty ? first.reading : first.kanji
+                                let firstGloss = first.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? first.gloss
+                                let t = ParsedToken(surface: surface, reading: first.reading, meaning: firstGloss)
+                                store.add(from: t)
+                            } else {
+                                store.add(from: token)
                             }
                         }
                     }
-                    .padding()
-                    .presentationDetents([.fraction(0.33)])
-                    .presentationDragIndicator(.visible)
-                } else {
-                    Text("No selection").padding()
-                }
+                )
             }
             .navigationDestination(isPresented: $goExtract) {
                 ExtractWordsView(text: inputText)
@@ -265,6 +224,8 @@ struct PasteView: View {
                 if let note = router.noteToOpen {
                     currentNote = note
                     inputText = note.text
+                    isEditing = true
+                    showFurigana = false
                     router.noteToOpen = nil
                 }
                 if !hasInitialized {
@@ -281,7 +242,54 @@ struct PasteView: View {
             }
             .onDisappear {
                 NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+                lookupTask?.cancel()
             }
+            .onChange(of: inputText) { _, newValue in
+                // Keep current note's title synced to the first line of the text
+                guard let existing = currentNote else { return }
+                let firstLine = newValue.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                notes.notes = notes.notes.map { n in
+                    if n.id == existing.id {
+                        return Note(id: n.id, title: firstLine.isEmpty ? nil : firstLine, text: newValue, createdAt: n.createdAt)
+                    } else {
+                        return n
+                    }
+                }
+                notes.save()
+                if let updated = notes.notes.first(where: { $0.id == existing.id }) {
+                    currentNote = updated
+                }
+            }
+            .onChange(of: isEditing) { _, nowEditing in
+                if nowEditing {
+                    // Ensure the editor is in plain text mode to allow editing and show keyboard
+                    showFurigana = false
+                    // Dismiss popups and cancel any ongoing lookups
+                    showingDefinition = false
+                    selectedToken = nil
+                    lookupTask?.cancel()
+                    isLookingUp = false
+                    lookupError = nil
+                    dictResults = []
+                    selectedEntryIndex = nil
+                    showAllDefinitions = false
+                }
+            }
+        }
+    }
+
+    private struct TimeoutError: Error {}
+
+    private func withTimeout<T>(_ seconds: Double, operation: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw TimeoutError()
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
         }
     }
 
@@ -298,6 +306,21 @@ struct PasteView: View {
     }
 
     private func lookupDefinitions(for token: ParsedToken) async {
+        if Task.isCancelled { return }
+
+        let rawSurface = token.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawReading = token.reading.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Guard against empty input
+        if rawSurface.isEmpty && rawReading.isEmpty {
+            await MainActor.run {
+                isLookingUp = false
+                lookupError = "Empty selection."
+                dictResults = []
+            }
+            return
+        }
+
         await MainActor.run {
             isLookingUp = true
             lookupError = nil
@@ -306,14 +329,10 @@ struct PasteView: View {
             showAllDefinitions = false
         }
         do {
-            let rawSurface = token.surface.trimmingCharacters(in: .whitespacesAndNewlines)
-            let rawReading = token.reading.trimmingCharacters(in: .whitespacesAndNewlines)
-
             // Basic sanitation: remove trailing punctuation that often appears in tokenization
             let sanitizedSurface = rawSurface.trimmingCharacters(in: CharacterSet(charactersIn: "。、，,.!？?；;：:"))
             let sanitizedReading = rawReading.trimmingCharacters(in: CharacterSet(charactersIn: "。、，,.!？?；;：:"))
 
-            // Try multiple queries, prefer surface, then reading, then sanitized variants
             var all: [DictionaryEntry] = []
             let limit = 10
 
@@ -325,31 +344,67 @@ struct PasteView: View {
                 }
             }
 
-            let q1 = try await DictionarySQLiteStore.shared.lookup(term: rawSurface, limit: limit)
-            appendUnique(q1)
+            // Each lookup gets a timeout to avoid hanging the UI
+            let timeoutSeconds = 3.0
 
-            if all.isEmpty && !rawReading.isEmpty {
-                let q2 = try await DictionarySQLiteStore.shared.lookup(term: rawReading, limit: limit)
+            if !rawSurface.isEmpty && !Task.isCancelled {
+                let q1 = try await withTimeout(timeoutSeconds) { try await DictionarySQLiteStore.shared.lookup(term: rawSurface, limit: limit) }
+                appendUnique(q1)
+            }
+
+            if all.isEmpty && !rawReading.isEmpty && !Task.isCancelled {
+                let q2 = try await withTimeout(timeoutSeconds) { try await DictionarySQLiteStore.shared.lookup(term: rawReading, limit: limit) }
                 appendUnique(q2)
             }
 
-            if all.isEmpty && sanitizedSurface != rawSurface {
-                let q3 = try await DictionarySQLiteStore.shared.lookup(term: sanitizedSurface, limit: limit)
+            if all.isEmpty && !sanitizedSurface.isEmpty && sanitizedSurface != rawSurface && !Task.isCancelled {
+                let q3 = try await withTimeout(timeoutSeconds) { try await DictionarySQLiteStore.shared.lookup(term: sanitizedSurface, limit: limit) }
                 appendUnique(q3)
             }
 
-            if all.isEmpty && !sanitizedReading.isEmpty && sanitizedReading != rawReading {
-                let q4 = try await DictionarySQLiteStore.shared.lookup(term: sanitizedReading, limit: limit)
+            if all.isEmpty && !sanitizedReading.isEmpty && sanitizedReading != rawReading && !Task.isCancelled {
+                let q4 = try await withTimeout(timeoutSeconds) { try await DictionarySQLiteStore.shared.lookup(term: sanitizedReading, limit: limit) }
                 appendUnique(q4)
             }
 
+            if Task.isCancelled {
+                await MainActor.run {
+                    isLookingUp = false
+                }
+                return
+            }
+
+            let hasKanjiInToken: Bool = token.surface.contains { ch in
+                ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
+            }
+            func score(entry e: DictionaryEntry, token t: ParsedToken, hasKanji: Bool) -> (Int, Int, Int, Int) {
+                // Higher tuple sorts earlier. We'll negate where needed for ascending.
+                // Prefer camelCase property if available; default to 0 if neither exists
+                let common = (e.isCommon ? 1 : 0)
+                let surfaceMatch = hasKanji ? ((e.kanji.isEmpty ? e.reading : e.kanji) == t.surface ? 1 : 0)
+                                            : 0
+                let readingMatch = (!hasKanji ? (e.reading == (t.reading.isEmpty ? t.surface : t.reading) ? 1 : 0) : 0)
+                let firstGloss = e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
+                let glossLength = firstGloss.count
+                // Sort keys: common desc, surfaceMatch desc, readingMatch desc, glossLength asc
+                return (common, surfaceMatch, readingMatch, -glossLength)
+            }
+            let sorted = all.sorted { a, b in
+                let sa = score(entry: a, token: token, hasKanji: hasKanjiInToken)
+                let sb = score(entry: b, token: token, hasKanji: hasKanjiInToken)
+                return sa > sb
+            }
             await MainActor.run {
-                dictResults = all
+                dictResults = sorted
                 isLookingUp = false
             }
         } catch {
             await MainActor.run {
-                lookupError = (error as? DictionarySQLiteError)?.description ?? error.localizedDescription
+                if error is TimeoutError {
+                    lookupError = "Lookup timed out. Please try again."
+                } else {
+                    lookupError = (error as? DictionarySQLiteError)?.description ?? error.localizedDescription
+                }
                 isLookingUp = false
             }
         }
@@ -363,6 +418,7 @@ struct PasteView: View {
         var furiganaSize: Double
         var lineSpacing: Double
         var furiganaGap: Double
+        var highlightedToken: ParsedToken?
         var onTokenTap: (ParsedToken) -> Void
 
         @State private var viewKey: Int = 0
@@ -381,10 +437,11 @@ struct PasteView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(12)
-            .background(Color(UIColor.secondarySystemBackground))
+            .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color.clear)
             .environment(\.furiganaGap, furiganaGap)
+            .environment(\.highlightedToken, highlightedToken)
             .id(viewKey)
-            .cornerRadius(0)
+            .cornerRadius(12)
             .padding(.horizontal)
             .frame(maxHeight: .infinity)
             .onChange(of: textSize) { _, _ in bumpKey() }
@@ -402,6 +459,129 @@ struct PasteView: View {
     }
 }
 
+// New extracted DefinitionSheetContent view
+private struct DefinitionSheetContent: View {
+    @Binding var selectedToken: ParsedToken?
+    @Binding var showingDefinition: Bool
+    @Binding var dictResults: [DictionaryEntry]
+    @Binding var isLookingUp: Bool
+    @Binding var lookupError: String?
+    @Binding var selectedEntryIndex: Int?
+    @Binding var showAllDefinitions: Bool
+    var onAdd: (ParsedToken, [DictionaryEntry]) -> Void
+
+    var body: some View {
+        Group {
+            if let token = selectedToken {
+                let hasKanjiInToken: Bool = token.surface.contains { ch in
+                    ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
+                }
+                let filteredResults: [DictionaryEntry] = {
+                    if !hasKanjiInToken {
+                        let kana = token.reading.isEmpty ? token.surface : token.reading
+                        return dictResults.filter { $0.reading == kana }
+                    } else {
+                        return dictResults
+                    }
+                }()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Button(action: {
+                            onAdd(token, filteredResults)
+                            showingDefinition = false
+                            selectedEntryIndex = nil
+                            showAllDefinitions = false
+                        }) {
+                            Image(systemName: "plus.circle.fill").font(.title3)
+                        }
+                        Spacer()
+                        Button(action: { showingDefinition = false }) {
+                            Image(systemName: "xmark.circle.fill").font(.title3)
+                        }
+                    }
+
+                    let entry = filteredResults.first
+                    let displayKanji: String = {
+                        if !hasKanjiInToken {
+                            return token.reading.isEmpty ? token.surface : token.reading
+                        }
+                        if let e = entry {
+                            return e.kanji.isEmpty ? e.reading : e.kanji
+                        }
+                        return token.surface
+                    }()
+                    let displayKana = entry?.reading ?? token.reading
+
+                    Text(displayKanji)
+                        .font(.title2).bold()
+
+                    if !displayKana.isEmpty && displayKana != displayKanji {
+                        Text(displayKana)
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if isLookingUp {
+                        ProgressView("Looking up definitions…")
+                    } else if let err = lookupError {
+                        Text(err).foregroundStyle(.secondary)
+                    } else if filteredResults.isEmpty {
+                        Text("No definitions found.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        DefinitionList(
+                            filteredResults: filteredResults,
+                            showAllDefinitions: $showAllDefinitions
+                        )
+                    }
+                }
+                .padding()
+                .presentationDetents([.fraction(0.33)])
+                .presentationDragIndicator(.visible)
+            } else {
+                Text("No selection").padding()
+            }
+        }
+    }
+}
+
+private struct DefinitionList: View {
+    let filteredResults: [DictionaryEntry]
+    @Binding var showAllDefinitions: Bool
+
+    var body: some View {
+        let maxShown = showAllDefinitions ? filteredResults.count : min(3, filteredResults.count)
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(0..<maxShown, id: \.self) { idx in
+                let e = filteredResults[idx]
+                let firstGloss = e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(firstGloss)
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+            }
+            if filteredResults.count > 3 {
+                Button(showAllDefinitions ? "Show fewer" : "View more") {
+                    showAllDefinitions.toggle()
+                }
+                .font(.callout)
+            }
+        }
+    }
+}
+
+private struct ControlCell<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+    }
+}
+
 private struct FuriganaGapKey: EnvironmentKey {
     static let defaultValue: Double = 2
 }
@@ -413,7 +593,19 @@ extension EnvironmentValues {
     }
 }
 
+private struct HighlightedTokenKey: EnvironmentKey {
+    static let defaultValue: ParsedToken? = nil
+}
+
+extension EnvironmentValues {
+    var highlightedToken: ParsedToken? {
+        get { self[HighlightedTokenKey.self] }
+        set { self[HighlightedTokenKey.self] = newValue }
+    }
+}
+
 // Re-open PasteView to keep type scope intact if needed
 extension PasteView {}
+
 
 
