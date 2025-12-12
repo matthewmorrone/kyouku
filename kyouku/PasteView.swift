@@ -44,36 +44,31 @@ struct PasteView: View {
         NavigationStack {
             VStack(spacing: 16) {
                 
-
-                FuriganaTextEditor(
+                EditorContainer(
                     text: $inputText,
                     showFurigana: showFurigana,
-                    isEditable: isEditing,
-                    allowTokenTap: showFurigana && !isEditing
-                ) { token in
-                    selectedToken = token
-                    showingDefinition = true
-                    Task {
-                        await lookupDefinitions(for: token)
+                    isEditing: isEditing,
+                    textSize: textSize,
+                    furiganaSize: furiganaSize,
+                    lineSpacing: lineSpacing,
+                    furiganaGap: furiganaGap,
+                    onTokenTap: { token in
+                        selectedToken = token
+                        showingDefinition = true
+                        Task { await lookupDefinitions(for: token) }
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(12)
-                .background(Color(UIColor.secondarySystemBackground))
-                .environment(\.furiganaGap, furiganaGap)
-                .cornerRadius(0)
-                .padding(.horizontal)
-                .frame(maxHeight: .infinity)
+                )
                 
                 HStack {
                     Spacer()
-                    HStack(spacing: 28) {
-                        // HIDE KEYBOARD
+                    HStack(alignment: .center, spacing: 8) {
                         Button { hideKeyboard() } label: {
                             Image(systemName: "keyboard.chevron.compact.down")
                                 .font(.title2)
                         }
-                        .buttonBorderShape(.roundedRectangle)
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .padding(.horizontal, 1)
                         .accessibilityLabel("Hide keyboard")
 
                         // PASTE
@@ -85,7 +80,9 @@ struct PasteView: View {
                             Image(systemName: "doc.on.clipboard")
                                 .font(.title2)
                         }
-                        .buttonBorderShape(.roundedRectangle)
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .padding(.horizontal, 1)
                         .accessibilityLabel("Paste")
 
 
@@ -96,9 +93,10 @@ struct PasteView: View {
                             Image(systemName: "arrowshape.turn.up.right")
                                 .font(.title2)
                         }
-                        .buttonBorderShape(.roundedRectangle)
-                        .accessibilityLabel("Words ->")
-
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .padding(.horizontal, 1)
+                        .accessibilityLabel("Extract Words")
 
                         // SAVE NOTE
                         Button {
@@ -124,11 +122,11 @@ struct PasteView: View {
                             Image(systemName: "square.and.pencil")
                                 .font(.title2)
                         }
-                        .buttonBorderShape(.roundedRectangle)
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .padding(.horizontal, 1)
                         .accessibilityLabel("Save")
 
-
-                        // EDIT MODE TOGGLE (on = Edit mode)
                         Toggle(isOn: $isEditing) {
                             if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
                                 Image(systemName: "character.cursor.ibeam.ja")
@@ -137,28 +135,29 @@ struct PasteView: View {
                             }
                         }
                         .toggleStyle(.button)
-                        .buttonBorderShape(.roundedRectangle)
                         .tint(.accentColor)
                         .font(.title2)
+                        .controlSize(.regular)
+                        .padding(.horizontal, 1)
                         .accessibilityLabel("Edit mode")
 
-
-                        // FURIGANA TOGGLE (independent)
                         Toggle(isOn: $showFurigana) {
                             Image(showFurigana ? Self.furiganaSymbolOn : Self.furiganaSymbolOff)
                         }
                         .toggleStyle(.button)
-                        .buttonBorderShape(.roundedRectangle)
                         .tint(.accentColor)
                         .font(.title2)
+                        .controlSize(.regular)
+                        .padding(.horizontal, 4)
                         .accessibilityLabel("Show Furigana")
 
-                        // CLEAR
                         Button { inputText = "" } label: {
                             Image(systemName: "trash")
                                 .font(.title2)
                         }
-                        .buttonBorderShape(.roundedRectangle)
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .padding(.horizontal, 4)
                         .accessibilityLabel("Clear")
 
                     }
@@ -298,47 +297,6 @@ struct PasteView: View {
         }
     }
 
-    private var workflowCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Workflow")
-                .font(.headline)
-            Text("1) Paste text  →  2) Save note  →  3) Choose words  →  4) View list  →  5) Study flashcards.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 12) {
-                Button {
-                    goExtract = true
-                } label: {
-                    Label("Choose words", systemImage: "arrowshape.turn.up.right")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                Button {
-                    router.selectedTab = .words
-                } label: {
-                    Label("Word list", systemImage: "book")
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    router.selectedTab = .cards
-                } label: {
-                    Label("Flashcards", systemImage: "rectangle.on.rectangle.angled")
-                }
-                .buttonStyle(.bordered)
-            }
-            .font(.subheadline)
-        }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(UIColor.secondarySystemBackground))
-        .cornerRadius(12)
-        .padding(.horizontal)
-    }
-
     private func lookupDefinitions(for token: ParsedToken) async {
         await MainActor.run {
             isLookingUp = true
@@ -396,6 +354,52 @@ struct PasteView: View {
             }
         }
     }
+
+    private struct EditorContainer: View {
+        @Binding var text: String
+        var showFurigana: Bool
+        var isEditing: Bool
+        var textSize: Double
+        var furiganaSize: Double
+        var lineSpacing: Double
+        var furiganaGap: Double
+        var onTokenTap: (ParsedToken) -> Void
+
+        @State private var viewKey: Int = 0
+
+        var body: some View {
+            let allowTap = showFurigana && !isEditing
+            FuriganaTextEditor(
+                text: $text,
+                showFurigana: showFurigana,
+                isEditable: isEditing,
+                allowTokenTap: allowTap,
+                onTokenTap: onTokenTap,
+                baseFontSize: textSize,
+                rubyFontSize: furiganaSize,
+                lineSpacing: lineSpacing
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(12)
+            .background(Color(UIColor.secondarySystemBackground))
+            .environment(\.furiganaGap, furiganaGap)
+            .id(viewKey)
+            .cornerRadius(0)
+            .padding(.horizontal)
+            .frame(maxHeight: .infinity)
+            .onChange(of: textSize) { _, _ in bumpKey() }
+            .onChange(of: furiganaSize) { _, _ in bumpKey() }
+            .onChange(of: lineSpacing) { _, _ in bumpKey() }
+            .onChange(of: furiganaGap) { _, _ in bumpKey() }
+            .onChange(of: showFurigana) { _, _ in bumpKey() }
+            .onChange(of: isEditing) { _, _ in bumpKey() }
+        }
+
+        private func bumpKey() {
+            // Force a lightweight view refresh without huge string interpolation
+            viewKey &+= 1
+        }
+    }
 }
 
 private struct FuriganaGapKey: EnvironmentKey {
@@ -411,3 +415,5 @@ extension EnvironmentValues {
 
 // Re-open PasteView to keep type scope intact if needed
 extension PasteView {}
+
+

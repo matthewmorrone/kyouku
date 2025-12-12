@@ -17,6 +17,10 @@ struct FuriganaTextEditor: UIViewRepresentable {
     var allowTokenTap: Bool = true
     var onTokenTap: (ParsedToken) -> Void
 
+    var baseFontSize: Double? = nil
+    var rubyFontSize: Double? = nil
+    var lineSpacing: Double? = nil
+
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
@@ -85,11 +89,19 @@ struct FuriganaTextEditor: UIViewRepresentable {
             let selected = textView.selectedRange
 
             if showFurigana {
-                // Only rebuild attributed text if the underlying string changed
-                if textView.attributedText?.string != text {
-                    let attributed = JapaneseFuriganaBuilder.buildAttributedText(text: text, showFurigana: true)
-                    textView.attributedText = attributed
+                let attributed: NSAttributedString
+                if let base = parent.baseFontSize, let ruby = parent.rubyFontSize, let spacing = parent.lineSpacing {
+                    attributed = JapaneseFuriganaBuilder.buildAttributedText(
+                        text: text,
+                        showFurigana: true,
+                        baseFontSize: CGFloat(base),
+                        rubyFontSize: CGFloat(ruby),
+                        lineSpacing: CGFloat(spacing)
+                    )
+                } else {
+                    attributed = JapaneseFuriganaBuilder.buildAttributedText(text: text, showFurigana: true)
                 }
+                textView.attributedText = attributed
                 textView.isEditable = false
             } else {
                 // Plain text mode: only assign if changed
@@ -101,7 +113,8 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
                 let defaults = UserDefaults.standard
                 let baseSize = defaults.object(forKey: "readingTextSize") as? Double ?? Double(baseDefault)
-                let desiredFont = UIFont.systemFont(ofSize: CGFloat(baseSize))
+                let effectiveBaseSize = parent.baseFontSize ?? baseSize
+                let desiredFont = UIFont.systemFont(ofSize: CGFloat(effectiveBaseSize))
                 if textView.font?.pointSize != desiredFont.pointSize || textView.font?.fontName != desiredFont.fontName {
                     textView.font = desiredFont
                 }
