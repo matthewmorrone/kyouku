@@ -8,8 +8,6 @@
 import Foundation
 import SQLite3
 
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-
 struct DictionaryEntry: Identifiable, Hashable {
     let id: Int64
     let kanji: String
@@ -67,7 +65,7 @@ actor DictionarySQLiteStore {
     func lookup(term: String, limit: Int = 30) throws -> [DictionaryEntry] {
         try ensureOpen()
 
-        guard let db else {
+        guard db != nil else {
             return []
         }
 
@@ -131,7 +129,7 @@ actor DictionarySQLiteStore {
         }
         defer { sqlite3_finalize(stmt) }
 
-        sqlite3_bind_text(stmt, 1, term, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 1, term, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
         var rows: [DictionaryEntry] = []
@@ -181,7 +179,7 @@ actor DictionarySQLiteStore {
         defer { sqlite3_finalize(stmt) }
 
         let pattern = "%" + term + "%"
-        sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 1, pattern, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
         var rows: [DictionaryEntry] = []
@@ -226,7 +224,7 @@ actor DictionarySQLiteStore {
         defer { sqlite3_finalize(stmt) }
 
         let pattern = "%" + term + "%"
-        sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 1, pattern, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
         var rows: [DictionaryEntry] = []

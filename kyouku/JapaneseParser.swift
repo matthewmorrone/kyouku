@@ -27,8 +27,6 @@ enum JapaneseParser {
             // Pull out exactly what your Annotation type provides
             let surface = String(text[a.range])
             let reading = a.reading
-            let lemma = a.base
-            let pos = a.partOfSpeech
 
             // Skip BOS/EOS if they appear
             if surface == "BOS" || surface == "EOS" { continue }
@@ -45,3 +43,4 @@ enum JapaneseParser {
         return tokens
     }
 }
+

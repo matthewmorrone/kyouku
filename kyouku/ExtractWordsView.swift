@@ -49,7 +49,7 @@ struct ExtractWordsView: View {
             tokens = JapaneseParser.parse(text: text)
         }
         .sheet(isPresented: $showingDefinition) {
-            if let token = selectedToken {
+            if selectedToken != nil {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Button(action: {

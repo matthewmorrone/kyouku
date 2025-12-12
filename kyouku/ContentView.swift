@@ -14,28 +14,28 @@ struct ContentView: View {
         TabView(selection: $router.selectedTab) {
             PasteView()
                 .tabItem {
-                    Label("Paste", systemImage: "doc.on.clipboard")
+                    Label("Paste", systemImage: "text.page")
                 }
                 .tag(AppTab.paste)
             
             NotesView()
                 .tabItem {
-                    Label("Notes", systemImage: "note.text")
+                    Label("Notes", systemImage: "book")
                 }
                 .tag(AppTab.notes)
+
+            SavedWordsView()
+                .tabItem {
+                    Label("Words", systemImage: "checklist")
+                }
+                .tag(AppTab.words)
             
             FlashcardsView()
                 .tabItem {
                     Label("Cards", systemImage: "rectangle.on.rectangle.angled")
                 }
                 .tag(AppTab.cards)
-            
-            SavedWordsView()
-                .tabItem {
-                    Label("Words", systemImage: "book")
-                }
-                .tag(AppTab.words)
-            
+
             SettingsView()
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")

@@ -13,6 +13,8 @@ import IPADic
 struct FuriganaTextEditor: UIViewRepresentable {
     @Binding var text: String
     var showFurigana: Bool
+    var isEditable: Bool = true
+    var allowTokenTap: Bool = true
     var onTokenTap: (ParsedToken) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -30,23 +32,31 @@ struct FuriganaTextEditor: UIViewRepresentable {
         tv.isSelectable = true
         tv.textColor = .label
 
+        // Disable smart substitutions to avoid conflicts with IME
+        tv.autocorrectionType = .no
+        tv.smartQuotesType = .no
+        tv.smartDashesType = .no
+        tv.smartInsertDeleteType = .no
+
         // Tap recognizer to detect token taps
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        context.coordinator.tapRecognizer = tap
         tv.addGestureRecognizer(tap)
 
         // Initial content
-        context.coordinator.updateTextView(tv, with: text, showFurigana: showFurigana)
+        context.coordinator.updateTextView(tv, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap)
         return tv
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
-        context.coordinator.updateTextView(uiView, with: text, showFurigana: showFurigana)
+        context.coordinator.updateTextView(uiView, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap)
     }
 
     // MARK: - Coordinator
     final class Coordinator: NSObject, UITextViewDelegate {
         private let parent: FuriganaTextEditor
         private var isProgrammaticUpdate = false
+        var tapRecognizer: UITapGestureRecognizer?
 
         init(_ parent: FuriganaTextEditor) {
             self.parent = parent
@@ -54,34 +64,51 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
         func textViewDidChange(_ textView: UITextView) {
             guard !isProgrammaticUpdate else { return }
+            // If IME composition is active, don't push partial text to SwiftUI binding
+            if textView.markedTextRange != nil { return }
             parent.text = textView.text
         }
 
         // Update helper to rebuild attributed or plain text while preserving selection
-        func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool) {
+        func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool, isEditable: Bool, allowTokenTap: Bool) {
+            tapRecognizer?.isEnabled = allowTokenTap
+
+            // If there is active IME composition, avoid replacing content
+            if textView.markedTextRange != nil {
+                textView.isEditable = !showFurigana && isEditable
+                return
+            }
+
             isProgrammaticUpdate = true
             defer { isProgrammaticUpdate = false }
 
             let selected = textView.selectedRange
 
             if showFurigana {
-                // Build attributed with current settings (defaults read inside builder)
-                let attributed = JapaneseFuriganaBuilder.buildAttributedText(text: text, showFurigana: true)
-                textView.attributedText = attributed
+                // Only rebuild attributed text if the underlying string changed
+                if textView.attributedText?.string != text {
+                    let attributed = JapaneseFuriganaBuilder.buildAttributedText(text: text, showFurigana: true)
+                    textView.attributedText = attributed
+                }
                 textView.isEditable = false
             } else {
-                // Plain text with configured base size
-                textView.attributedText = nil
-                textView.text = text
+                // Plain text mode: only assign if changed
+                if textView.text != text {
+                    textView.text = text
+                }
                 textView.textColor = .label
+
                 let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
                 let defaults = UserDefaults.standard
                 let baseSize = defaults.object(forKey: "readingTextSize") as? Double ?? Double(baseDefault)
-                textView.font = UIFont.systemFont(ofSize: CGFloat(baseSize))
-                textView.isEditable = true
+                let desiredFont = UIFont.systemFont(ofSize: CGFloat(baseSize))
+                if textView.font?.pointSize != desiredFont.pointSize || textView.font?.fontName != desiredFont.fontName {
+                    textView.font = desiredFont
+                }
+                textView.isEditable = isEditable
             }
 
-            // Restore selection if possible
+            // Restore selection if still valid
             let max = (textView.text as NSString).length
             if selected.location <= max {
                 textView.selectedRange = selected

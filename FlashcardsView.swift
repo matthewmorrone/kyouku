@@ -92,7 +92,7 @@ struct FlashcardsView: View {
         .onAppear {
             startSession()
         }
-        .onChange(of: store.words) { _ in
+        .onChange(of: store.words) { oldValue, newValue in
             startSession()
         }
     }

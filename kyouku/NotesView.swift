@@ -15,14 +15,19 @@ struct NotesView: View {
         NavigationStack {
             List {
                 if notesStore.notes.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("No notes yet")
-                            .font(.headline)
-                        Text("Paste text, then tap the save icon to create a note.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                    Button {
+                        router.noteToOpen = nil
+                        router.selectedTab = .paste
+                    } label: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("No notes yet")
+                                .font(.headline)
+                            Text("Workflow: paste text → save note → pick words → study.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 8)
                     }
-                    .padding(.vertical, 8)
                 } else {
                     ForEach(notesStore.notes) { note in
                         Button {
@@ -71,6 +76,7 @@ struct NoteDetailView: View {
     let note: Note
 
     @State private var showFurigana = true
+    @State private var isEditing: Bool = false
 
     @State private var editableTitle: String = ""
     @State private var editableText: String = ""
@@ -96,7 +102,7 @@ struct NoteDetailView: View {
                 .font(.title2.weight(.semibold))
                 .textFieldStyle(.roundedBorder)
 
-            FuriganaTextEditor(text: $editableText, showFurigana: showFurigana) { token in
+            FuriganaTextEditor(text: $editableText, showFurigana: showFurigana, isEditable: !showFurigana && isEditing, allowTokenTap: !isEditing) { token in
                 selectedToken = token
                 showingDefinition = true
                 Task {
@@ -114,10 +120,13 @@ struct NoteDetailView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    showFurigana.toggle()
+                    isEditing.toggle()
+                    if isEditing { showFurigana = false }
                 } label: {
-                    Image(systemName: showFurigana ? "textformat" : "textformat.size.smaller")
+                    Label(isEditing ? "Editing" : "Edit", systemImage: isEditing ? "pencil.circle.fill" : "pencil.circle")
                 }
+                .tint(isEditing ? .orange : .secondary)
+                .help(isEditing ? "Stop Editing" : "Edit")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Save") {
@@ -129,7 +138,18 @@ struct NoteDetailView: View {
                         }
                     }
                     notesStore.save()
+                    isEditing = false
                 }
+                .disabled(!isEditing)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showFurigana.toggle()
+                } label: {
+                    Label(showFurigana ? "Furigana On" : "Furigana Off", systemImage: showFurigana ? "textformat.superscript" : "textformat")
+                }
+                .tint(showFurigana ? .blue : .secondary)
+                .disabled(isEditing)
             }
         }
         .sheet(isPresented: $showingDefinition) {
@@ -194,6 +214,8 @@ struct NoteDetailView: View {
         .onAppear {
             editableTitle = note.title ?? ""
             editableText = note.text
+            isEditing = editableText.isEmpty
+            if isEditing { showFurigana = false }
         }
     }
 
@@ -221,4 +243,3 @@ struct NoteDetailView: View {
         }
     }
 }
-

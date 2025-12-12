@@ -17,20 +17,18 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Preview") {
-                    FuriganaTextView(attributedText: preview)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 8)
-                }
-
                 Section("Reading Appearance") {
+                    FuriganaTextView(attributedText: preview)
+                        .frame(maxWidth: .infinity, idealHeight: 80, alignment: .leading)
+                        .padding(.vertical, 8)
+
                     HStack {
                         Text("Text Size")
                         Spacer()
                         Text("\(Int(textSize))")
                             .foregroundStyle(.secondary)
                     }
-                    Slider(value: $textSize, in: 12...30, step: 1)
+                    Slider(value: $textSize, in: 1...30, step: 1)
 
                     HStack {
                         Text("Furigana Size")
@@ -38,22 +36,23 @@ struct SettingsView: View {
                         Text("\(Int(furiganaSize))")
                             .foregroundStyle(.secondary)
                     }
-                    Slider(value: $furiganaSize, in: 6...20, step: 1)
-
+                    Slider(value: $furiganaSize, in: 1...30, step: 1)
+                    
                     HStack {
                         Text("Line Spacing")
                         Spacer()
                         Text("\(Int(lineSpacing))")
                             .foregroundStyle(.secondary)
                     }
-                    Slider(value: $lineSpacing, in: 0...20, step: 1)
+                    Slider(value: $lineSpacing, in: 1...30, step: 1)
                 }
+
             }
             .navigationTitle("Settings")
             .onAppear { rebuildPreview() }
-            .onChange(of: textSize) { _ in rebuildPreview() }
-            .onChange(of: furiganaSize) { _ in rebuildPreview() }
-            .onChange(of: lineSpacing) { _ in rebuildPreview() }
+            .onChange(of: textSize) { rebuildPreview() }
+            .onChange(of: furiganaSize) { rebuildPreview() }
+            .onChange(of: lineSpacing) { rebuildPreview() }
         }
     }
 
@@ -69,3 +68,4 @@ struct SettingsView: View {
         )
     }
 }
+

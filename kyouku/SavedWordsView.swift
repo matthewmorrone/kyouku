@@ -21,82 +21,20 @@ struct SavedWordsView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Dictionary") {
-                    if searchText.isEmpty {
-                        Text("Type to search the dictionary")
-                            .foregroundStyle(.secondary)
-                    } else if vm.isLoading {
-                        HStack { ProgressView(); Text("Searching…") }
-                    } else if let msg = vm.errorMessage {
-                        Text(msg).foregroundStyle(.secondary)
-                    } else if vm.results.isEmpty {
-                        Text("No matches")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(vm.results) { entry in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(entry.kanji.isEmpty ? entry.reading : entry.kanji)
-                                        .font(.headline)
-                                    let firstGloss = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
-                                    Text(firstGloss)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button { addFromEntry(entry) } label: {
-                                    if store.words.contains(where: { ($0.surface == (entry.kanji.isEmpty ? entry.reading : entry.kanji)) && $0.reading == entry.reading }) {
-                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                                    } else {
-                                        Image(systemName: "plus.circle").foregroundStyle(.tint)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(store.words.contains(where: { ($0.surface == (entry.kanji.isEmpty ? entry.reading : entry.kanji)) && $0.reading == entry.reading }))
-                            }
-                        }
-                    }
-                }
-                Section("Saved Words") {
-                    ForEach(store.words.sorted(by: { $0.createdAt > $1.createdAt })) { word in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(word.surface)
-                                    .font(.title3)
-                                Text("【\(word.reading)】")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                            }
-                            if !word.meaning.isEmpty {
-                                Text(word.meaning)
-                                    .font(.subheadline)
-                            }
-                            if let note = word.note, !note.isEmpty {
-                                Text(note)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedWord = word
-                            showingDefinition = true
-                            Task { await lookup(for: word) }
-                        }
-                    }
-                    .onDelete(perform: store.delete)
-                }
+                dictionarySection
+                savedWordsSection
             }
             .navigationTitle("Words")
             .toolbar {
-                EditButton()
+                ToolbarItem(placement: .topBarTrailing) {
+                    EditButton()
+                }
             }
             .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search dictionary")
-            .onChange(of: searchText) { t in
+            .onChange(of: searchText) { oldValue, newValue in
                 // Cancel any in-flight search task
                 searchTask?.cancel()
-                let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else {
                     vm.results = []
                     vm.errorMessage = nil
@@ -110,70 +48,178 @@ struct SavedWordsView: View {
                 }
             }
             .sheet(isPresented: $showingDefinition) {
-                if isLookingUp {
-                    VStack(spacing: 12) {
-                        ProgressView("Looking up…")
-                        if let w = selectedWord {
-                            Text("\(w.surface)【\(w.reading)】")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding()
-                } else if let msg = lookupError {
-                    VStack(spacing: 10) {
-                        HStack {
-                            Button(action: { if let w = selectedWord { store.add(from: ParsedToken(surface: w.surface, reading: w.reading, meaning: w.meaning)) }; showingDefinition = false }) {
-                                Image(systemName: "plus.circle.fill").font(.title3)
-                            }
-                            Spacer()
-                            Button("Close") { showingDefinition = false }
-                        }
-                        .padding(.bottom, 8)
+                sheetContent
+            }
+        }
+    }
+    
+    // MARK: - Subviews
 
-                        Text("Lookup failed")
-                            .font(.headline)
-                        Text(msg)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                    }
-                    .padding()
-                } else if let entry = dictEntry {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Button(action: { addFromEntry(entry); showingDefinition = false }) {
-                                Image(systemName: "plus.circle.fill").font(.title3)
-                            }
-                            Spacer()
-                            Button(action: { showingDefinition = false }) {
-                                Image(systemName: "xmark.circle.fill").font(.title3)
-                            }
-                        }
-
-                        Text(entry.kanji.isEmpty ? entry.reading : entry.kanji)
-                            .font(.title2).bold()
-                        if !entry.reading.isEmpty {
-                            Text(entry.reading)
+    @ViewBuilder
+    private var dictionarySection: some View {
+        Section("Dictionary") {
+            if searchText.isEmpty {
+                Text("Type to search the dictionary")
+                    .foregroundStyle(.secondary)
+            } else if vm.isLoading {
+                HStack { ProgressView(); Text("Searching…") }
+            } else if let msg = vm.errorMessage {
+                Text(msg).foregroundStyle(.secondary)
+            } else if vm.results.isEmpty {
+                Text("No matches")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(vm.results) { entry in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(displaySurface(for: entry))
                                 .font(.headline)
+                            Text(firstGloss(for: entry))
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
-                        let firstGloss = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
-                        Text(firstGloss)
-                            .font(.body)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button {
+                            addFromEntry(entry)
+                        } label: {
+                            if isSaved(entry) {
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                            } else {
+                                Image(systemName: "plus.circle").foregroundStyle(.tint)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isSaved(entry))
                     }
-                    .padding()
-                    .presentationDetents([.medium, .large])
-                } else {
-                    VStack { Text("No definition found")
-                        Button("Close") { showingDefinition = false }
-                    }
-                    .padding()
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var savedWordsSection: some View {
+        Section("Saved Words") {
+            ForEach(sortedWords) { word in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(word.surface)
+                            .font(.title3)
+                        Text("【\(word.reading)】")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    if !word.meaning.isEmpty {
+                        Text(word.meaning)
+                            .font(.subheadline)
+                    }
+                    if let note = word.note, !note.isEmpty {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    selectedWord = word
+                    showingDefinition = true
+                    Task { await lookup(for: word) }
+                }
+            }
+            .onDelete { offsets in
+                store.delete(at: offsets)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var sheetContent: some View {
+        if isLookingUp {
+            VStack(spacing: 12) {
+                ProgressView("Looking up…")
+                if let w = selectedWord {
+                    Text("\(w.surface)【\(w.reading)】")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding()
+        } else if let msg = lookupError {
+            VStack(spacing: 10) {
+                HStack {
+                    Button(action: {
+                        if let w = selectedWord {
+                            store.add(from: ParsedToken(surface: w.surface, reading: w.reading, meaning: w.meaning))
+                        }
+                        showingDefinition = false
+                    }) {
+                        Image(systemName: "plus.circle.fill").font(.title3)
+                    }
+                    Spacer()
+                    Button("Close") { showingDefinition = false }
+                }
+                .padding(.bottom, 8)
+
+                Text("Lookup failed")
+                    .font(.headline)
+                Text(msg)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+            .padding()
+        } else if let entry = dictEntry {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Button(action: { addFromEntry(entry); showingDefinition = false }) {
+                        Image(systemName: "plus.circle.fill").font(.title3)
+                    }
+                    Spacer()
+                    Button(action: { showingDefinition = false }) {
+                        Image(systemName: "xmark.circle.fill").font(.title3)
+                    }
+                }
+
+                Text(displaySurface(for: entry))
+                    .font(.title2).bold()
+                if !entry.reading.isEmpty {
+                    Text(entry.reading)
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
+                Text(firstGloss(for: entry))
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding()
+            .presentationDetents([.medium, .large])
+        } else {
+            VStack {
+                Text("No definition found")
+                Button("Close") { showingDefinition = false }
+            }
+            .padding()
+        }
+    }
+
+    // MARK: - Helpers
+
+    private var sortedWords: [Word] {
+        store.words.sorted(by: { $0.createdAt > $1.createdAt })
+    }
+
+    private func displaySurface(for entry: DictionaryEntry) -> String {
+        entry.kanji.isEmpty ? entry.reading : entry.kanji
+    }
+
+    private func firstGloss(for entry: DictionaryEntry) -> String {
+        entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
+    }
+
+    private func isSaved(_ entry: DictionaryEntry) -> Bool {
+        let surface = displaySurface(for: entry)
+        return store.words.contains { $0.surface == surface && $0.reading == entry.reading }
     }
     
     private func lookup(for word: Word) async {
