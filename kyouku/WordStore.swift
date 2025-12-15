@@ -1,6 +1,6 @@
 //
 //  WordStore.swift
-//  kyouku
+//  WordStore.swift
 //
 //  Created by Matthew Morrone on 12/9/25.
 //
@@ -17,19 +17,49 @@ final class WordStore: ObservableObject {
     init() {
         load()
     }
-    
-    func add(from token: ParsedToken) {
-        if words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }) {
+
+    /// The one and only “real” add method.
+    /// Requires a non-empty meaning; otherwise it will not add.
+    func add(surface: String, reading: String, meaning: String, note: String? = nil) {
+        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let r = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        let m = meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !s.isEmpty else { return }
+        guard !m.isEmpty else { return }
+
+        if words.contains(where: { $0.surface == s && $0.reading == r }) {
             return
         }
-        
+
         let word = Word(
-            surface: token.surface,
-            reading: token.reading,
-            meaning: token.meaning ?? ""
+            surface: s,
+            reading: r,
+            meaning: m,
+            note: note
         )
         words.append(word)
         save()
+    }
+
+    /// Convenience for dictionary results; funnels into the required add method.
+    func add(entry: DictionaryEntry, note: String? = nil) {
+        let surface = entry.kanji.isEmpty ? entry.reading : entry.kanji
+        let firstGloss = entry.gloss
+            .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init) ?? entry.gloss
+
+        add(surface: surface, reading: entry.reading, meaning: firstGloss, note: note)
+    }
+
+    @available(*, deprecated, message: "Use add(surface:reading:meaning:) or add(entry:) so meaning is always present.")
+    func add(from token: ParsedToken) {
+        guard let meaning = token.meaning, !meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            // Intentionally refuse to add “blank definition” words.
+            return
+        }
+        add(surface: token.surface, reading: token.reading, meaning: meaning, note: nil)
     }
     
     func delete(at offsets: IndexSet) {
@@ -39,6 +69,18 @@ final class WordStore: ObservableObject {
     
     func delete(_ offsets: IndexSet) {
         delete(at: offsets)
+    }
+
+    /// Robust deletion that works even when the UI list is sorted/filtered.
+    func delete(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        words.removeAll { ids.contains($0.id) }
+        save()
+    }
+
+    /// Convenience for deleting a single word by id.
+    func delete(id: UUID) {
+        delete(ids: [id])
     }
     
     func randomWord() -> Word? {

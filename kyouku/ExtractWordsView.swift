@@ -19,10 +19,11 @@ struct ExtractWordsView: View {
                 HStack(spacing: 12) {
                     FuriganaTextView(token: token)
                     Spacer()
+
                     Button {
-                        if !store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }) {
-                            store.add(from: token)
-                        }
+                        selectedToken = token
+                        showingDefinition = true
+                        Task { await lookupDefinitions(for: token) }
                     } label: {
                         if store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }) {
                             Image(systemName: "checkmark.circle.fill")
@@ -53,9 +54,8 @@ struct ExtractWordsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Button(action: {
-                            if let token = selectedToken,
-                               !store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }) {
-                                store.add(from: token)
+                            if let token = selectedToken {
+                                addFromSheetRequiringMeaning(token)
                             }
                             showingDefinition = false
                         }) {
@@ -94,6 +94,23 @@ struct ExtractWordsView: View {
                 Text("No selection").padding()
             }
         }
+    }
+
+    /// Enforces the invariant: we only add if we have a meaning.
+    private func addFromSheetRequiringMeaning(_ token: ParsedToken) {
+        // Prefer dictionary result (the thing user is looking at).
+        if let first = dictResults.first {
+            store.add(entry: first)
+            return
+        }
+
+        // If for some reason dict lookup failed but the token already has meaning, allow it.
+        if let meaning = token.meaning, !meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            store.add(surface: token.surface, reading: token.reading, meaning: meaning)
+            return
+        }
+
+        // Otherwise: do nothing (by design, since meaning is required).
     }
 
     private func lookupDefinitions(for token: ParsedToken) async {

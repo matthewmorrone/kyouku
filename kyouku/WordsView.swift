@@ -80,7 +80,7 @@ struct WordsView: View {
                         }
                         Spacer()
                         Button {
-                            addFromEntry(entry)
+                            store.add(entry: entry)
                         } label: {
                             if isSaved(entry) {
                                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -126,9 +126,7 @@ struct WordsView: View {
                     Task { await lookup(for: word) }
                 }
             }
-            .onDelete { offsets in
-                store.delete(at: offsets)
-            }
+            .onDelete(perform: deleteSavedWords)
         }
     }
 
@@ -148,8 +146,10 @@ struct WordsView: View {
             VStack(spacing: 10) {
                 HStack {
                     Button(action: {
+                        // Selected word already has meaning (saved words require it),
+                        // but route through the single add method anyway.
                         if let w = selectedWord {
-                            store.add(from: ParsedToken(surface: w.surface, reading: w.reading, meaning: w.meaning))
+                            store.add(surface: w.surface, reading: w.reading, meaning: w.meaning)
                         }
                         showingDefinition = false
                     }) {
@@ -172,7 +172,7 @@ struct WordsView: View {
         } else if let entry = dictEntry {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Button(action: { addFromEntry(entry); showingDefinition = false }) {
+                    Button(action: { store.add(entry: entry); showingDefinition = false }) {
                         Image(systemName: "plus.circle.fill").font(.title3)
                     }
                     Spacer()
@@ -209,6 +209,11 @@ struct WordsView: View {
         store.words.sorted(by: { $0.createdAt > $1.createdAt })
     }
 
+    private func deleteSavedWords(at offsets: IndexSet) {
+        let ids = Set(offsets.map { sortedWords[$0].id })
+        store.delete(ids: ids)
+    }
+
     private func displaySurface(for entry: DictionaryEntry) -> String {
         entry.kanji.isEmpty ? entry.reading : entry.kanji
     }
@@ -243,14 +248,6 @@ struct WordsView: View {
                 isLookingUp = false
             }
         }
-    }
-    
-    private func addFromEntry(_ entry: DictionaryEntry) {
-        let surface = entry.kanji.isEmpty ? entry.reading : entry.kanji
-        let reading = entry.reading
-        let firstGloss = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
-        let token = ParsedToken(surface: surface, reading: reading, meaning: firstGloss)
-        store.add(from: token)
     }
 }
 
