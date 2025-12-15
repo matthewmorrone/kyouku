@@ -42,28 +42,9 @@ actor DictionarySQLiteStore {
         self.db = nil
     }
 
-    private func ensureOpen() throws {
-        if db != nil {
-            return
-        }
-
-        guard let url = Bundle.main.url(forResource: "jmdict", withExtension: "sqlite3") else {
-            throw DictionarySQLiteError.resourceNotFound
-        }
-
-        var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-
-        if sqlite3_open_v2(url.path, &handle, flags, nil) != SQLITE_OK {
-            let msg = String(cString: sqlite3_errmsg(handle))
-            sqlite3_close(handle)
-            throw DictionarySQLiteError.openFailed(msg)
-        }
-
-        self.db = handle
-    }
-
-    func lookup(term: String, limit: Int = 30) throws -> [DictionaryEntry] {
+    // Keep the core implementation synchronous inside the actor.
+    // We'll expose an async wrapper for call sites.
+    private func lookupSync(term: String, limit: Int = 30) throws -> [DictionaryEntry] {
         try ensureOpen()
 
         guard db != nil else {
@@ -98,6 +79,36 @@ actor DictionarySQLiteStore {
         // 3) English gloss search (case-insensitive substring)
         results = try selectEntriesByGloss(containing: trimmed, limit: limit)
         return results
+    }
+
+    /// Public async API used by the rest of the app.
+    /// This matches the existing `try await DictionarySQLiteStore.shared.lookup(...)` call sites.
+    func lookup(term: String, limit: Int = 30) async throws -> [DictionaryEntry] {
+        // Actor isolation ensures safe access to `db`, but the SQL work can still be heavy.
+        // We keep the work inside the actor; since callers are often on @MainActor,
+        // the `await` prevents blocking UI.
+        try lookupSync(term: term, limit: limit)
+    }
+
+    private func ensureOpen() throws {
+        if db != nil {
+            return
+        }
+
+        guard let url = Bundle.main.url(forResource: "jmdict", withExtension: "sqlite3") else {
+            throw DictionarySQLiteError.resourceNotFound
+        }
+
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+
+        if sqlite3_open_v2(url.path, &handle, flags, nil) != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(handle))
+            sqlite3_close(handle)
+            throw DictionarySQLiteError.openFailed(msg)
+        }
+
+        self.db = handle
     }
 
     private func selectEntries(matching term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -259,55 +270,55 @@ actor DictionarySQLiteStore {
         var s = input.lowercased()
         // Replace macrons with typical IME equivalents
         s = s.replacingOccurrences(of: "ā", with: "aa")
-             .replacingOccurrences(of: "ī", with: "ii")
-             .replacingOccurrences(of: "ū", with: "uu")
-             .replacingOccurrences(of: "ē", with: "ee")
-             .replacingOccurrences(of: "ō", with: "ou")
+            .replacingOccurrences(of: "ī", with: "ii")
+            .replacingOccurrences(of: "ū", with: "uu")
+            .replacingOccurrences(of: "ē", with: "ee")
+            .replacingOccurrences(of: "ō", with: "ou")
         // Remove spaces and hyphens
         s = s.replacingOccurrences(of: " ", with: "")
-             .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "-", with: "")
 
         // Mappings inspired by iOS romaji IME
-        let tri: [String:String] = [
-            "kya":"きゃ","kyu":"きゅ","kyo":"きょ",
-            "gya":"ぎゃ","gyu":"ぎゅ","gyo":"ぎょ",
-            "sha":"しゃ","shu":"しゅ","sho":"しょ",
-            "sya":"しゃ","syu":"しゅ","syo":"しょ",
-            "ja":"じゃ","ju":"じゅ","jo":"じょ",
-            "jya":"じゃ","jyu":"じゅ","jyo":"じょ",
-            "zya":"じゃ","zyu":"じゅ","zyo":"じょ",
-            "cha":"ちゃ","chu":"ちゅ","cho":"ちょ",
-            "cya":"ちゃ","cyu":"ちゅ","cyo":"ちょ",
-            "tya":"ちゃ","tyu":"ちゅ","tyo":"ちょ",
-            "nya":"にゃ","nyu":"にゅ","nyo":"にょ",
-            "hya":"ひゃ","hyu":"ひゅ","hyo":"ひょ",
-            "mya":"みゃ","myu":"みゅ","myo":"みょ",
-            "rya":"りゃ","ryu":"りゅ","ryo":"りょ",
-            "bya":"びゃ","byu":"びゅ","byo":"びょ",
-            "pya":"ぴゃ","pyu":"ぴゅ","pyo":"ぴょ",
-            "dya":"ぢゃ","dyu":"ぢゅ","dyo":"ぢょ",
-            "she":"しぇ","che":"ちぇ","je":"じぇ"
+        let tri: [String: String] = [
+            "kya": "きゃ", "kyu": "きゅ", "kyo": "きょ",
+            "gya": "ぎゃ", "gyu": "ぎゅ", "gyo": "ぎょ",
+            "sha": "しゃ", "shu": "しゅ", "sho": "しょ",
+            "sya": "しゃ", "syu": "しゅ", "syo": "しょ",
+            "ja": "じゃ", "ju": "じゅ", "jo": "じょ",
+            "jya": "じゃ", "jyu": "じゅ", "jyo": "じょ",
+            "zya": "じゃ", "zyu": "じゅ", "zyo": "じょ",
+            "cha": "ちゃ", "chu": "ちゅ", "cho": "ちょ",
+            "cya": "ちゃ", "cyu": "ちゅ", "cyo": "ちょ",
+            "tya": "ちゃ", "tyu": "ちゅ", "tyo": "ちょ",
+            "nya": "にゃ", "nyu": "にゅ", "nyo": "にょ",
+            "hya": "ひゃ", "hyu": "ひゅ", "hyo": "ひょ",
+            "mya": "みゃ", "myu": "みゅ", "myo": "みょ",
+            "rya": "りゃ", "ryu": "りゅ", "ryo": "りょ",
+            "bya": "びゃ", "byu": "びゅ", "byo": "びょ",
+            "pya": "ぴゃ", "pyu": "ぴゅ", "pyo": "ぴょ",
+            "dya": "ぢゃ", "dyu": "ぢゅ", "dyo": "ぢょ",
+            "she": "しぇ", "che": "ちぇ", "je": "じぇ"
         ]
-        let di: [String:String] = [
+        let di: [String: String] = [
             // Core syllables
-            "ka":"か","ki":"き","ku":"く","ke":"け","ko":"こ",
-            "ga":"が","gi":"ぎ","gu":"ぐ","ge":"げ","go":"ご",
-            "sa":"さ","si":"し","su":"す","se":"せ","so":"そ",
-            "za":"ざ","zi":"じ","zu":"ず","ze":"ぜ","zo":"ぞ",
-            "ji":"じ",
-            "ta":"た","ti":"ち","tu":"つ","te":"て","to":"と",
-            "da":"だ","di":"ぢ","du":"づ","de":"で","do":"ど",
-            "na":"な","ni":"に","nu":"ぬ","ne":"ね","no":"の",
-            "ha":"は","hi":"ひ","hu":"ふ","he":"へ","ho":"ほ",
-            "fa":"ふぁ","fi":"ふぃ","fe":"ふぇ","fo":"ふぉ",
-            "ba":"ば","bi":"び","bu":"ぶ","be":"べ","bo":"ぼ",
-            "pa":"ぱ","pi":"ぴ","pu":"ぷ","pe":"ぺ","po":"ぽ",
-            "ma":"ま","mi":"み","mu":"む","me":"め","mo":"も",
-            "ya":"や","yu":"ゆ","yo":"よ",
-            "ra":"ら","ri":"り","ru":"る","re":"れ","ro":"ろ",
-            "wa":"わ","wo":"を","we":"うぇ","wi":"うぃ",
+            "ka": "か", "ki": "き", "ku": "く", "ke": "け", "ko": "こ",
+            "ga": "が", "gi": "ぎ", "gu": "ぐ", "ge": "げ", "go": "ご",
+            "sa": "さ", "si": "し", "su": "す", "se": "せ", "so": "そ",
+            "za": "ざ", "zi": "じ", "zu": "ず", "ze": "ぜ", "zo": "ぞ",
+            "ji": "じ",
+            "ta": "た", "ti": "ち", "tu": "つ", "te": "て", "to": "と",
+            "da": "だ", "di": "ぢ", "du": "づ", "de": "で", "do": "ど",
+            "na": "な", "ni": "に", "nu": "ぬ", "ne": "ね", "no": "の",
+            "ha": "は", "hi": "ひ", "hu": "ふ", "he": "へ", "ho": "ほ",
+            "fa": "ふぁ", "fi": "ふぃ", "fe": "ふぇ", "fo": "ふぉ",
+            "ba": "ば", "bi": "び", "bu": "ぶ", "be": "べ", "bo": "ぼ",
+            "pa": "ぱ", "pi": "ぴ", "pu": "ぷ", "pe": "ぺ", "po": "ぽ",
+            "ma": "ま", "mi": "み", "mu": "む", "me": "め", "mo": "も",
+            "ya": "や", "yu": "ゆ", "yo": "よ",
+            "ra": "ら", "ri": "り", "ru": "る", "re": "れ", "ro": "ろ",
+            "wa": "わ", "wo": "を", "we": "うぇ", "wi": "うぃ"
         ]
-        let vowels: Set<Character> = ["a","i","u","e","o"]
+        let vowels: Set<Character> = ["a", "i", "u", "e", "o"]
         let consonants: Set<Character> = Set("bcdfghjklmnpqrstvwxyz")
 
         var out = ""
@@ -315,20 +326,20 @@ actor DictionarySQLiteStore {
         var i = 0
         while i < chars.count {
             // handle n'
-            if chars[i] == "n" && i + 1 < chars.count && chars[i+1] == "'" {
+            if chars[i] == "n" && i + 1 < chars.count && chars[i + 1] == "'" {
                 out += "ん"; i += 2; continue
             }
             // sokuon for double consonants (except n)
             if i + 1 < chars.count {
                 let c = chars[i]
-                let n = chars[i+1]
+                let n = chars[i + 1]
                 if c == n && consonants.contains(c) && c != "n" {
                     out += "っ"; i += 1; continue
                 }
             }
             // Try tri-graph
             if i + 2 < chars.count {
-                let key = String(chars[i...i+2])
+                let key = String(chars[i...i + 2])
                 if let kana = tri[key] {
                     out += kana; i += 3; continue
                 }
@@ -336,14 +347,14 @@ actor DictionarySQLiteStore {
             // Special handling for standalone 'n'
             if chars[i] == "n" {
                 if i + 1 >= chars.count { out += "ん"; i += 1; continue }
-                let next = chars[i+1]
+                let next = chars[i + 1]
                 if next == "n" { out += "ん"; i += 2; continue }
                 if !vowels.contains(next) && next != "y" { out += "ん"; i += 1; continue }
                 // else fallthrough to digraph handling (na, ni, nya, ...)
             }
             // Try di-graph
             if i + 1 < chars.count {
-                let key = String(chars[i...i+1])
+                let key = String(chars[i...i + 1])
                 if let kana = di[key] {
                     out += kana; i += 2; continue
                 }

@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-struct SavedWordsView: View {
+struct WordsView: View {
     @EnvironmentObject var store: WordStore
     @State private var searchText: String = ""
     @StateObject private var vm = DictionaryLookupViewModel()
@@ -21,8 +21,11 @@ struct SavedWordsView: View {
     var body: some View {
         NavigationStack {
             List {
-                dictionarySection
-                savedWordsSection
+                if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    savedWordsSection
+                } else {
+                    dictionarySection
+                }
             }
             .navigationTitle("Words")
             .toolbar {
@@ -58,10 +61,7 @@ struct SavedWordsView: View {
     @ViewBuilder
     private var dictionarySection: some View {
         Section("Dictionary") {
-            if searchText.isEmpty {
-                Text("Type to search the dictionary")
-                    .foregroundStyle(.secondary)
-            } else if vm.isLoading {
+            if vm.isLoading {
                 HStack { ProgressView(); Text("Searching…") }
             } else if let msg = vm.errorMessage {
                 Text(msg).foregroundStyle(.secondary)

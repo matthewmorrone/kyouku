@@ -24,7 +24,7 @@ struct ContentView: View {
                 }
                 .tag(AppTab.notes)
 
-            SavedWordsView()
+            WordsView()
                 .tabItem {
                     Label("Words", systemImage: "checklist")
                 }
