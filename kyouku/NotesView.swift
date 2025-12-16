@@ -87,6 +87,7 @@ struct NoteDetailView: View {
     @State private var dictResults: [DictionaryEntry] = []
     @State private var isLookingUp = false
     @State private var lookupError: String? = nil
+    @State private var segVM: SegmentedTextViewModel? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -112,6 +113,19 @@ struct NoteDetailView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(UIColor.secondarySystemBackground))
             .cornerRadius(8)
+
+            if let segVM {
+                SegmentedTextView(viewModel: segVM)
+                    .onChange(of: segVM.selected) { _, newSelected in
+                        guard let selected = newSelected else { return }
+                        let token = ParsedToken(surface: selected.surface, reading: "", meaning: "")
+                        selectedToken = token
+                        showingDefinition = true
+                        Task {
+                            await lookupDefinitions(for: token)
+                        }
+                    }
+            }
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -217,6 +231,37 @@ struct NoteDetailView: View {
             editableText = note.text
             isEditing = editableText.isEmpty
             if isEditing { showFurigana = false }
+
+            let initialText = editableText.isEmpty ? note.text : editableText
+            if let trie = JMdictTrieCache.shared {
+                if segVM == nil {
+                    segVM = SegmentedTextViewModel(text: initialText, trie: trie)
+                } else {
+                    segVM?.trie = trie
+                    segVM?.text = initialText
+                    segVM?.recomputeSegments()
+                }
+            } else {
+                Task {
+                    let trie = await JMdictTrieProvider.shared.getTrie() ?? CustomTrieProvider.makeTrie()
+                    if let trie {
+                        await MainActor.run {
+                            JMdictTrieCache.shared = trie
+                            if segVM == nil {
+                                segVM = SegmentedTextViewModel(text: initialText, trie: trie)
+                            } else {
+                                segVM?.trie = trie
+                                segVM?.text = initialText
+                                segVM?.recomputeSegments()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .onChange(of: editableText) { _, newValue in
+            segVM?.text = newValue
+            segVM?.recomputeSegments()
         }
     }
 

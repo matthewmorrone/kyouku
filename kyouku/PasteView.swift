@@ -36,6 +36,8 @@ struct PasteView: View {
     
     @State private var foregroundCancellable: Any? = nil
 
+    @State private var isTrieReady: Bool = true
+
     @AppStorage("readingTextSize") private var textSize: Double = 17
     @AppStorage("readingFuriganaSize") private var furiganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var lineSpacing: Double = 4
@@ -43,117 +45,126 @@ struct PasteView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                
-                EditorContainer(
-                    text: $inputText,
-                    showFurigana: showFurigana,
-                    isEditing: isEditing,
-                    textSize: textSize,
-                    furiganaSize: furiganaSize,
-                    lineSpacing: lineSpacing,
-                    furiganaGap: furiganaGap,
-                    highlightedToken: selectedToken,
-                    onTokenTap: handleTokenTap
-                )
-                
-                HStack(alignment: .center, spacing: 8) {
-                    ControlCell {
-                        Button { hideKeyboard() } label: {
-                            Image(systemName: "keyboard.chevron.compact.down").font(.title2)
-                        }
-                        .accessibilityLabel("Hide keyboard")
-                    }
-
-                    ControlCell {
-                        Button(action: pasteFromClipboard) {
-                            Image(systemName: "doc.on.clipboard").font(.title2)
-                        }
-                        .accessibilityLabel("Paste")
-                    }
-
-                    ControlCell {
-                        Button(action: extractWords) {
-                            Image(systemName: "arrowshape.turn.up.right").font(.title2)
-                        }
-                        .accessibilityLabel("Extract Words")
-                        .disabled(isEditing)
-                    }
-
-                    ControlCell {
-                        Button(action: saveNote) {
-                            Image(systemName: "square.and.pencil").font(.title2)
-                        }
-                        .accessibilityLabel("Save")
-                    }
-
-                    ControlCell {
-                        Toggle(isOn: $isEditing) {
-                            if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
-                                Image(systemName: "character.cursor.ibeam.ja")
-                            } else {
-                                Image(systemName: "character.cursor.ibeam")
+            if isTrieReady {
+                VStack(spacing: 16) {
+                    
+                    EditorContainer(
+                        text: $inputText,
+                        showFurigana: showFurigana,
+                        isEditing: isEditing,
+                        textSize: textSize,
+                        furiganaSize: furiganaSize,
+                        lineSpacing: lineSpacing,
+                        furiganaGap: furiganaGap,
+                        highlightedToken: selectedToken,
+                        onTokenTap: handleTokenTap
+                    )
+                    
+                    HStack(alignment: .center, spacing: 8) {
+                        ControlCell {
+                            Button { hideKeyboard() } label: {
+                                Image(systemName: "keyboard.chevron.compact.down").font(.title2)
                             }
+                            .accessibilityLabel("Hide keyboard")
                         }
-                        .labelsHidden()
-                        .toggleStyle(.button)
-                        .tint(.accentColor)
-                        .font(.title2)
-                        .accessibilityLabel("Edit mode")
-                    }
 
-                    ControlCell {
-                        Toggle(isOn: $showFurigana) {
-                            Image(showFurigana ? Self.furiganaSymbolOn : Self.furiganaSymbolOff)
+                        ControlCell {
+                            Button(action: pasteFromClipboard) {
+                                Image(systemName: "doc.on.clipboard").font(.title2)
+                            }
+                            .accessibilityLabel("Paste")
                         }
-                        .labelsHidden()
-                        .toggleStyle(.button)
-                        .tint(.accentColor)
-                        .font(.title2)
-                        .disabled(isEditing)
-                        .accessibilityLabel("Show Furigana")
-                    }
 
-                    ControlCell {
-                        Button(action: clearInput) {
-                            Image(systemName: "trash").font(.title2)
+                        ControlCell {
+                            Button(action: extractWords) {
+                                Image(systemName: "arrowshape.turn.up.right").font(.title2)
+                            }
+                            .accessibilityLabel("Extract Words")
+                            .disabled(isEditing)
                         }
-                        .accessibilityLabel("Clear")
+
+                        ControlCell {
+                            Button(action: saveNote) {
+                                Image(systemName: "square.and.pencil").font(.title2)
+                            }
+                            .accessibilityLabel("Save")
+                        }
+
+                        ControlCell {
+                            Toggle(isOn: $isEditing) {
+                                if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
+                                    Image(systemName: "character.cursor.ibeam.ja")
+                                } else {
+                                    Image(systemName: "character.cursor.ibeam")
+                                }
+                            }
+                            .labelsHidden()
+                            .toggleStyle(.button)
+                            .tint(.accentColor)
+                            .font(.title2)
+                            .accessibilityLabel("Edit mode")
+                        }
+
+                        ControlCell {
+                            Toggle(isOn: $showFurigana) {
+                                Image(showFurigana ? Self.furiganaSymbolOn : Self.furiganaSymbolOff)
+                            }
+                            .labelsHidden()
+                            .toggleStyle(.button)
+                            .tint(.accentColor)
+                            .font(.title2)
+                            .disabled(isEditing)
+                            .accessibilityLabel("Show Furigana")
+                        }
+
+                        ControlCell {
+                            Button(action: clearInput) {
+                                Image(systemName: "trash").font(.title2)
+                            }
+                            .accessibilityLabel("Clear")
+                        }
                     }
+                    .controlSize(.small)
+                    .padding(.horizontal)
+
                 }
-                .controlSize(.small)
-                .padding(.horizontal)
-
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 24) }
-            .sheet(isPresented: $showingDefinition) {
-                DefinitionSheetContent(
-                    selectedToken: $selectedToken,
-                    showingDefinition: $showingDefinition,
-                    dictResults: $dictResults,
-                    isLookingUp: $isLookingUp,
-                    lookupError: $lookupError,
-                    selectedEntryIndex: $selectedEntryIndex,
-                    showAllDefinitions: $showAllDefinitions,
-                    onAdd: onAddDefinition
-                )
-            }
-            .navigationDestination(isPresented: $goExtract) {
-                ExtractWordsView(text: inputText)
-            }
-            .navigationTitle(currentNote != nil ? (currentNote!.title ?? "Note") : "")
-            .navigationBarTitleDisplayMode(currentNote != nil ? .inline : .automatic)
-            .onAppear(perform: onAppearHandler)
-            .onDisappear {
-                NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
-                lookupTask?.cancel()
-            }
-            .onChange(of: inputText) { _, newValue in
-                syncNoteForInputChange(newValue)
-            }
-            .onChange(of: isEditing) { _, nowEditing in
-                onEditingChanged(nowEditing)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 24) }
+                .sheet(isPresented: $showingDefinition) {
+                    DefinitionSheetContent(
+                        selectedToken: $selectedToken,
+                        showingDefinition: $showingDefinition,
+                        dictResults: $dictResults,
+                        isLookingUp: $isLookingUp,
+                        lookupError: $lookupError,
+                        selectedEntryIndex: $selectedEntryIndex,
+                        showAllDefinitions: $showAllDefinitions,
+                        onAdd: onAddDefinition
+                    )
+                }
+                .navigationDestination(isPresented: $goExtract) {
+                    ExtractWordsView(text: inputText)
+                }
+                .navigationTitle(currentNote?.title ?? "Paste")
+                .navigationBarTitleDisplayMode(.inline)
+                .onAppear(perform: onAppearHandler)
+                .onDisappear {
+                    NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+                    lookupTask?.cancel()
+                }
+                .onChange(of: inputText) { _, newValue in
+                    syncNoteForInputChange(newValue)
+                    PasteBufferStore.save(newValue)
+                }
+                .onChange(of: isEditing) { _, nowEditing in
+                    onEditingChanged(nowEditing)
+                }
+            } else {
+                VStack(spacing: 12) {
+                    ProgressView("Preparing dictionary…")
+                    Text("Loading tokenizer…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
@@ -258,6 +269,20 @@ struct PasteView: View {
     }
 
     private func onAppearHandler() {
+        if JMdictTrieCache.shared == nil {
+            // Render UI immediately; build trie lazily in background
+            isTrieReady = true
+            Task {
+                let trie = await JMdictTrieProvider.shared.getTrie() ?? CustomTrieProvider.makeTrie()
+                if let trie {
+                    await MainActor.run {
+                        JMdictTrieCache.shared = trie
+                    }
+                }
+            }
+        } else {
+            isTrieReady = true
+        }
         if let note = router.noteToOpen {
             currentNote = note
             inputText = note.text
@@ -271,6 +296,15 @@ struct PasteView: View {
                 isEditing = true
             }
             hasInitialized = true
+        }
+        if currentNote == nil && inputText.isEmpty {
+            let persisted = PasteBufferStore.load()
+            if !persisted.isEmpty {
+                inputText = persisted
+                // If we restored text, default to viewing mode (furigana on) unless user starts editing
+                isEditing = false
+                showFurigana = true
+            }
         }
         ingestSharedInbox()
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in

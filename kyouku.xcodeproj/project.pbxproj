@@ -18,6 +18,8 @@
 		E392E5542EE816450069963A /* Mecab-Swift in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5532EE816450069963A /* Mecab-Swift */; };
 		E392E5562EE816450069963A /* StringTools in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5552EE816450069963A /* StringTools */; };
 		E3C5BDBB2EEB022800CD4F47 /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E3C5BDB12EEB022800CD4F47 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		E3E658A12EF1E184004F13BE /* PasteBufferStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3E658A02EF1E184004F13BE /* PasteBufferStore.swift */; };
+		E3E658A32EF1E18C004F13BE /* TrieBootstrapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3E658A22EF1E18C004F13BE /* TrieBootstrapper.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,6 +55,8 @@
 		E30C34E52EE9117E008118E4 /* KyoukuWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KyoukuWidget.swift; sourceTree = "<group>"; };
 		E392E52A2EE804A50069963A /* kyouku.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = kyouku.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E3C5BDB12EEB022800CD4F47 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		E3E658A02EF1E184004F13BE /* PasteBufferStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasteBufferStore.swift; sourceTree = "<group>"; };
+		E3E658A22EF1E18C004F13BE /* TrieBootstrapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrieBootstrapper.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -115,6 +119,8 @@
 				E30C34E12EE91171008118E4 /* AppGroup.swift */,
 				E30C34E32EE91175008118E4 /* SharedWordsStore.swift */,
 				E30C34E52EE9117E008118E4 /* KyoukuWidget.swift */,
+				E3E658A02EF1E184004F13BE /* PasteBufferStore.swift */,
+				E3E658A22EF1E18C004F13BE /* TrieBootstrapper.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -243,8 +249,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E3E658A32EF1E18C004F13BE /* TrieBootstrapper.swift in Sources */,
 				E30C34E22EE91171008118E4 /* AppGroup.swift in Sources */,
 				E30C34E62EE9117E008118E4 /* KyoukuWidget.swift in Sources */,
+				E3E658A12EF1E184004F13BE /* PasteBufferStore.swift in Sources */,
 				E30C34E02EE8EB37008118E4 /* AppRouter.swift in Sources */,
 				E30C34DE2EE8BF28008118E4 /* ReviewPersistence.swift in Sources */,
 				E30C34DC2EE8BE1B008118E4 /* FlashcardsView.swift in Sources */,

@@ -90,6 +90,30 @@ actor DictionarySQLiteStore {
         try lookupSync(term: term, limit: limit)
     }
 
+    func listAllSurfaceForms() async throws -> [String] {
+        try ensureOpen()
+        guard let db else { return [] }
+        let sql = """
+        SELECT text FROM kanji
+        UNION
+        SELECT text FROM readings;
+        """
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let s = String(cString: sqlite3_column_text(stmt, 0))
+            if s.isEmpty == false {
+                out.append(s)
+            }
+        }
+        return out
+    }
+
     private func ensureOpen() throws {
         if db != nil {
             return

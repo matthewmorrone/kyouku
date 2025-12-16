@@ -103,6 +103,9 @@ struct FuriganaTextEditor: UIViewRepresentable {
         private var lastAppliedBuildKey: String? = nil
         private var pendingBuildKey: String? = nil
         private var lastBuildKey: String? = nil
+        
+        private var cachedSegments: [Segment] = []
+        private var cachedSegmentsKey: String = ""
 
         init(_ parent: FuriganaTextEditor) {
             self.parent = parent
@@ -117,7 +120,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
         // Update helper to rebuild attributed or plain text while preserving selection
         func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool, isEditable: Bool, allowTokenTap: Bool) {
-            tapRecognizer?.isEnabled = allowTokenTap
+            tapRecognizer?.isEnabled = allowTokenTap && showFurigana && !isEditable
 
             // Clear highlight when token taps are disabled or furigana is off
             if !showFurigana || !allowTokenTap {
@@ -165,18 +168,28 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 let work = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
                     let attributed: NSAttributedString
+                    let segs = self.segments(for: currentText)
+                    let segmentsArg: [Segment]? = segs.isEmpty ? nil : segs
                     if let base = base, let ruby = ruby, let spacing = spacing {
                         attributed = JapaneseFuriganaBuilder.buildAttributedText(
                             text: currentText,
                             showFurigana: true,
                             baseFontSize: CGFloat(base),
                             rubyFontSize: CGFloat(ruby),
-                            lineSpacing: CGFloat(spacing)
+                            lineSpacing: CGFloat(spacing),
+                            segments: segmentsArg
                         )
                     } else {
-                        attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true)
+                        if let segsNonEmpty = segmentsArg {
+                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, segments: segsNonEmpty)
+                        } else {
+                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true)
+                        }
                     }
                     let mutable = NSMutableAttributedString(attributedString: attributed)
+                    if !isEditable {
+                        applySegmentShading(to: mutable, baseText: currentText)
+                    }
                     if let hr = hr, hr.location != NSNotFound, hr.location + hr.length <= mutable.length {
                         mutable.addAttribute(.backgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.3), range: hr)
                     }
@@ -218,10 +231,6 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 buildWorkItem = work
                 DispatchQueue.global(qos: .userInitiated).async(execute: work)
             } else {
-                // Plain text mode: only assign if changed
-                if textView.text != text {
-                    textView.text = text
-                }
                 textView.textColor = .label
 
                 let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
@@ -229,11 +238,27 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 let baseSize = defaults.object(forKey: "readingTextSize") as? Double ?? Double(baseDefault)
                 let effectiveBaseSize = parent.baseFontSize ?? baseSize
                 let desiredFont = UIFont.systemFont(ofSize: CGFloat(effectiveBaseSize))
-                if textView.font?.pointSize != desiredFont.pointSize || textView.font?.fontName != desiredFont.fontName {
-                    textView.font = desiredFont
+
+                if isEditable {
+                    if textView.text != text {
+                        textView.text = text
+                    }
+                    if textView.font?.pointSize != desiredFont.pointSize || textView.font?.fontName != desiredFont.fontName {
+                        textView.font = desiredFont
+                    }
+                    textView.isEditable = true
+                    highlightedRange = nil
+                } else {
+                    let baseAttributes: [NSAttributedString.Key: Any] = [
+                        .font: desiredFont,
+                        .foregroundColor: UIColor.label
+                    ]
+                    let mutable = NSMutableAttributedString(string: text, attributes: baseAttributes)
+                    applySegmentShading(to: mutable, baseText: text)
+                    textView.attributedText = mutable
+                    textView.isEditable = false
+                    highlightedRange = nil
                 }
-                textView.isEditable = isEditable
-                highlightedRange = nil
             }
 
             // Restore selection if still valid
@@ -270,17 +295,15 @@ struct FuriganaTextEditor: UIViewRepresentable {
         }
 
         private func lookupToken(at charIndex: Int, in fullText: String, textView: UITextView) {
-            // Tokenize and find the annotation that contains the tapped index
-            guard let tokenizer = try? Tokenizer(dictionary: IPADic()) else { return }
-            let annotations = tokenizer.tokenize(text: fullText)
-
-            for ann in annotations {
-                let ns = NSRange(ann.range, in: fullText)
-                if ns.location != NSNotFound,
-                   charIndex >= ns.location,
-                   charIndex < ns.location + ns.length {
-                    let surface = String(fullText[ann.range])
-                    let reading = ann.reading
+            let segments = segments(for: fullText)
+            // Map the tapped UTF-16 index to a String.Index for boundary checks
+            guard let tappedIndex = fullText.index(fullText.startIndex, offsetByUTF16: charIndex) else { return }
+            for seg in segments {
+                if seg.range.contains(tappedIndex) {
+                    let ns = NSRange(seg.range, in: fullText)
+                    let surface = seg.surface
+                    // Use MeCab only to compute reading for this surface
+                    let reading = SegmentReadingAttacher.reading(for: surface, tokenizer: TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic())))
                     let token = ParsedToken(surface: surface, reading: reading, meaning: nil)
                     highlightedRange = ns
                     updateTextView(textView, with: parent.text, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap)
@@ -290,6 +313,36 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 }
             }
         }
+
+        private func applySegmentShading(to attributed: NSMutableAttributedString, baseText: String) {
+            let segments = segments(for: baseText)
+            for (i, seg) in segments.enumerated() {
+                let nsRange = NSRange(seg.range, in: baseText)
+                if nsRange.location == NSNotFound { continue }
+                let color: UIColor = (i % 2 == 0)
+                    ? UIColor.systemMint.withAlphaComponent(0.24)
+                    : UIColor.systemYellow.withAlphaComponent(0.30)
+                attributed.addAttribute(.backgroundColor, value: color, range: nsRange)
+            }
+        }
+        
+        private func segments(for text: String) -> [Segment] {
+            guard let trie = JMdictTrieCache.shared else { return [] }
+            let key = text
+            if key == cachedSegmentsKey { return cachedSegments }
+            let segs = DictionarySegmenter.segment(text: text, trie: trie)
+            cachedSegments = segs
+            cachedSegmentsKey = key
+            return segs
+        }
     }
 }
 
+private extension String {
+    func index(_ i: Index, offsetByUTF16 offset: Int) -> Index? {
+        let utf16 = self.utf16
+        guard let start = utf16.index(utf16.startIndex, offsetBy: offset, limitedBy: utf16.endIndex) else { return nil }
+        guard let scalarIndex = String.Index(start, within: self) else { return nil }
+        return scalarIndex
+    }
+}

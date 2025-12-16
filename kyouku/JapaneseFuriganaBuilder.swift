@@ -41,7 +41,8 @@ enum JapaneseFuriganaBuilder {
         showFurigana: Bool,
         baseFontSize: CGFloat,
         rubyFontSize: CGFloat,
-        lineSpacing: CGFloat
+        lineSpacing: CGFloat,
+        segments: [Segment]? = nil
     ) -> NSAttributedString {
         let baseFont = UIFont.systemFont(ofSize: baseFontSize)
 
@@ -57,28 +58,56 @@ enum JapaneseFuriganaBuilder {
         // Begin with plain text
         let attributed = NSMutableAttributedString(string: text, attributes: baseAttributes)
 
-        guard showFurigana, let tokenizer = tokenizer() else {
+        guard showFurigana else {
             return attributed
         }
 
-        let annotations = tokenizer.tokenize(text: text)
-
         let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
+        var rubyTargets: [(NSRange, String)] = []
 
-        for ann in annotations {
-            let surface = String(text[ann.range])
-            // Skip if no kanji in the surface
-            let hasKanji = surface.contains { ch in
-                ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
+        if let fixedSegments = segments {
+            // Use caller-provided segments to keep boundaries stable; MeCab only for readings
+            if let mecab = TokenizerFactory.make() ?? tokenizer() {
+                let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: fixedSegments, tokenizer: mecab)
+                for item in enriched {
+                    if !item.segment.surface.containsKanji { continue }
+                    let reading = item.reading
+                    if reading.isEmpty || reading == item.segment.surface { continue }
+                    let nsRange = NSRange(item.segment.range, in: text)
+                    if nsRange.location != NSNotFound {
+                        rubyTargets.append((nsRange, toHiragana(reading)))
+                    }
+                }
             }
-            if !hasKanji { continue }
-            // Skip if tokenizer didn't provide a reading
-            if ann.reading.isEmpty { continue }
+        } else {
+            if let trie = JMdictTrieCache.shared {
+                let mecab = TokenizerFactory.make() ?? tokenizer()
+                if let mecab {
+                    let segments = DictionarySegmenter.segment(text: text, trie: trie)
+                    let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: segments, tokenizer: mecab)
+                    for item in enriched {
+                        if !item.segment.surface.containsKanji { continue }
+                        let reading = item.reading
+                        if reading.isEmpty || reading == item.segment.surface { continue }
+                        let nsRange = NSRange(item.segment.range, in: text)
+                        rubyTargets.append((nsRange, toHiragana(reading)))
+                    }
+                }
+            }
 
-            // Normalize ruby to hiragana so furigana is consistent in the UI.
-            let reading = toHiragana(ann.reading)
-            let nsRange = NSRange(ann.range, in: text)
+            if rubyTargets.isEmpty, let tokenizer = tokenizer() {
+                let annotations = tokenizer.tokenize(text: text)
+                for ann in annotations {
+                    let surface = String(text[ann.range])
+                    if !surface.containsKanji { continue }
+                    if ann.reading.isEmpty { continue }
+                    let nsRange = NSRange(ann.range, in: text)
+                    rubyTargets.append((nsRange, toHiragana(ann.reading)))
+                }
+            }
+        }
 
+        for (range, reading) in rubyTargets {
             let ruby = CTRubyAnnotationCreateWithAttributes(
                 .auto,
                 .auto,
@@ -90,7 +119,7 @@ enum JapaneseFuriganaBuilder {
             attributed.addAttribute(
                 NSAttributedString.Key(kCTRubyAnnotationAttributeName as String),
                 value: ruby,
-                range: nsRange
+                range: range
             )
         }
 
@@ -111,6 +140,28 @@ enum JapaneseFuriganaBuilder {
             rubyFontSize: CGFloat(rubySize),
             lineSpacing: CGFloat(spacing)
         )
+    }
+    
+    static func buildAttributedText(text: String, showFurigana: Bool, segments: [Segment]) -> NSAttributedString {
+        let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
+        let defaults = UserDefaults.standard
+        let baseSize = defaults.object(forKey: "readingTextSize") as? Double ?? Double(baseDefault)
+        let rubySize = defaults.object(forKey: "readingFuriganaSize") as? Double ?? (baseSize * 0.55)
+        let spacing = defaults.object(forKey: "readingLineSpacing") as? Double ?? 0
+        return buildAttributedText(
+            text: text,
+            showFurigana: showFurigana,
+            baseFontSize: CGFloat(baseSize),
+            rubyFontSize: CGFloat(rubySize),
+            lineSpacing: CGFloat(spacing),
+            segments: segments
+        )
+    }
+}
+
+private extension String {
+    var containsKanji: Bool {
+        return unicodeScalars.contains { $0.value >= 0x4E00 && $0.value <= 0x9FFF }
     }
 }
 
