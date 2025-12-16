@@ -160,10 +160,11 @@ struct NoteDetailView: View {
                             if let first = dictResults.first {
                                 let surface = first.kanji.isEmpty ? first.reading : first.kanji
                                 let firstGloss = first.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? first.gloss
-                                let t = ParsedToken(surface: surface, reading: first.reading, meaning: firstGloss)
-                                store.add(from: t)
+                                store.add(surface: surface, reading: first.reading, meaning: firstGloss)
                             } else {
-                                store.add(from: token)
+                                // Fallback: attempt to add the tapped token if it already has a meaning; otherwise WordStore.add will ignore empty meanings
+                                let fallbackMeaning = token.meaning ?? ""
+                                store.add(surface: token.surface, reading: token.reading, meaning: fallbackMeaning)
                             }
                             showingDefinition = false
                         }) {
@@ -243,3 +244,4 @@ struct NoteDetailView: View {
         }
     }
 }
+

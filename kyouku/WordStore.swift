@@ -18,8 +18,8 @@ final class WordStore: ObservableObject {
         load()
     }
 
-    /// The one and only “real” add method.
-    /// Requires a non-empty meaning; otherwise it will not add.
+    /// The one and only add method.
+    /// Callers must provide a non-empty meaning/definition.
     func add(surface: String, reading: String, meaning: String, note: String? = nil) {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let r = reading.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -40,26 +40,6 @@ final class WordStore: ObservableObject {
         )
         words.append(word)
         save()
-    }
-
-    /// Convenience for dictionary results; funnels into the required add method.
-    func add(entry: DictionaryEntry, note: String? = nil) {
-        let surface = entry.kanji.isEmpty ? entry.reading : entry.kanji
-        let firstGloss = entry.gloss
-            .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
-            .first
-            .map(String.init) ?? entry.gloss
-
-        add(surface: surface, reading: entry.reading, meaning: firstGloss, note: note)
-    }
-
-    @available(*, deprecated, message: "Use add(surface:reading:meaning:) or add(entry:) so meaning is always present.")
-    func add(from token: ParsedToken) {
-        guard let meaning = token.meaning, !meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            // Intentionally refuse to add “blank definition” words.
-            return
-        }
-        add(surface: token.surface, reading: token.reading, meaning: meaning, note: nil)
     }
     
     func delete(at offsets: IndexSet) {

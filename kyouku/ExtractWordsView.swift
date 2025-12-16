@@ -54,14 +54,19 @@ struct ExtractWordsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Button(action: {
-                            if let token = selectedToken {
-                                addFromSheetRequiringMeaning(token)
+                            if let entry = dictResults.first {
+                                let surface = entry.kanji.isEmpty ? entry.reading : entry.kanji
+                                let meaning = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
+                                store.add(surface: surface, reading: entry.reading, meaning: meaning)
                             }
                             showingDefinition = false
                         }) {
                             Image(systemName: "plus.circle.fill").font(.title3)
                         }
+                        .disabled(isLookingUp || dictResults.first == nil)
+
                         Spacer()
+
                         Button(action: { showingDefinition = false }) {
                             Image(systemName: "xmark.circle.fill").font(.title3)
                         }
@@ -94,23 +99,6 @@ struct ExtractWordsView: View {
                 Text("No selection").padding()
             }
         }
-    }
-
-    /// Enforces the invariant: we only add if we have a meaning.
-    private func addFromSheetRequiringMeaning(_ token: ParsedToken) {
-        // Prefer dictionary result (the thing user is looking at).
-        if let first = dictResults.first {
-            store.add(entry: first)
-            return
-        }
-
-        // If for some reason dict lookup failed but the token already has meaning, allow it.
-        if let meaning = token.meaning, !meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            store.add(surface: token.surface, reading: token.reading, meaning: meaning)
-            return
-        }
-
-        // Otherwise: do nothing (by design, since meaning is required).
     }
 
     private func lookupDefinitions(for token: ParsedToken) async {

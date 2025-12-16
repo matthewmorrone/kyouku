@@ -54,22 +54,7 @@ struct PasteView: View {
                     lineSpacing: lineSpacing,
                     furiganaGap: furiganaGap,
                     highlightedToken: selectedToken,
-                    onTokenTap: { token in
-                        selectedToken = token
-                        showingDefinition = true
-                        lookupTask?.cancel()
-                        lookupTask = Task { @MainActor in
-                            // flip UI state immediately on main actor
-                            isLookingUp = true
-                            lookupError = nil
-                            dictResults = []
-                            selectedEntryIndex = nil
-                            showAllDefinitions = false
-                        }
-                        lookupTask = Task {
-                            await lookupDefinitions(for: token)
-                        }
-                    }
+                    onTokenTap: handleTokenTap
                 )
                 
                 HStack(alignment: .center, spacing: 8) {
@@ -81,35 +66,14 @@ struct PasteView: View {
                     }
 
                     ControlCell {
-                        Button {
-                            if let str = UIPasteboard.general.string {
-                                inputText = str
-                                // Update current note's title to the first line of the pasted text
-                                let firstLine = str.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                                if let existing = currentNote {
-                                    // Update the note's title and text in the store
-                                    notes.notes = notes.notes.map { n in
-                                        if n.id == existing.id {
-                                            return Note(id: n.id, title: firstLine.isEmpty ? nil : firstLine, text: str, createdAt: n.createdAt)
-                                        } else {
-                                            return n
-                                        }
-                                    }
-                                    notes.save()
-                                    // Keep our local currentNote in sync
-                                    if let updated = notes.notes.first(where: { $0.id == existing.id }) {
-                                        currentNote = updated
-                                    }
-                                }
-                            }
-                        } label: {
+                        Button(action: pasteFromClipboard) {
                             Image(systemName: "doc.on.clipboard").font(.title2)
                         }
                         .accessibilityLabel("Paste")
                     }
 
                     ControlCell {
-                        Button { goExtract = true } label: {
+                        Button(action: extractWords) {
                             Image(systemName: "arrowshape.turn.up.right").font(.title2)
                         }
                         .accessibilityLabel("Extract Words")
@@ -117,24 +81,7 @@ struct PasteView: View {
                     }
 
                     ControlCell {
-                        Button {
-                            guard !inputText.isEmpty else { return }
-                            if let existing = currentNote {
-                                notes.notes = notes.notes.map { n in
-                                    if n.id == existing.id {
-                                        return Note(id: n.id, title: n.title, text: inputText, createdAt: n.createdAt)
-                                    } else {
-                                        return n
-                                    }
-                                }
-                                notes.save()
-                            } else {
-                                let firstLine = inputText.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)
-                                let title = firstLine?.trimmingCharacters(in: .whitespacesAndNewlines)
-                                notes.addNote(title: (title?.isEmpty == true) ? nil : title, text: inputText)
-                                currentNote = notes.notes.first
-                            }
-                        } label: {
+                        Button(action: saveNote) {
                             Image(systemName: "square.and.pencil").font(.title2)
                         }
                         .accessibilityLabel("Save")
@@ -168,7 +115,7 @@ struct PasteView: View {
                     }
 
                     ControlCell {
-                        Button { inputText = "" } label: {
+                        Button(action: clearInput) {
                             Image(systemName: "trash").font(.title2)
                         }
                         .accessibilityLabel("Clear")
@@ -189,30 +136,7 @@ struct PasteView: View {
                     lookupError: $lookupError,
                     selectedEntryIndex: $selectedEntryIndex,
                     showAllDefinitions: $showAllDefinitions,
-                    onAdd: { token, filteredResults in
-                        let hasKanjiInToken: Bool = token.surface.contains { ch in
-                            ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
-                        }
-                        if !hasKanjiInToken {
-                            if let first = filteredResults.first {
-                                let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
-                                let firstGloss = first.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? first.gloss
-                                let t = ParsedToken(surface: kanaSurface, reading: first.reading, meaning: firstGloss)
-                                store.add(from: t)
-                            } else {
-                                store.add(from: token)
-                            }
-                        } else {
-                            if let first = filteredResults.first {
-                                let surface = first.kanji.isEmpty ? first.reading : first.kanji
-                                let firstGloss = first.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? first.gloss
-                                let t = ParsedToken(surface: surface, reading: first.reading, meaning: firstGloss)
-                                store.add(from: t)
-                            } else {
-                                store.add(from: token)
-                            }
-                        }
-                    }
+                    onAdd: onAddDefinition
                 )
             }
             .navigationDestination(isPresented: $goExtract) {
@@ -220,61 +144,170 @@ struct PasteView: View {
             }
             .navigationTitle(currentNote != nil ? (currentNote!.title ?? "Note") : "")
             .navigationBarTitleDisplayMode(currentNote != nil ? .inline : .automatic)
-            .onAppear {
-                if let note = router.noteToOpen {
-                    currentNote = note
-                    inputText = note.text
-                    isEditing = true
-                    showFurigana = false
-                    router.noteToOpen = nil
-                }
-                if !hasInitialized {
-                    if inputText.isEmpty {
-                        // Default to edit mode when starting with empty paste area
-                        isEditing = true
-                    }
-                    hasInitialized = true
-                }
-                ingestSharedInbox()
-                NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-                    ingestSharedInbox()
-                }
-            }
+            .onAppear(perform: onAppearHandler)
             .onDisappear {
                 NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
                 lookupTask?.cancel()
             }
             .onChange(of: inputText) { _, newValue in
-                // Keep current note's title synced to the first line of the text
-                guard let existing = currentNote else { return }
-                let firstLine = newValue.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                syncNoteForInputChange(newValue)
+            }
+            .onChange(of: isEditing) { _, nowEditing in
+                onEditingChanged(nowEditing)
+            }
+        }
+    }
+
+    private func handleTokenTap(_ token: ParsedToken) {
+        selectedToken = token
+        showingDefinition = true
+        // Cancel any previous lookup task
+        lookupTask?.cancel()
+
+        // Reset UI state on the main actor in a separate lightweight task
+        Task { @MainActor in
+            isLookingUp = true
+            lookupError = nil
+            dictResults = []
+            selectedEntryIndex = nil
+            showAllDefinitions = false
+        }
+
+        // Start a fresh lookup task
+        let newTask = Task {
+            await lookupDefinitions(for: token)
+        }
+        lookupTask = newTask
+    }
+
+    private func pasteFromClipboard() {
+        if let str = UIPasteboard.general.string {
+            inputText = str
+            // Update current note's title to the first line of the pasted text
+            let firstLine = str.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let existing = currentNote {
+                // Update the note's title and text in the store
                 notes.notes = notes.notes.map { n in
                     if n.id == existing.id {
-                        return Note(id: n.id, title: firstLine.isEmpty ? nil : firstLine, text: newValue, createdAt: n.createdAt)
+                        return Note(id: n.id, title: firstLine.isEmpty ? nil : firstLine, text: str, createdAt: n.createdAt)
                     } else {
                         return n
                     }
                 }
                 notes.save()
+                // Keep our local currentNote in sync
                 if let updated = notes.notes.first(where: { $0.id == existing.id }) {
                     currentNote = updated
                 }
             }
-            .onChange(of: isEditing) { _, nowEditing in
-                if nowEditing {
-                    // Ensure the editor is in plain text mode to allow editing and show keyboard
-                    showFurigana = false
-                    // Dismiss popups and cancel any ongoing lookups
-                    showingDefinition = false
-                    selectedToken = nil
-                    lookupTask?.cancel()
-                    isLookingUp = false
-                    lookupError = nil
-                    dictResults = []
-                    selectedEntryIndex = nil
-                    showAllDefinitions = false
+        }
+    }
+
+    private func extractWords() {
+        goExtract = true
+    }
+
+    private func saveNote() {
+        guard !inputText.isEmpty else { return }
+        if let existing = currentNote {
+            notes.notes = notes.notes.map { n in
+                if n.id == existing.id {
+                    return Note(id: n.id, title: n.title, text: inputText, createdAt: n.createdAt)
+                } else {
+                    return n
                 }
             }
+            notes.save()
+        } else {
+            let firstLine = inputText.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)
+            let title = firstLine?.trimmingCharacters(in: .whitespacesAndNewlines)
+            notes.addNote(title: (title?.isEmpty == true) ? nil : title, text: inputText)
+            currentNote = notes.notes.first
+        }
+    }
+
+    private func clearInput() {
+        inputText = ""
+    }
+
+    private func onAddDefinition(token: ParsedToken, filteredResults: [DictionaryEntry]) {
+        let hasKanjiInToken: Bool = token.surface.contains { ch in
+            ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
+        }
+        if !hasKanjiInToken {
+            if let first = filteredResults.first {
+                let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
+                let glossSource = first.gloss
+                let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
+                let t = ParsedToken(surface: kanaSurface, reading: first.reading, meaning: firstGloss)
+                store.add(surface: t.surface, reading: t.reading, meaning: t.meaning!)
+            } else {
+                store.add(surface: token.surface, reading: token.reading, meaning: token.meaning!)
+            }
+        } else {
+            if let first = filteredResults.first {
+                let surface = (first.kanji.isEmpty == false) ? (first.kanji) : (first.reading)
+                let glossSource = first.gloss
+                let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
+                let t = ParsedToken(surface: surface, reading: first.reading, meaning: firstGloss)
+                store.add(surface: t.surface, reading: t.reading, meaning: t.meaning!)
+            } else {
+                store.add(surface: token.surface, reading: token.reading, meaning: token.meaning!)
+            }
+        }
+    }
+
+    private func onAppearHandler() {
+        if let note = router.noteToOpen {
+            currentNote = note
+            inputText = note.text
+            isEditing = false
+            showFurigana = true
+            router.noteToOpen = nil
+        }
+        if !hasInitialized {
+            if inputText.isEmpty {
+                // Default to edit mode when starting with empty paste area
+                isEditing = true
+            }
+            hasInitialized = true
+        }
+        ingestSharedInbox()
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            ingestSharedInbox()
+        }
+    }
+
+    private func syncNoteForInputChange(_ newValue: String) {
+        // Keep current note's title synced to the first line of the text
+        guard let existing = currentNote else { return }
+        let firstLine = newValue.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        notes.notes = notes.notes.map { n in
+            if n.id == existing.id {
+                return Note(id: n.id, title: firstLine.isEmpty ? nil : firstLine, text: newValue, createdAt: n.createdAt)
+            } else {
+                return n
+            }
+        }
+        notes.save()
+        if let updated = notes.notes.first(where: { $0.id == existing.id }) {
+            currentNote = updated
+        }
+    }
+
+    private func onEditingChanged(_ nowEditing: Bool) {
+        if nowEditing {
+            // Ensure the editor is in plain text mode to allow editing and show keyboard
+            showFurigana = false
+            // Dismiss popups and cancel any ongoing lookups
+            showingDefinition = false
+            selectedToken = nil
+            lookupTask?.cancel()
+            isLookingUp = false
+            lookupError = nil
+            dictResults = []
+            selectedEntryIndex = nil
+            showAllDefinitions = false
         }
     }
 
@@ -381,13 +414,13 @@ struct PasteView: View {
                 // Higher tuple sorts earlier. We'll negate where needed for ascending.
                 // Prefer camelCase property if available; default to 0 if neither exists
                 let common = (e.isCommon ? 1 : 0)
-                let surfaceMatch = hasKanji ? ((e.kanji.isEmpty ? e.reading : e.kanji) == t.surface ? 1 : 0)
-                                            : 0
-                let readingMatch = (!hasKanji ? (e.reading == (t.reading.isEmpty ? t.surface : t.reading) ? 1 : 0) : 0)
-                let firstGloss = e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
-                let glossLength = firstGloss.count
+                let surfaceCandidate = (e.kanji.isEmpty == false) ? (e.kanji) : (e.reading)
+                let surfaceMatch = hasKanji ? ((surfaceCandidate == t.surface) ? 1 : 0) : 0
+                let readingMatch = (!hasKanji ? (((e.reading) == (t.reading.isEmpty ? t.surface : t.reading)) ? 1 : 0) : 0)
+                let glossSource = e.gloss
+                let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
                 // Sort keys: common desc, surfaceMatch desc, readingMatch desc, glossLength asc
-                return (common, surfaceMatch, readingMatch, -glossLength)
+                return (common, surfaceMatch, readingMatch, -firstGloss.count)
             }
             let sorted = all.sorted { a, b in
                 let sa = score(entry: a, token: token, hasKanji: hasKanjiInToken)
@@ -444,6 +477,7 @@ struct PasteView: View {
             .cornerRadius(12)
             .padding(.horizontal)
             .frame(maxHeight: .infinity)
+            .clipped()
             .onChange(of: textSize) { _, _ in bumpKey() }
             .onChange(of: furiganaSize) { _, _ in bumpKey() }
             .onChange(of: lineSpacing) { _, _ in bumpKey() }
@@ -478,8 +512,7 @@ private struct DefinitionSheetContent: View {
                 }
                 let filteredResults: [DictionaryEntry] = {
                     if !hasKanjiInToken {
-                        let kana = token.reading.isEmpty ? token.surface : token.reading
-                        return dictResults.filter { $0.reading == kana }
+                        return dictResults.filter { ($0.reading) == (token.reading.isEmpty ? token.surface : token.reading) }
                     } else {
                         return dictResults
                     }
@@ -507,7 +540,7 @@ private struct DefinitionSheetContent: View {
                             return token.reading.isEmpty ? token.surface : token.reading
                         }
                         if let e = entry {
-                            return e.kanji.isEmpty ? e.reading : e.kanji
+                            return (e.kanji.isEmpty == false) ? (e.kanji) : (e.reading)
                         }
                         return token.surface
                     }()
@@ -555,7 +588,8 @@ private struct DefinitionList: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(0..<maxShown, id: \.self) { idx in
                 let e = filteredResults[idx]
-                let firstGloss = e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
+                let glossSource = e.gloss
+                let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(firstGloss)
                         .font(.body)
@@ -606,6 +640,4 @@ extension EnvironmentValues {
 
 // Re-open PasteView to keep type scope intact if needed
 extension PasteView {}
-
-
 

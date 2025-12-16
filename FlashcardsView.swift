@@ -4,6 +4,7 @@ struct FlashcardsView: View {
     @EnvironmentObject var store: WordStore
 
     @State private var session: [Word] = []
+    @State private var sessionSource: [Word] = []
     @State private var index: Int = 0
     @State private var showBack: Bool = false
     @State private var shuffled: Bool = true
@@ -34,7 +35,11 @@ struct FlashcardsView: View {
                 if store.words.isEmpty {
                     emptySavedState
                 } else if session.isEmpty {
-                    reviewHome
+                    if sessionSource.isEmpty {
+                        reviewHome
+                    } else {
+                        sessionCompleteState
+                    }
                 } else {
                     header
                     Spacer(minLength: 8)
@@ -77,23 +82,20 @@ struct FlashcardsView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                     .help("Restart")
+                    .disabled(sessionSource.isEmpty)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         shuffled.toggle()
-                        startSession()
+                        if !sessionSource.isEmpty {
+                            startSession()
+                        }
                     } label: {
                         Image(systemName: shuffled ? "shuffle" : "shuffle.slash")
                     }
                     .help(shuffled ? "Shuffle On" : "Shuffle Off")
                 }
             }
-        }
-        .onAppear {
-            startSession()
-        }
-        .onChange(of: store.words) { oldValue, newValue in
-            startSession()
         }
     }
 
@@ -179,10 +181,21 @@ struct FlashcardsView: View {
                 .font(.largeTitle)
             Text("Session complete")
                 .font(.headline)
-            Button { startSession() } label: {
+            Button {
+                startSession()
+            } label: {
                 Label("Restart", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.borderedProminent)
+            .disabled(sessionSource.isEmpty)
+
+            Button {
+                session = []
+                sessionSource = []
+            } label: {
+                Label("Choose Different Cards", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -217,6 +230,12 @@ struct FlashcardsView: View {
                 }
                 .pickerStyle(.segmented)
 
+                let matchingCount = wordsMatchingSelection().count
+
+                Text(matchingCount == 0 ? "No cards match this selection" : "Cards in selection: \(matchingCount)")
+                    .font(.footnote)
+                    .foregroundStyle(matchingCount == 0 ? .red : .secondary)
+
                 Button {
                     startSessionFromHome()
                 } label: {
@@ -224,6 +243,7 @@ struct FlashcardsView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(matchingCount == 0)
             }
             .padding()
         }
@@ -232,10 +252,19 @@ struct FlashcardsView: View {
     // MARK: - Logic
 
     private func startSession() {
-        session = store.words
+        guard !sessionSource.isEmpty else {
+            session = []
+            index = 0
+            showBack = false
+            dragOffset = .zero
+            return
+        }
+
+        session = sessionSource
         if shuffled { session.shuffle() }
-        index = session.isEmpty ? 0 : 0
+        index = 0
         showBack = false
+        dragOffset = .zero
     }
 
     private func again() {
@@ -260,6 +289,12 @@ struct FlashcardsView: View {
     }
 
     private func startSessionFromHome() {
+        let base = wordsMatchingSelection()
+        sessionSource = base
+        startSession()
+    }
+
+    private func wordsMatchingSelection() -> [Word] {
         var base = store.words
         switch scope {
         case .all:
@@ -273,9 +308,6 @@ struct FlashcardsView: View {
             // Requires Note linkage on Word to filter; currently not available.
             base = store.words
         }
-        session = base
-        if shuffled { session.shuffle() }
-        index = session.isEmpty ? 0 : 0
-        showBack = false
+        return base
     }
 }

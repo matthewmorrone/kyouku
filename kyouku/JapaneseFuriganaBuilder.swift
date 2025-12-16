@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import CoreFoundation
 import CoreText
 import Mecab_Swift
 import IPADic
@@ -13,12 +14,28 @@ import UIKit
 
 enum JapaneseFuriganaBuilder {
 
-    // Shared tokenizer for furigana building
-    private static let sharedTokenizer: Tokenizer? = {
+    // Shared tokenizer for furigana building (lazily initialized). If initialization fails at startup,
+    // we will retry on demand so furigana doesn't permanently disable.
+    private static var sharedTokenizer: Tokenizer? = {
         return try? Tokenizer(dictionary: IPADic())
     }()
 
-    @MainActor
+    private static func tokenizer() -> Tokenizer? {
+        if let t = sharedTokenizer { return t }
+        sharedTokenizer = try? Tokenizer(dictionary: IPADic())
+        return sharedTokenizer
+    }
+
+    /// Convert Katakana/Hiragana to Hiragana for consistent furigana display.
+    /// MeCab (IPADic) commonly returns readings in Katakana.
+    private static func toHiragana(_ s: String) -> String {
+        guard !s.isEmpty else { return s }
+        let m = NSMutableString(string: s) as CFMutableString
+        // Use Hiragana<->Katakana transform with reverse=true to convert Katakana -> Hiragana.
+        CFStringTransform(m, nil, kCFStringTransformHiraganaKatakana, true)
+        return m as String
+    }
+
     static func buildAttributedText(
         text: String,
         showFurigana: Bool,
@@ -40,7 +57,7 @@ enum JapaneseFuriganaBuilder {
         // Begin with plain text
         let attributed = NSMutableAttributedString(string: text, attributes: baseAttributes)
 
-        guard showFurigana, let tokenizer = sharedTokenizer else {
+        guard showFurigana, let tokenizer = tokenizer() else {
             return attributed
         }
 
@@ -49,10 +66,17 @@ enum JapaneseFuriganaBuilder {
         let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
 
         for ann in annotations {
-            if !ann.containsKanji { continue }
-            if ann.reading == String(text[ann.range]) { continue }
+            let surface = String(text[ann.range])
+            // Skip if no kanji in the surface
+            let hasKanji = surface.contains { ch in
+                ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
+            }
+            if !hasKanji { continue }
+            // Skip if tokenizer didn't provide a reading
+            if ann.reading.isEmpty { continue }
 
-            let reading = ann.reading
+            // Normalize ruby to hiragana so furigana is consistent in the UI.
+            let reading = toHiragana(ann.reading)
             let nsRange = NSRange(ann.range, in: text)
 
             let ruby = CTRubyAnnotationCreateWithAttributes(
@@ -73,7 +97,6 @@ enum JapaneseFuriganaBuilder {
         return attributed
     }
 
-    @MainActor
     static func buildAttributedText(text: String, showFurigana: Bool) -> NSAttributedString {
         let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
         let defaults = UserDefaults.standard
@@ -90,3 +113,4 @@ enum JapaneseFuriganaBuilder {
         )
     }
 }
+

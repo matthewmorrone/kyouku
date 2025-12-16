@@ -34,7 +34,7 @@ struct WordsView: View {
                 }
             }
             .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search dictionary")
-            .onChange(of: searchText) { oldValue, newValue in
+            .onChange(of: searchText) { _, newValue in
                 // Cancel any in-flight search task
                 searchTask?.cancel()
                 let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -80,7 +80,9 @@ struct WordsView: View {
                         }
                         Spacer()
                         Button {
-                            store.add(entry: entry)
+                            let surface = displaySurface(for: entry)
+                            let meaning = firstGloss(for: entry)
+                            store.add(surface: surface, reading: entry.reading, meaning: meaning)
                         } label: {
                             if isSaved(entry) {
                                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -146,8 +148,7 @@ struct WordsView: View {
             VStack(spacing: 10) {
                 HStack {
                     Button(action: {
-                        // Selected word already has meaning (saved words require it),
-                        // but route through the single add method anyway.
+                        // Selected word already has a meaning; route through the single add method.
                         if let w = selectedWord {
                             store.add(surface: w.surface, reading: w.reading, meaning: w.meaning)
                         }
@@ -172,7 +173,12 @@ struct WordsView: View {
         } else if let entry = dictEntry {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Button(action: { store.add(entry: entry); showingDefinition = false }) {
+                    Button(action: {
+                        let surface = displaySurface(for: entry)
+                        let meaning = firstGloss(for: entry)
+                        store.add(surface: surface, reading: entry.reading, meaning: meaning)
+                        showingDefinition = false
+                    }) {
                         Image(systemName: "plus.circle.fill").font(.title3)
                     }
                     Spacer()
