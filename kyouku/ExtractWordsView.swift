@@ -5,8 +5,10 @@ fileprivate let extractLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?
 
 struct ExtractWordsView: View {
     @EnvironmentObject var store: WordStore
+    @EnvironmentObject var notes: NotesStore
 
     let text: String
+    var sourceNoteID: UUID? = nil
 
     @State private var tokens: [ParsedToken] = []
     @State private var selectedToken: ParsedToken? = nil
@@ -65,7 +67,7 @@ struct ExtractWordsView: View {
                             if let entry = dictResults.first {
                                 let surface = entry.kanji.isEmpty ? entry.reading : entry.kanji
                                 let meaning = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
-                                store.add(surface: surface, reading: entry.reading, meaning: meaning)
+                                store.add(surface: surface, reading: entry.reading, meaning: meaning, sourceNoteID: sourceNoteID)
                             }
                             showingDefinition = false
                         }) {

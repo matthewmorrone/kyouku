@@ -17,6 +17,10 @@ extension NSAttributedString.Key {
     static let tokenBackgroundColor = NSAttributedString.Key("TokenBackgroundColor")
 }
 
+extension NSAttributedString.Key {
+    static let rubyReading = NSAttributedString.Key("RubyReading")
+}
+
 final class RoundedBackgroundLayoutManager: NSLayoutManager {
     var cornerRadius: CGFloat = 5
     var horizontalPadding: CGFloat = 2
@@ -48,6 +52,48 @@ final class RoundedBackgroundLayoutManager: NSLayoutManager {
                 let path = UIBezierPath(roundedRect: drawRect, cornerRadius: self.cornerRadius)
                 color.setFill()
                 path.fill()
+            }
+        }
+    }
+
+    override func drawGlyphs(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
+        // Draw base glyphs first
+        super.drawGlyphs(forGlyphRange: glyphsToShow, at: origin)
+
+        // Then draw ruby readings on top so they aren't occluded by glyphs
+        guard let textStorage = self.textStorage, let textContainer = self.textContainers.first else { return }
+        let characterRange = self.characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        textStorage.enumerateAttribute(.rubyReading, in: characterRange, options: []) { value, range, _ in
+            guard let reading = value as? String, !reading.isEmpty else { return }
+            let readingGlyphRange = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            if readingGlyphRange.length == 0 { return }
+
+            self.enumerateLineFragments(forGlyphRange: readingGlyphRange) { (rect, usedRect, container, glyphRange, stop) in
+                let intersection = NSIntersectionRange(readingGlyphRange, glyphRange)
+                if intersection.length == 0 { return }
+
+                let tight = self.boundingRect(forGlyphRange: intersection, in: container)
+                var drawRect = tight.offsetBy(dx: origin.x, dy: origin.y)
+
+                // Determine a small font relative to the base font at this location
+                var rubyFont: UIFont = .systemFont(ofSize: 9)
+                let attrs = textStorage.attributes(at: range.location, effectiveRange: nil)
+                if let base = attrs[.font] as? UIFont {
+                    rubyFont = base.withSize(max(6, base.pointSize * 0.55))
+                }
+
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.alignment = .center
+                let attrsDraw: [NSAttributedString.Key: Any] = [
+                    .font: rubyFont,
+                    .foregroundColor: UIColor.secondaryLabel,
+                    .paragraphStyle: paragraph
+                ]
+                let size = (reading as NSString).size(withAttributes: attrsDraw)
+                // Center above the base segment and add a small gap
+                let gap: CGFloat = 2
+                let originPoint = CGPoint(x: drawRect.midX - size.width / 2, y: drawRect.minY - size.height - gap)
+                (reading as NSString).draw(at: originPoint, withAttributes: attrsDraw)
             }
         }
     }
@@ -145,7 +191,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
             uiView.textContainer.size = CGSize(width: width, height: .greatestFiniteMagnitude)
         }
 
-        context.coordinator.tapRecognizer?.isEnabled = allowTokenTap && showFurigana && !isEditable
+        context.coordinator.tapRecognizer?.isEnabled = allowTokenTap && !isEditable
 
         context.coordinator.updateTextView(uiView, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap, showSegmentHighlighting: showSegmentHighlighting)
 
@@ -189,7 +235,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
         // Update helper to rebuild attributed or plain text while preserving selection
         func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool, isEditable: Bool, allowTokenTap: Bool, showSegmentHighlighting: Bool) {
-            tapRecognizer?.isEnabled = allowTokenTap && showFurigana && !isEditable
+            tapRecognizer?.isEnabled = allowTokenTap && !isEditable
 
             // Clear highlight when token taps are disabled or furigana is off
             if !showFurigana || !allowTokenTap {

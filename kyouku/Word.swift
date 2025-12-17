@@ -13,6 +13,7 @@ struct Word: Identifiable, Codable, Hashable {
     var reading: String
     var meaning: String
     var note: String?
+    var sourceNoteID: UUID? = nil
     var createdAt: Date
     
     init(
@@ -21,6 +22,7 @@ struct Word: Identifiable, Codable, Hashable {
         reading: String,
         meaning: String,
         note: String? = nil,
+        sourceNoteID: UUID? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -28,6 +30,8 @@ struct Word: Identifiable, Codable, Hashable {
         self.reading = reading
         self.meaning = meaning
         self.note = note
+        self.sourceNoteID = sourceNoteID
         self.createdAt = createdAt
     }
 }
+

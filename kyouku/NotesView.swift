@@ -10,6 +10,10 @@ import SwiftUI
 struct NotesView: View {
     @EnvironmentObject var notesStore: NotesStore
     @EnvironmentObject var router: AppRouter
+    @EnvironmentObject var store: WordStore
+    @State private var pendingDeleteOffsets: IndexSet? = nil
+    @State private var showDeleteAlert: Bool = false
+    @State private var deleteAssociatedWords: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -46,7 +50,10 @@ struct NotesView: View {
                             .padding(.vertical, 4)
                         }
                     }
-                    .onDelete(perform: notesStore.delete)
+                    .onDelete { offsets in
+                        pendingDeleteOffsets = offsets
+                        showDeleteAlert = true
+                    }
                 }
             }
             .navigationTitle("Notes")
@@ -61,7 +68,35 @@ struct NotesView: View {
                     EditButton()
                 }
             }
+            .confirmationDialog("Delete note?", isPresented: $showDeleteAlert, titleVisibility: .visible) {
+                Button("Delete note and associated words", role: .destructive) {
+                    handleDeleteNotes(deleteWords: true)
+                }
+                Button("Delete note only", role: .destructive) {
+                    handleDeleteNotes(deleteWords: false)
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingDeleteOffsets = nil
+                }
+            } message: {
+                Text("Do you also want to delete any words saved from this note?")
+            }
         }
+    }
+
+    private func handleDeleteNotes(deleteWords: Bool) {
+        guard let offsets = pendingDeleteOffsets else { return }
+        let ids = offsets.map { notesStore.notes[$0].id }
+        // Delete notes first
+        notesStore.notes.remove(atOffsets: offsets)
+        notesStore.save()
+        // Optionally delete associated words
+        if deleteWords {
+            for id in ids {
+                store.deleteWords(fromNoteID: id)
+            }
+        }
+        pendingDeleteOffsets = nil
     }
 }
 

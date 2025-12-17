@@ -513,7 +513,7 @@ struct PasteView: View {
         @State private var viewKey: Int = 0
 
         var body: some View {
-            let allowTap = showFurigana && !isEditing
+            let allowTap = !isEditing
             FuriganaTextEditor(
                 text: $text,
                 showFurigana: showFurigana,

@@ -20,7 +20,7 @@ final class WordStore: ObservableObject {
 
     /// The one and only add method.
     /// Callers must provide a non-empty meaning/definition.
-    func add(surface: String, reading: String, meaning: String, note: String? = nil) {
+    func add(surface: String, reading: String, meaning: String, note: String? = nil, sourceNoteID: UUID? = nil) {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let r = reading.trimmingCharacters(in: .whitespacesAndNewlines)
         let m = meaning.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -36,7 +36,8 @@ final class WordStore: ObservableObject {
             surface: s,
             reading: r,
             meaning: m,
-            note: note
+            note: note,
+            sourceNoteID: sourceNoteID
         )
         words.append(word)
         save()
@@ -101,6 +102,14 @@ final class WordStore: ObservableObject {
             try data.write(to: url, options: .atomic)
         } catch {
             print("Failed to save words: \(error)")
+        }
+    }
+    
+    func deleteWords(fromNoteID id: UUID) {
+        let before = words.count
+        words.removeAll { $0.sourceNoteID == id }
+        if words.count != before {
+            save()
         }
     }
 }

@@ -93,6 +93,21 @@ enum JapaneseFuriganaBuilder {
                         rubyTargets.append((nsRange, toHiragana(reading)))
                     }
                 }
+            } else {
+                // Fallback: no trie yet — use MeCab-only tokenization to attach ruby per annotation
+                if let mecab = TokenizerFactory.make() ?? tokenizer() {
+                    let anns = mecab.tokenize(text: text)
+                    for a in anns {
+                        let surface = String(text[a.range])
+                        if !surface.containsKanji { continue }
+                        let reading = a.reading
+                        if reading.isEmpty || reading == surface { continue }
+                        let nsRange = NSRange(a.range, in: text)
+                        if nsRange.location != NSNotFound {
+                            rubyTargets.append((nsRange, toHiragana(reading)))
+                        }
+                    }
+                }
             }
         }
 
@@ -110,6 +125,7 @@ enum JapaneseFuriganaBuilder {
                 value: ruby,
                 range: range
             )
+            attributed.addAttribute(.rubyReading, value: reading, range: range)
         }
 
         return attributed
