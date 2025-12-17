@@ -18,6 +18,12 @@ enum DictionarySegmenter {
         var out: [Segment] = []
         var i = s.startIndex
         while i < s.endIndex {
+            // Skip over whitespace entirely; do not emit segments for it
+            let ch = s[i]
+            if ch.isWhitespace {
+                i = s.index(after: i)
+                continue
+            }
             if let end = trie.longestMatchEnd(in: s, from: i) {
                 let r = i..<end
                 out.append(Segment(range: r, surface: String(s[r]), isDictionaryMatch: true))
@@ -51,6 +57,9 @@ enum DictionarySegmenter {
                 let a = segs[i]
                 let b = segs[i + 1]
 
+                // Only merge segments that are directly adjacent in the original string
+                let areContiguous = (a.range.upperBound == b.range.lowerBound)
+
                 func mergeAB(_ markDict: Bool = false) -> Segment {
                     let r = a.range.lowerBound ..< b.range.upperBound
                     let surf = a.surface + b.surface
@@ -58,24 +67,24 @@ enum DictionarySegmenter {
                     return Segment(range: r, surface: surf, isDictionaryMatch: isDict)
                 }
 
-                // Rule 0: Merge contiguous non-dictionary Japanese runs
-                if !a.isDictionaryMatch && !b.isDictionaryMatch && isJapaneseString(a.surface) && isJapaneseString(b.surface) {
+                // Rule 0: Merge contiguous non-dictionary Japanese runs (only if adjacent)
+                if areContiguous && !a.isDictionaryMatch && !b.isDictionaryMatch && isJapaneseString(a.surface) && isJapaneseString(b.surface) {
                     newSegs.append(mergeAB())
                     i += 2
                     changed = true
                     continue
                 }
 
-                // Rule 1: Fix slang split: "ってか" + "ら" -> "ってから"
-                if b.surface.hasPrefix("ら"), a.surface.hasPrefix("ってか") {
+                // Rule 1: Fix slang split: "ってか" + "ら" -> "ってから" (only if adjacent)
+                if areContiguous && b.surface.hasPrefix("ら"), a.surface.hasPrefix("ってか") {
                     newSegs.append(mergeAB())
                     i += 2
                     changed = true
                     continue
                 }
 
-                // Rule 2: small tsu + (て|で) -> merge
-                if a.surface.hasSuffix("っ") || a.surface.hasSuffix("ッ") {
+                // Rule 2: small tsu + (て|で) -> merge (only if adjacent)
+                if areContiguous && (a.surface.hasSuffix("っ") || a.surface.hasSuffix("ッ")) {
                     if b.surface.hasPrefix("て") || b.surface.hasPrefix("で") || b.surface.hasPrefix("テ") || b.surface.hasPrefix("デ") {
                         newSegs.append(mergeAB())
                         i += 2
@@ -84,40 +93,40 @@ enum DictionarySegmenter {
                     }
                 }
 
-                // Rule 2b: (たく) + (て) -> たくて
-                if a.surface.hasSuffix("たく") && (b.surface.hasPrefix("て") || b.surface == "て") {
+                // Rule 2b: (たく) + (て) -> たくて (only if adjacent)
+                if areContiguous && a.surface.hasSuffix("たく") && (b.surface.hasPrefix("て") || b.surface == "て") {
                     newSegs.append(mergeAB())
                     i += 2
                     changed = true
                     continue
                 }
 
-                // Rule 3: (て|で|って) + から -> merge
-                if (a.surface.hasSuffix("て") || a.surface.hasSuffix("で") || a.surface.hasSuffix("って")) && b.surface.hasPrefix("から") {
+                // Rule 3: (て|で|って) + から -> merge (only if adjacent)
+                if areContiguous && (a.surface.hasSuffix("て") || a.surface.hasSuffix("で") || a.surface.hasSuffix("って")) && b.surface.hasPrefix("から") {
                     newSegs.append(mergeAB())
                     i += 2
                     changed = true
                     continue
                 }
 
-                // Rule 4: Verb stem + (たい|たく|たくて) -> merge
-                if startsWithAny(b.surface, ["たい", "たく", "たくて"]) && isJapaneseString(a.surface) {
+                // Rule 4: Verb stem + (たい|たく|たくて) -> merge (only if adjacent)
+                if areContiguous && startsWithAny(b.surface, ["たい", "たく", "たくて"]) && isJapaneseString(a.surface) {
                     newSegs.append(mergeAB())
                     i += 2
                     changed = true
                     continue
                 }
 
-                // Rule 5: Kanji/kana run + "って" or "ってから" -> merge to keep verb + connective together
-                if isJapaneseString(a.surface) && (b.surface.hasPrefix("ってから") || b.surface.hasPrefix("って")) {
+                // Rule 5: Kanji/kana run + "って" or "ってから" -> merge to keep verb + connective together (only if adjacent)
+                if areContiguous && isJapaneseString(a.surface) && (b.surface.hasPrefix("ってから") || b.surface.hasPrefix("って")) {
                     newSegs.append(mergeAB())
                     i += 2
                     changed = true
                     continue
                 }
 
-                // Rule 6: "で" + "あって" -> merge (e.g., であってから)
-                if a.surface == "で" && b.surface.hasPrefix("あって") {
+                // Rule 6: "で" + "あって" -> merge (e.g., であってから) (only if adjacent)
+                if areContiguous && a.surface == "で" && b.surface.hasPrefix("あって") {
                     newSegs.append(mergeAB())
                     i += 2
                     changed = true

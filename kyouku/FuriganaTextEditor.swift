@@ -9,6 +9,49 @@ import SwiftUI
 import UIKit
 import Mecab_Swift
 import IPADic
+import OSLog
+
+fileprivate let interactionLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Interaction")
+
+extension NSAttributedString.Key {
+    static let tokenBackgroundColor = NSAttributedString.Key("TokenBackgroundColor")
+}
+
+final class RoundedBackgroundLayoutManager: NSLayoutManager {
+    var cornerRadius: CGFloat = 5
+    var horizontalPadding: CGFloat = 2
+    var verticalPadding: CGFloat = 0.5
+
+    override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
+        super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
+
+        guard let textStorage = self.textStorage, let textContainer = self.textContainers.first else { return }
+
+        let fullLength = textStorage.length
+        guard fullLength > 0 else { return }
+
+        // Enumerate our custom background attribute across the visible glyph range
+        let characterRange = self.characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        textStorage.enumerateAttribute(.tokenBackgroundColor, in: characterRange, options: []) { value, range, _ in
+            guard let color = value as? UIColor else { return }
+            let highlightGlyphRange = self.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            if highlightGlyphRange.length == 0 { return }
+
+            // Draw per line fragment to avoid spanning across lines and to keep tight bounds
+            self.enumerateLineFragments(forGlyphRange: highlightGlyphRange) { (rect, usedRect, container, glyphRange, stop) in
+                let intersection = NSIntersectionRange(highlightGlyphRange, glyphRange)
+                if intersection.length == 0 { return }
+
+                let tight = self.boundingRect(forGlyphRange: intersection, in: container)
+                var drawRect = tight.offsetBy(dx: origin.x, dy: origin.y)
+                drawRect = drawRect.insetBy(dx: -self.horizontalPadding, dy: -self.verticalPadding)
+                let path = UIBezierPath(roundedRect: drawRect, cornerRadius: self.cornerRadius)
+                color.setFill()
+                path.fill()
+            }
+        }
+    }
+}
 
 struct FuriganaTextEditor: UIViewRepresentable {
     @Binding var text: String
@@ -16,6 +59,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
     var isEditable: Bool = true
     var allowTokenTap: Bool = true
     var onTokenTap: (ParsedToken) -> Void
+    var showSegmentHighlighting: Bool = true
 
     var baseFontSize: Double? = nil
     var rubyFontSize: Double? = nil
@@ -26,12 +70,27 @@ struct FuriganaTextEditor: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UITextView {
-        let tv = UITextView()
+        // Use a custom layout manager to draw rounded token backgrounds
+        let textStorage = NSTextStorage()
+        let layoutManager = RoundedBackgroundLayoutManager()
+        let textContainer = NSTextContainer(size: .zero)
+        textContainer.lineFragmentPadding = 0
+        textContainer.widthTracksTextView = true
+        textContainer.heightTracksTextView = false
+        layoutManager.addTextContainer(textContainer)
+        textStorage.addLayoutManager(layoutManager)
+        let tv = UITextView(frame: .zero, textContainer: textContainer)
+
         tv.isEditable = true
         tv.isScrollEnabled = true
         tv.backgroundColor = .clear
         tv.delegate = context.coordinator
         tv.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
+
+        // Ensure the text container has sufficient height for multi-line layout and accurate hit-testing
+        let initialWidth = max(0, tv.bounds.width - (tv.textContainerInset.left + tv.textContainerInset.right))
+        textContainer.size = CGSize(width: initialWidth, height: .greatestFiniteMagnitude)
+
         tv.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         tv.isSelectable = true
         tv.textColor = .label
@@ -54,9 +113,11 @@ struct FuriganaTextEditor: UIViewRepresentable {
         tap.cancelsTouchesInView = true
         context.coordinator.tapRecognizer = tap
         tv.addGestureRecognizer(tap)
+        tv.accessibilityIdentifier = "FuriganaTextEditorTextView"
+        let grCount = tv.gestureRecognizers?.count ?? 0
 
         // Initial content
-        context.coordinator.updateTextView(tv, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap)
+        context.coordinator.updateTextView(tv, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap, showSegmentHighlighting: showSegmentHighlighting)
         return tv
     }
 
@@ -78,7 +139,15 @@ struct FuriganaTextEditor: UIViewRepresentable {
             }
         }
 
-        context.coordinator.updateTextView(uiView, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap)
+        // Keep text container size in sync with view for accurate multi-line hit-testing
+        let width = max(0, uiView.bounds.width - (uiView.textContainerInset.left + uiView.textContainerInset.right))
+        if width > 0 {
+            uiView.textContainer.size = CGSize(width: width, height: .greatestFiniteMagnitude)
+        }
+
+        context.coordinator.tapRecognizer?.isEnabled = allowTokenTap && showFurigana && !isEditable
+
+        context.coordinator.updateTextView(uiView, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap, showSegmentHighlighting: showSegmentHighlighting)
 
         // Auto-focus when editable and not showing furigana; resign otherwise
         if !showFurigana && isEditable {
@@ -119,7 +188,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
         }
 
         // Update helper to rebuild attributed or plain text while preserving selection
-        func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool, isEditable: Bool, allowTokenTap: Bool) {
+        func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool, isEditable: Bool, allowTokenTap: Bool, showSegmentHighlighting: Bool) {
             tapRecognizer?.isEnabled = allowTokenTap && showFurigana && !isEditable
 
             // Clear highlight when token taps are disabled or furigana is off
@@ -187,11 +256,11 @@ struct FuriganaTextEditor: UIViewRepresentable {
                         }
                     }
                     let mutable = NSMutableAttributedString(attributedString: attributed)
-                    if !isEditable {
+                    if !isEditable && showSegmentHighlighting {
                         applySegmentShading(to: mutable, baseText: currentText)
                     }
                     if let hr = hr, hr.location != NSNotFound, hr.location + hr.length <= mutable.length {
-                        mutable.addAttribute(.backgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.3), range: hr)
+                        mutable.addAttribute(.tokenBackgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.35), range: hr)
                     }
                     DispatchQueue.main.async { [weak self] in
                         guard let self = self else { return }
@@ -254,7 +323,9 @@ struct FuriganaTextEditor: UIViewRepresentable {
                         .foregroundColor: UIColor.label
                     ]
                     let mutable = NSMutableAttributedString(string: text, attributes: baseAttributes)
-                    applySegmentShading(to: mutable, baseText: text)
+                    if showSegmentHighlighting {
+                        applySegmentShading(to: mutable, baseText: text)
+                    }
                     textView.attributedText = mutable
                     textView.isEditable = false
                     highlightedRange = nil
@@ -273,47 +344,89 @@ struct FuriganaTextEditor: UIViewRepresentable {
         // MARK: Tap Handling
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard let tv = gesture.view as? UITextView else { return }
-            let location = gesture.location(in: tv)
+            let rawPoint = gesture.location(in: tv)
+            var point = CGPoint(x: rawPoint.x - tv.textContainerInset.left,
+                                y: rawPoint.y - tv.textContainerInset.top)
 
-            // Determine character index at tap location
-            guard let position = tv.closestPosition(to: location),
-                  let range = tv.tokenizer.rangeEnclosingPosition(position, with: .word, inDirection: UITextDirection(rawValue: UITextStorageDirection.forward.rawValue))
-            else {
-                // Fallback to layout manager mapping if tokenizer fails
-                let lm = tv.layoutManager
-                var point = location
-                point.x -= tv.textContainerInset.left
-                point.y -= tv.textContainerInset.top
-                let glyphIndex = lm.glyphIndex(for: point, in: tv.textContainer)
-                let charIndex = lm.characterIndexForGlyph(at: glyphIndex)
-                lookupToken(at: charIndex, in: tv.text, textView: tv)
-                return
-            }
+            let lm = tv.layoutManager
+            let container = tv.textContainer
 
-            let start = tv.offset(from: tv.beginningOfDocument, to: range.start)
-            lookupToken(at: start, in: tv.text, textView: tv)
+            // Resolve to a character index using TextKit mapping in container coordinates
+            let charIndex = lm.characterIndex(for: point, in: container, fractionOfDistanceBetweenInsertionPoints: nil)
+            
+            lookupToken(at: charIndex, in: tv.text, textView: tv)
         }
 
         private func lookupToken(at charIndex: Int, in fullText: String, textView: UITextView) {
-            let segments = segments(for: fullText)
-            // Map the tapped UTF-16 index to a String.Index for boundary checks
-            guard let tappedIndex = fullText.index(fullText.startIndex, offsetByUTF16: charIndex) else { return }
-            for seg in segments {
-                if seg.range.contains(tappedIndex) {
+            let nsText = fullText as NSString
+            let nsLen = nsText.length
+            guard nsLen > 0 else { return }
+            let idx = max(0, min(charIndex, nsLen - 1))
+
+            let segs = segments(for: fullText)
+
+            // Try direct NSRange containment first to avoid String.Index cross-string issues
+            for (i, seg) in segs.enumerated() {
+                let ns = NSRange(seg.range, in: fullText)
+                guard ns.location != NSNotFound else { continue }
+                if idx >= ns.location && idx < ns.location + ns.length {
+                    select(seg: seg, fullText: fullText, textView: textView)
+                    return
+                }
+            }
+
+            // If no direct match (e.g., tapped exactly on a boundary), bias left then right
+            if idx > 0 {
+                let left = idx - 1
+                for (i, seg) in segs.enumerated() {
                     let ns = NSRange(seg.range, in: fullText)
-                    let surface = seg.surface
-                    // Use MeCab only to compute reading for this surface
-                    let reading = SegmentReadingAttacher.reading(for: surface, tokenizer: TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic())))
-                    let token = ParsedToken(surface: surface, reading: reading, meaning: nil)
-                    highlightedRange = ns
-                    updateTextView(textView, with: parent.text, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap)
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    parent.onTokenTap(token)
-                    break
+                    guard ns.location != NSNotFound else { continue }
+                    if left >= ns.location && left < ns.location + ns.length {
+                        select(seg: seg, fullText: fullText, textView: textView)
+                        return
+                    }
+                }
+            }
+
+            if idx + 1 < nsLen {
+                let right = idx + 1
+                for (i, seg) in segs.enumerated() {
+                    let ns = NSRange(seg.range, in: fullText)
+                    guard ns.location != NSNotFound else { continue }
+                    if right >= ns.location && right < ns.location + ns.length {
+                        select(seg: seg, fullText: fullText, textView: textView)
+                        return
+                    }
                 }
             }
         }
 
+        private func select(seg: Segment, fullText: String, textView: UITextView) {
+            // Compute the index of the selected segment within the current segmentation
+            let segs = segments(for: fullText)
+            let idx = segs.firstIndex(where: { $0.range == seg.range }) ?? -1
+
+            let ns = NSRange(seg.range, in: fullText)
+            let nsText = fullText as NSString
+            let line: Int = {
+                if ns.location != NSNotFound {
+                    let prefix = nsText.substring(to: ns.location)
+                    return prefix.filter { $0 == "\n" }.count
+                } else { return -1 }
+            }()
+
+            let surface = seg.surface
+            let reading = SegmentReadingAttacher.reading(for: surface, tokenizer: TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic())))
+            let token = ParsedToken(surface: surface, reading: reading, meaning: nil)
+
+            interactionLogger.info("Resolved tap to segment: index=\(idx), line=\(line), surface='\(surface, privacy: .public)', reading='\(reading, privacy: .public)'")
+
+            highlightedRange = ns
+            updateTextView(textView, with: fullText, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap, showSegmentHighlighting: parent.showSegmentHighlighting)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            parent.onTokenTap(token)
+        }
+        
         private func applySegmentShading(to attributed: NSMutableAttributedString, baseText: String) {
             let segments = segments(for: baseText)
             for (i, seg) in segments.enumerated() {
@@ -322,7 +435,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 let color: UIColor = (i % 2 == 0)
                     ? UIColor.systemMint.withAlphaComponent(0.24)
                     : UIColor.systemYellow.withAlphaComponent(0.30)
-                attributed.addAttribute(.backgroundColor, value: color, range: nsRange)
+                attributed.addAttribute(.tokenBackgroundColor, value: color, range: nsRange)
             }
         }
         
@@ -346,3 +459,4 @@ private extension String {
         return scalarIndex
     }
 }
+

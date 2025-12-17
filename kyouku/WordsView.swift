@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+import OSLog
+
+fileprivate let wordsLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Words")
 
 struct WordsView: View {
     @EnvironmentObject var store: WordStore
@@ -124,6 +127,9 @@ struct WordsView: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     selectedWord = word
+                    if let w = selectedWord {
+                        wordsLogger.info("Saved word tapped: surface='\(w.surface, privacy: .public)', reading='\(w.reading, privacy: .public)'")
+                    }
                     showingDefinition = true
                     Task { await lookup(for: word) }
                 }
@@ -247,6 +253,13 @@ struct WordsView: View {
             await MainActor.run {
                 dictEntry = rows.first
                 isLookingUp = false
+            }
+            if let e = dictEntry {
+                let surface = e.kanji.isEmpty ? e.reading : e.kanji
+                let firstGloss = e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
+                wordsLogger.info("Popup will show: surface='\(surface, privacy: .public)', reading='\(e.reading, privacy: .public)', gloss='\(firstGloss, privacy: .public)'")
+            } else if let w = selectedWord {
+                wordsLogger.info("Popup will show: no definitions found for surface='\(w.surface, privacy: .public)', reading='\(w.reading, privacy: .public)'")
             }
         } catch {
             await MainActor.run {

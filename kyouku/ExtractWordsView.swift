@@ -1,4 +1,7 @@
 import SwiftUI
+import OSLog
+
+fileprivate let extractLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Extract")
 
 struct ExtractWordsView: View {
     @EnvironmentObject var store: WordStore
@@ -22,6 +25,7 @@ struct ExtractWordsView: View {
 
                     Button {
                         selectedToken = token
+                        extractLogger.info("Word tapped: surface='\(token.surface, privacy: .public)', reading='\(token.reading, privacy: .public)'")
                         showingDefinition = true
                         Task { await lookupDefinitions(for: token) }
                     } label: {
@@ -39,6 +43,7 @@ struct ExtractWordsView: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     selectedToken = token
+                    extractLogger.info("Word tapped: surface='\(token.surface, privacy: .public)', reading='\(token.reading, privacy: .public)'")
                     showingDefinition = true
                     Task { await lookupDefinitions(for: token) }
                 }
@@ -47,7 +52,10 @@ struct ExtractWordsView: View {
         }
         .navigationTitle("Extract Words")
         .onAppear {
-            tokens = JapaneseParser.parse(text: text)
+            let parsed = JapaneseParser.parse(text: text)
+            tokens = parsed.filter { tok in
+                tok.surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            }
         }
         .sheet(isPresented: $showingDefinition) {
             if selectedToken != nil {
@@ -117,6 +125,15 @@ struct ExtractWordsView: View {
                 dictResults = results
                 isLookingUp = false
             }
+            if let e = dictResults.first {
+                let surface = e.kanji.isEmpty ? e.reading : e.kanji
+                let firstGloss = e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
+                extractLogger.info("Popup will show: surface='\(surface, privacy: .public)', reading='\(e.reading, privacy: .public)', gloss='\(firstGloss, privacy: .public)'")
+            } else if let err = lookupError {
+                extractLogger.error("Popup error: \(err, privacy: .public)")
+            } else {
+                extractLogger.info("Popup will show: no definitions found for surface='\(token.surface, privacy: .public)', reading='\(token.reading, privacy: .public)'")
+            }
         } catch {
             await MainActor.run {
                 lookupError = (error as? DictionarySQLiteError)?.description ?? error.localizedDescription
@@ -125,3 +142,4 @@ struct ExtractWordsView: View {
         }
     }
 }
+

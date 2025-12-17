@@ -9,6 +9,9 @@ import SwiftUI
 import UIKit
 import Combine
 import Foundation
+import OSLog
+
+fileprivate let popupLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Interaction")
 
 struct PasteView: View {
     private static let furiganaSymbolOn = "furigana.on" // Replace with your actual symbol name
@@ -21,6 +24,7 @@ struct PasteView: View {
     @State private var inputText: String = ""
     @State private var currentNote: Note? = nil
     @State private var showFurigana: Bool = true
+    @State private var showTokenHighlighting: Bool = true
     @State private var selectedToken: ParsedToken? = nil
     @State private var showingDefinition = false
     @State private var dictResults: [DictionaryEntry] = []
@@ -51,6 +55,7 @@ struct PasteView: View {
                     EditorContainer(
                         text: $inputText,
                         showFurigana: showFurigana,
+                        showTokenHighlighting: showTokenHighlighting,
                         isEditing: isEditing,
                         textSize: textSize,
                         furiganaSize: furiganaSize,
@@ -115,6 +120,22 @@ struct PasteView: View {
                             .font(.title2)
                             .disabled(isEditing)
                             .accessibilityLabel("Show Furigana")
+                        }
+
+                        ControlCell {
+                            Toggle(isOn: $showTokenHighlighting) {
+                                if UIImage(systemName: "highlighter") != nil {
+                                    Image(systemName: "highlighter")
+                                } else {
+                                    Image(systemName: "paintbrush")
+                                }
+                            }
+                            .labelsHidden()
+                            .toggleStyle(.button)
+                            .tint(.accentColor)
+                            .font(.title2)
+                            .disabled(isEditing)
+                            .accessibilityLabel("Highlight tokens")
                         }
 
                         ControlCell {
@@ -480,6 +501,7 @@ struct PasteView: View {
     private struct EditorContainer: View {
         @Binding var text: String
         var showFurigana: Bool
+        var showTokenHighlighting: Bool
         var isEditing: Bool
         var textSize: Double
         var furiganaSize: Double
@@ -498,6 +520,7 @@ struct PasteView: View {
                 isEditable: isEditing,
                 allowTokenTap: allowTap,
                 onTokenTap: onTokenTap,
+                showSegmentHighlighting: showTokenHighlighting,
                 baseFontSize: textSize,
                 rubyFontSize: furiganaSize,
                 lineSpacing: lineSpacing
@@ -507,6 +530,9 @@ struct PasteView: View {
             .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color.clear)
             .environment(\.furiganaGap, furiganaGap)
             .environment(\.highlightedToken, highlightedToken)
+            .environment(\.tokenHighlightColor, Color.yellow.opacity(0.25))
+            .environment(\.selectionHighlightColor, Color.accentColor.opacity(0.35))
+            .environment(\.avoidOverlappingHighlights, true)
             .id(viewKey)
             .cornerRadius(12)
             .padding(.horizontal)
@@ -518,6 +544,7 @@ struct PasteView: View {
             .onChange(of: furiganaGap) { _, _ in bumpKey() }
             .onChange(of: showFurigana) { _, _ in bumpKey() }
             .onChange(of: isEditing) { _, _ in bumpKey() }
+            .onChange(of: showTokenHighlighting) { _, _ in bumpKey() }
         }
 
         private func bumpKey() {
@@ -551,6 +578,17 @@ private struct DefinitionSheetContent: View {
                         return dictResults
                     }
                 }()
+                let entry = filteredResults.first
+                let displayKanji: String = {
+                    if !hasKanjiInToken {
+                        return token.reading.isEmpty ? token.surface : token.reading
+                    }
+                    if let e = entry {
+                        return (e.kanji.isEmpty == false) ? (e.kanji) : (e.reading)
+                    }
+                    return token.surface
+                }()
+                let displayKana: String = entry?.reading ?? token.reading
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -567,18 +605,6 @@ private struct DefinitionSheetContent: View {
                             Image(systemName: "xmark.circle.fill").font(.title3)
                         }
                     }
-
-                    let entry = filteredResults.first
-                    let displayKanji: String = {
-                        if !hasKanjiInToken {
-                            return token.reading.isEmpty ? token.surface : token.reading
-                        }
-                        if let e = entry {
-                            return (e.kanji.isEmpty == false) ? (e.kanji) : (e.reading)
-                        }
-                        return token.surface
-                    }()
-                    let displayKana = entry?.reading ?? token.reading
 
                     Text(displayKanji)
                         .font(.title2).bold()
@@ -602,6 +628,34 @@ private struct DefinitionSheetContent: View {
                             showAllDefinitions: $showAllDefinitions
                         )
                     }
+                }
+                .onAppear {
+                    popupLogger.info("Dictionary popup: word='\(displayKanji, privacy: .public)', kana='\(displayKana, privacy: .public)'")
+                }
+                .onChange(of: dictResults) { _, _ in
+                    // Recompute display values when results update to log the current header
+                    let hasKanjiInToken = token.surface.contains { ch in
+                        ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
+                    }
+                    let filtered: [DictionaryEntry] = {
+                        if !hasKanjiInToken {
+                            return dictResults.filter { ($0.reading) == (token.reading.isEmpty ? token.surface : token.reading) }
+                        } else {
+                            return dictResults
+                        }
+                    }()
+                    let entry = filtered.first
+                    let currentKanji: String = {
+                        if !hasKanjiInToken {
+                            return token.reading.isEmpty ? token.surface : token.reading
+                        }
+                        if let e = entry {
+                            return (e.kanji.isEmpty == false) ? (e.kanji) : (e.reading)
+                        }
+                        return token.surface
+                    }()
+                    let currentKana: String = entry?.reading ?? token.reading
+                    popupLogger.info("Dictionary popup updated: word='\(currentKanji, privacy: .public)', kana='\(currentKana, privacy: .public)'")
                 }
                 .padding()
                 .presentationDetents([.fraction(0.33)])
@@ -669,6 +723,33 @@ extension EnvironmentValues {
     var highlightedToken: ParsedToken? {
         get { self[HighlightedTokenKey.self] }
         set { self[HighlightedTokenKey.self] = newValue }
+    }
+}
+
+private struct TokenHighlightColorKey: EnvironmentKey {
+    static let defaultValue: Color = .yellow.opacity(0.25)
+}
+
+private struct SelectionHighlightColorKey: EnvironmentKey {
+    static let defaultValue: Color = .blue.opacity(0.35)
+}
+
+private struct AvoidOverlappingHighlightsKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+extension EnvironmentValues {
+    var tokenHighlightColor: Color {
+        get { self[TokenHighlightColorKey.self] }
+        set { self[TokenHighlightColorKey.self] = newValue }
+    }
+    var selectionHighlightColor: Color {
+        get { self[SelectionHighlightColorKey.self] }
+        set { self[SelectionHighlightColorKey.self] = newValue }
+    }
+    var avoidOverlappingHighlights: Bool {
+        get { self[AvoidOverlappingHighlightsKey.self] }
+        set { self[AvoidOverlappingHighlightsKey.self] = newValue }
     }
 }
 
