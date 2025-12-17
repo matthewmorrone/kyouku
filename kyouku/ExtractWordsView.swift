@@ -18,38 +18,52 @@ struct ExtractWordsView: View {
     @State private var isLookingUp = false
     @State private var lookupError: String? = nil
 
-    var body: some View {
-        List {
-            ForEach(tokens) { token in
-                HStack(spacing: 12) {
-                    FuriganaTextView(token: token)
-                    Spacer()
+    @State private var hideDuplicates: Bool = true
+    @State private var hideParticles: Bool = true
 
-                    Button {
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 16) {
+                Toggle("Hide duplicates", isOn: $hideDuplicates)
+                    .toggleStyle(.switch)
+                Toggle("Hide particles", isOn: $hideParticles)
+                    .toggleStyle(.switch)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal)
+
+            List {
+                ForEach(filteredTokens) { token in
+                    HStack(spacing: 12) {
+                        FuriganaTextView(token: token)
+                        Spacer()
+
+                        Button {
+                            selectedToken = token
+                            extractLogger.info("Word tapped: surface='\(token.surface, privacy: .public)', reading='\(token.reading, privacy: .public)'")
+                            showingDefinition = true
+                            Task { await lookupDefinitions(for: token) }
+                        } label: {
+                            if store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            } else {
+                                Image(systemName: "plus.circle")
+                                    .foregroundStyle(.tint)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }))
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
                         selectedToken = token
                         extractLogger.info("Word tapped: surface='\(token.surface, privacy: .public)', reading='\(token.reading, privacy: .public)'")
                         showingDefinition = true
                         Task { await lookupDefinitions(for: token) }
-                    } label: {
-                        if store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                        } else {
-                            Image(systemName: "plus.circle")
-                                .foregroundStyle(.tint)
-                        }
                     }
-                    .buttonStyle(.plain)
-                    .disabled(store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }))
+                    .padding(.vertical, 6)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    selectedToken = token
-                    extractLogger.info("Word tapped: surface='\(token.surface, privacy: .public)', reading='\(token.reading, privacy: .public)'")
-                    showingDefinition = true
-                    Task { await lookupDefinitions(for: token) }
-                }
-                .padding(.vertical, 6)
             }
         }
         .navigationTitle("Extract Words")
@@ -142,6 +156,27 @@ struct ExtractWordsView: View {
                 isLookingUp = false
             }
         }
+    }
+
+    private var filteredTokens: [ParsedToken] {
+        var base = tokens
+        if hideDuplicates {
+            var seen = Set<String>()
+            base = base.filter { t in
+                let key = t.surface + "\u{241F}" + t.reading
+                if seen.contains(key) { return false }
+                seen.insert(key)
+                return true
+            }
+        }
+        if hideParticles {
+            let particles: Set<String> = ["は","が","を","に","へ","と","で","や","の","も","ね","よ","な"]
+            base = base.filter { t in
+                let s = t.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                return !particles.contains(s)
+            }
+        }
+        return base
     }
 }
 

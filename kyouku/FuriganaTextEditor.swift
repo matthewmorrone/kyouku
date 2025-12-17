@@ -48,6 +48,10 @@ final class RoundedBackgroundLayoutManager: NSLayoutManager {
 
                 let tight = self.boundingRect(forGlyphRange: intersection, in: container)
                 var drawRect = tight.offsetBy(dx: origin.x, dy: origin.y)
+
+                // Slightly inset highlight vertically to avoid colliding with ruby drawn above the glyphs
+                drawRect = drawRect.insetBy(dx: 0, dy: 2)
+
                 drawRect = drawRect.insetBy(dx: -self.horizontalPadding, dy: -self.verticalPadding)
                 let path = UIBezierPath(roundedRect: drawRect, cornerRadius: self.cornerRadius)
                 color.setFill()
@@ -61,7 +65,7 @@ final class RoundedBackgroundLayoutManager: NSLayoutManager {
         super.drawGlyphs(forGlyphRange: glyphsToShow, at: origin)
 
         // Then draw ruby readings on top so they aren't occluded by glyphs
-        guard let textStorage = self.textStorage, let textContainer = self.textContainers.first else { return }
+        guard let textStorage = self.textStorage, let _ = self.textContainers.first else { return }
         let characterRange = self.characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
         textStorage.enumerateAttribute(.rubyReading, in: characterRange, options: []) { value, range, _ in
             guard let reading = value as? String, !reading.isEmpty else { return }
@@ -292,13 +296,14 @@ struct FuriganaTextEditor: UIViewRepresentable {
                             baseFontSize: CGFloat(base),
                             rubyFontSize: CGFloat(ruby),
                             lineSpacing: CGFloat(spacing),
-                            segments: segmentsArg
+                            segments: segmentsArg,
+                            forceMeCabOnly: true
                         )
                     } else {
                         if let segsNonEmpty = segmentsArg {
-                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, segments: segsNonEmpty)
+                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, segments: segsNonEmpty, forceMeCabOnly: true)
                         } else {
-                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true)
+                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, forceMeCabOnly: true)
                         }
                     }
                     let mutable = NSMutableAttributedString(attributedString: attributed)
@@ -462,7 +467,9 @@ struct FuriganaTextEditor: UIViewRepresentable {
             }()
 
             let surface = seg.surface
-            let reading = SegmentReadingAttacher.reading(for: surface, tokenizer: TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic())))
+            let readingFromAttr = textView.textStorage.attribute(.rubyReading, at: ns.location, effectiveRange: nil) as? String
+            let reading = (readingFromAttr?.isEmpty == false) ? readingFromAttr! : SegmentReadingAttacher.reading(for: surface, tokenizer: TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic())))
+
             let token = ParsedToken(surface: surface, reading: reading, meaning: nil)
 
             interactionLogger.info("Resolved tap to segment: index=\(idx), line=\(line), surface='\(surface, privacy: .public)', reading='\(reading, privacy: .public)'")
