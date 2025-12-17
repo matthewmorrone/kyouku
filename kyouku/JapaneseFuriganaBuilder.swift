@@ -94,17 +94,6 @@ enum JapaneseFuriganaBuilder {
                     }
                 }
             }
-
-            if rubyTargets.isEmpty, let tokenizer = tokenizer() {
-                let annotations = tokenizer.tokenize(text: text)
-                for ann in annotations {
-                    let surface = String(text[ann.range])
-                    if !surface.containsKanji { continue }
-                    if ann.reading.isEmpty { continue }
-                    let nsRange = NSRange(ann.range, in: text)
-                    rubyTargets.append((nsRange, toHiragana(ann.reading)))
-                }
-            }
         }
 
         for (range, reading) in rubyTargets {

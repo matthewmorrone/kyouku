@@ -9,79 +9,28 @@ struct Segment: Hashable {
 enum DictionarySegmenter {
     static func segment(text: String, trie: Trie?) -> [Segment] {
         let s = text.precomposedStringWithCanonicalMapping
-        guard let t = trie else {
-            // Fallback: group contiguous Japanese or ASCII letter/digit runs
-            return fallbackGroupRuns(in: s)
-        }
+        guard let t = trie else { return [] }
+        return segment(text: s, trie: t)
+    }
 
+    static func segment(text: String, trie: Trie) -> [Segment] {
+        let s = text.precomposedStringWithCanonicalMapping
         var out: [Segment] = []
         var i = s.startIndex
         while i < s.endIndex {
-            if let end = t.longestMatchEnd(in: s, from: i) {
+            if let end = trie.longestMatchEnd(in: s, from: i) {
                 let r = i..<end
                 out.append(Segment(range: r, surface: String(s[r]), isDictionaryMatch: true))
                 i = end
                 continue
             }
-            // No dictionary match at i: build a run of Japanese letters OR ASCII letters/digits
-            var j = i
-            if j < s.endIndex {
-                let first = s[j]
-                let firstIsJP = isJapaneseLetter(first)
-                let firstIsASCII = isAsciiLetterOrDigit(first)
-                if firstIsJP || firstIsASCII {
-                    while j < s.endIndex {
-                        let c = s[j]
-                        let sameCategory: Bool = firstIsJP ? isJapaneseLetter(c) : (firstIsASCII && isAsciiLetterOrDigit(c))
-                        if !sameCategory { break }
-                        let next = s.index(after: j)
-                        // If there's a dictionary match starting at this position (and it's not the first char of the run), stop to allow that match
-                        if j != i, t.longestMatchEnd(in: s, from: j) != nil { break }
-                        j = next
-                    }
-                }
-            }
-            if j == i {
-                // Single non-Japanese/non-ASCII character fallback
-                let next = s.index(after: i)
-                let r = i..<next
-                out.append(Segment(range: r, surface: String(s[r]), isDictionaryMatch: false))
-                i = next
-            } else {
-                let r = i..<j
-                out.append(Segment(range: r, surface: String(s[r]), isDictionaryMatch: false))
-                i = j
-            }
-        }
-
-        return postProcessJapaneseSegments(s, out)
-    }
-
-    static func segment(text: String, trie: Trie) -> [Segment] {
-        segment(text: text, trie: Optional(trie))
-    }
-
-    // MARK: - Fallback grouping
-    private static func fallbackGroupRuns(in s: String) -> [Segment] {
-        var out: [Segment] = []
-        var i = s.startIndex
-        while i < s.endIndex {
-            let c = s[i]
-            var j = s.index(after: i)
-            if isJapaneseLetter(c) {
-                while j < s.endIndex, isJapaneseLetter(s[j]) {
-                    j = s.index(after: j)
-                }
-            } else if isAsciiLetterOrDigit(c) {
-                while j < s.endIndex, isAsciiLetterOrDigit(s[j]) {
-                    j = s.index(after: j)
-                }
-            }
-            let r = i..<j
+            // No dictionary match at i: advance by one character to avoid legacy fallbacks
+            let next = s.index(after: i)
+            let r = i..<next
             out.append(Segment(range: r, surface: String(s[r]), isDictionaryMatch: false))
-            i = j
+            i = next
         }
-        return out
+        return postProcessJapaneseSegments(s, out)
     }
 
     // MARK: - Post-processing rules for Japanese morphology
