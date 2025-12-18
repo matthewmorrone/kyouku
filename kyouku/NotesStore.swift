@@ -70,4 +70,12 @@ class NotesStore: ObservableObject {
             notes = []
         }
     }
+    
+    // MARK: - Bulk Replace / Export
+    func replaceAll(with newNotes: [Note]) {
+        self.notes = newNotes
+        save()
+    }
+
+    func allNotes() -> [Note] { notes }
 }

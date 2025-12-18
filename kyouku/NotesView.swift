@@ -13,7 +13,7 @@ struct NotesView: View {
     @EnvironmentObject var store: WordStore
     @State private var pendingDeleteOffsets: IndexSet? = nil
     @State private var showDeleteAlert: Bool = false
-    @State private var deleteAssociatedWords: Bool = false
+    @State private var pendingDeleteHasAssociatedWords: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -52,6 +52,16 @@ struct NotesView: View {
                     }
                     .onDelete { offsets in
                         pendingDeleteOffsets = offsets
+                        var hasAssociatedWords = false
+                        for index in offsets {
+                            guard index < notesStore.notes.count else { continue }
+                            let noteID = notesStore.notes[index].id
+                            if store.words.contains(where: { $0.sourceNoteID == noteID }) {
+                                hasAssociatedWords = true
+                                break
+                            }
+                        }
+                        pendingDeleteHasAssociatedWords = hasAssociatedWords
                         showDeleteAlert = true
                     }
                 }
@@ -59,9 +69,8 @@ struct NotesView: View {
             .navigationTitle("Notes")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("New") {
-                        router.noteToOpen = nil
-                        router.selectedTab = .paste
+                    Button(action: { PasteView.createNewNote(notes: notesStore, router: router) }) {
+                        Image(systemName: "plus.square").font(.title2)
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -69,17 +78,24 @@ struct NotesView: View {
                 }
             }
             .confirmationDialog("Delete note?", isPresented: $showDeleteAlert, titleVisibility: .visible) {
-                Button("Delete note and associated words", role: .destructive) {
-                    handleDeleteNotes(deleteWords: true)
+                if pendingDeleteHasAssociatedWords {
+                    Button("Delete note and associated words", role: .destructive) {
+                        handleDeleteNotes(deleteWords: true)
+                    }
                 }
-                Button("Delete note only", role: .destructive) {
+                Button(pendingDeleteHasAssociatedWords ? "Delete note only" : "Delete note", role: .destructive) {
                     handleDeleteNotes(deleteWords: false)
                 }
                 Button("Cancel", role: .cancel) {
                     pendingDeleteOffsets = nil
+                    pendingDeleteHasAssociatedWords = false
                 }
             } message: {
-                Text("Do you also want to delete any words saved from this note?")
+                if pendingDeleteHasAssociatedWords {
+                    Text("Do you also want to delete any words saved from this note?")
+                } else {
+                    Text("This will delete the selected note(s).")
+                }
             }
         }
     }
@@ -97,6 +113,7 @@ struct NotesView: View {
             }
         }
         pendingDeleteOffsets = nil
+        pendingDeleteHasAssociatedWords = false
     }
 }
 
@@ -117,18 +134,20 @@ struct NoteDetailView: View {
     @State private var editableText: String = ""
 
     @State private var selectedToken: ParsedToken? = nil
+    @State private var selectedTokenRange: NSRange? = nil
     @State private var showingDefinition = false
 
     @State private var dictResults: [DictionaryEntry] = []
     @State private var isLookingUp = false
     @State private var lookupError: String? = nil
     @State private var segVM: SegmentedTextViewModel? = nil
+    @State private var fallbackTranslation: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
                 NavigationLink("Extract Words") {
-                    ExtractWordsView(text: editableText.isEmpty ? note.text : editableText)
+                    ExtractWordsView(text: editableText.isEmpty ? note.text : editableText, sourceNoteID: note.id)
                 }
                 .buttonStyle(.borderedProminent)
                 Spacer()
@@ -138,13 +157,29 @@ struct NoteDetailView: View {
                 .font(.title2.weight(.semibold))
                 .textFieldStyle(.roundedBorder)
 
-            FuriganaTextEditor(text: $editableText, showFurigana: showFurigana, isEditable: !showFurigana && isEditing, allowTokenTap: !isEditing) { token in
-                selectedToken = token
-                showingDefinition = true
-                Task {
-                    await lookupDefinitions(for: token)
+            FuriganaTextEditor(
+                text: $editableText,
+                showFurigana: showFurigana,
+                isEditable: !showFurigana && isEditing,
+                allowTokenTap: !isEditing,
+                onTokenTap: { token in
+                    selectedToken = token
+                    selectedTokenRange = token.range
+                    showingDefinition = true
+                    Task {
+                        await lookupDefinitions(for: token)
+                    }
+                },
+                onSelectionCleared: {
+                    selectedToken = nil
+                    selectedTokenRange = nil
+                    showingDefinition = false
+                    dictResults = []
+                    isLookingUp = false
+                    lookupError = nil
+                    fallbackTranslation = nil
                 }
-            }
+            )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(UIColor.secondarySystemBackground))
             .cornerRadius(8)
@@ -155,6 +190,7 @@ struct NoteDetailView: View {
                         guard let selected = newSelected else { return }
                         let token = ParsedToken(surface: selected.surface, reading: "", meaning: "")
                         selectedToken = token
+                        selectedTokenRange = nil
                         showingDefinition = true
                         Task {
                             await lookupDefinitions(for: token)
@@ -209,11 +245,13 @@ struct NoteDetailView: View {
                             if let first = dictResults.first {
                                 let surface = first.kanji.isEmpty ? first.reading : first.kanji
                                 let firstGloss = first.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? first.gloss
-                                store.add(surface: surface, reading: first.reading, meaning: firstGloss)
+                                store.add(surface: surface, reading: first.reading, meaning: firstGloss, sourceNoteID: note.id)
+                            } else if let translation = fallbackTranslation, translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                                store.add(surface: token.surface, reading: token.reading, meaning: translation, sourceNoteID: note.id)
                             } else {
                                 // Fallback: attempt to add the tapped token if it already has a meaning; otherwise WordStore.add will ignore empty meanings
                                 let fallbackMeaning = token.meaning ?? ""
-                                store.add(surface: token.surface, reading: token.reading, meaning: fallbackMeaning)
+                                store.add(surface: token.surface, reading: token.reading, meaning: fallbackMeaning, sourceNoteID: note.id)
                             }
                             showingDefinition = false
                         }) {
@@ -223,6 +261,19 @@ struct NoteDetailView: View {
                         Button(action: { showingDefinition = false }) {
                             Image(systemName: "xmark.circle.fill").font(.title3)
                         }
+                    }
+                    HStack(spacing: 12) {
+                        Button("Combine Left") {
+                            combineToken(direction: .left)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(selectedTokenRange == nil)
+
+                        Button("Combine Right") {
+                            combineToken(direction: .right)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(selectedTokenRange == nil)
                     }
 
                     // Prefer DB entry values, fallback to token while loading
@@ -248,6 +299,16 @@ struct NoteDetailView: View {
                         Text(firstGloss)
                             .font(.body)
                             .fixedSize(horizontal: false, vertical: true)
+                    } else if let translation = fallbackTranslation, translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Apple Translation")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            Text(translation)
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     } else {
                         Text("No definitions found.")
                             .foregroundStyle(.secondary)
@@ -268,7 +329,15 @@ struct NoteDetailView: View {
             if isEditing { showFurigana = false }
 
             let initialText = editableText.isEmpty ? note.text : editableText
-            if let trie = JMdictTrieCache.shared {
+            let engine = SegmentationEngine.current()
+            if engine == .appleTokenizer {
+                if segVM == nil {
+                    segVM = SegmentedTextViewModel(text: initialText, trie: nil)
+                } else {
+                    segVM?.text = initialText
+                    segVM?.recomputeSegments()
+                }
+            } else if let trie = JMdictTrieCache.shared {
                 if segVM == nil {
                     segVM = SegmentedTextViewModel(text: initialText, trie: trie)
                 } else {
@@ -305,12 +374,25 @@ struct NoteDetailView: View {
             isLookingUp = true
             lookupError = nil
             dictResults = []
+            fallbackTranslation = nil
         }
         do {
             var results = try await DictionarySQLiteStore.shared.lookup(term: token.surface, limit: 1)
             if results.isEmpty && !token.reading.isEmpty {
                 let alt = try await DictionarySQLiteStore.shared.lookup(term: token.reading, limit: 1)
                 if !alt.isEmpty { results = alt }
+            }
+
+            if results.isEmpty {
+                if let translation = await TranslationFallback.translate(surface: token.surface, reading: token.reading) {
+                    await MainActor.run {
+                        fallbackTranslation = translation
+                    }
+                }
+            } else {
+                await MainActor.run {
+                    fallbackTranslation = nil
+                }
             }
             await MainActor.run {
                 dictResults = results
@@ -320,8 +402,65 @@ struct NoteDetailView: View {
             await MainActor.run {
                 lookupError = (error as? DictionarySQLiteError)?.description ?? error.localizedDescription
                 isLookingUp = false
+                fallbackTranslation = nil
             }
         }
+    }
+
+    private enum CombineDirection { case left, right }
+
+    private func combineToken(direction: CombineDirection) {
+        guard let segVM else { return }
+        let text = editableText.isEmpty ? note.text : editableText
+        guard let nsRange = selectedTokenRange, nsRange.location != NSNotFound, nsRange.length > 0 else { return }
+
+        // Build current segments
+        let segments = segVM.segments
+        guard !segments.isEmpty else { return }
+
+        // Find the index of the selected segment by matching NSRange
+        let selectedIndex: Int? = {
+            for (i, s) in segments.enumerated() {
+                let ns = NSRange(s.range, in: text)
+                if ns.location == nsRange.location && ns.length == nsRange.length { return i }
+            }
+            return nil
+        }()
+        guard let idx = selectedIndex else { return }
+
+        let neighborIndex: Int? = {
+            switch direction {
+            case .left:
+                return idx > 0 ? idx - 1 : nil
+            case .right:
+                return (idx + 1) < segments.count ? idx + 1 : nil
+            }
+        }()
+        guard let nIdx = neighborIndex else { return }
+
+        let a = direction == .left ? segments[nIdx] : segments[idx]
+        let b = direction == .left ? segments[idx] : segments[nIdx]
+
+        // Only combine if contiguous
+        guard a.range.upperBound == b.range.lowerBound else { return }
+
+        let combinedSurface = a.surface + b.surface
+        // Add to custom lexicon and rebuild trie cache
+        _ = CustomTokenizerLexicon.add(word: combinedSurface)
+
+        // Refresh the SegmentedTextViewModel to use the updated trie
+        if let newTrie = JMdictTrieCache.shared ?? CustomTrieProvider.makeTrie() {
+            segVM.trie = newTrie
+        }
+        segVM.invalidateSegmentation()
+
+        // Also update the FuriganaTextEditor by toggling its text binding to force rebuild
+        editableText = String(text)
+
+        // Clear selection and close the sheet to avoid stale state
+        selectedToken = nil
+        selectedTokenRange = nil
+        showingDefinition = false
     }
 }
 

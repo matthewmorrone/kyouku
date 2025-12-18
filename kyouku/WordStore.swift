@@ -112,4 +112,12 @@ final class WordStore: ObservableObject {
             save()
         }
     }
+
+    // MARK: - Bulk Replace / Export
+    func replaceAll(with newWords: [Word]) {
+        self.words = newWords
+        save()
+    }
+
+    func allWords() -> [Word] { words }
 }

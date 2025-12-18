@@ -30,13 +30,29 @@ final class SegmentedTextViewModel: ObservableObject {
     func recomputeSegments() {
         // Avoid resegmenting if the text hasn't changed; this prevents runtime boundary snaps
         if text == lastSegmentedText { return }
-        segments = DictionarySegmenter.segment(text: text, trie: trie)
+        let engine = SegmentationEngine.current()
+        if engine == .dictionaryTrie {
+            if let trie {
+                segments = DictionarySegmenter.segment(text: text, trie: trie)
+            } else if let shared = JMdictTrieCache.shared {
+                segments = DictionarySegmenter.segment(text: text, trie: shared)
+            } else {
+                segments = AppleSegmenter.segment(text: text)
+            }
+        } else {
+            segments = AppleSegmenter.segment(text: text)
+        }
         lastSegmentedText = text
         if let sel = selected {
             if !segments.contains(where: { $0.range == sel.range }) {
                 selected = nil
             }
         }
+    }
+    
+    func invalidateSegmentation() {
+        lastSegmentedText = ""
+        recomputeSegments()
     }
 
     func select(at index: String.Index) {

@@ -12,4 +12,6 @@ struct ParsedToken: Identifiable, Hashable {
     var surface: String
     var reading: String
     var meaning: String?
+    // UTF-16 range of this token within the current text context (if known)
+    var range: NSRange? = nil
 }

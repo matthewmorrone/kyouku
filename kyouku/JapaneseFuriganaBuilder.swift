@@ -105,7 +105,6 @@ enum JapaneseFuriganaBuilder {
                 k += 1
             }
 
-            let rTrimmedStr = String(rTrimmed)
             let remaining = rIndex < rTrimmed.count ? String(rTrimmed[rIndex...]) : ""
             var slice = remaining
             if !nextKanaSeq.isEmpty, let rangeInReading = remaining.range(of: nextKanaSeq) {
@@ -177,11 +176,25 @@ enum JapaneseFuriganaBuilder {
                 }
             }
         } else {
-            if let trie = JMdictTrieCache.shared, !forceMeCabOnly {
+            let engine = SegmentationEngine.current()
+            if engine == .dictionaryTrie, let trie = JMdictTrieCache.shared, !forceMeCabOnly {
                 let mecab = TokenizerFactory.make() ?? tokenizer()
                 if let mecab {
                     let segments = DictionarySegmenter.segment(text: text, trie: trie)
                     let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: segments, tokenizer: mecab)
+                    for item in enriched {
+                        if !item.segment.surface.containsKanji { continue }
+                        let reading = item.reading
+                        if reading.isEmpty || reading == item.segment.surface { continue }
+                        let nsRange = NSRange(item.segment.range, in: text)
+                        rubyTargets.append((nsRange, toHiragana(reading)))
+                    }
+                }
+            } else if engine == .appleTokenizer, !forceMeCabOnly {
+                let mecab = TokenizerFactory.make() ?? tokenizer()
+                if let mecab {
+                    let appleSegments = AppleSegmenter.segment(text: text)
+                    let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: appleSegments, tokenizer: mecab)
                     for item in enriched {
                         if !item.segment.surface.containsKanji { continue }
                         let reading = item.reading
@@ -208,6 +221,8 @@ enum JapaneseFuriganaBuilder {
             }
         }
 
+        fillMissingRubyTargets(&rubyTargets, text: text)
+
         for (range, reading) in rubyTargets {
             for (r2, rd2) in Self.refinedRubyTargets(range: range, reading: reading, in: text) {
                 let ruby = CTRubyAnnotationCreateWithAttributes(
@@ -223,6 +238,31 @@ enum JapaneseFuriganaBuilder {
         }
 
         return attributed
+    }
+
+    private static func fillMissingRubyTargets(_ targets: inout [(NSRange, String)], text: String) {
+        guard let mecab = TokenizerFactory.make() ?? tokenizer() else { return }
+
+        var covered = IndexSet()
+        for (range, _) in targets {
+            if range.location != NSNotFound && range.length > 0 {
+                covered.insert(integersIn: range.location ..< (range.location + range.length))
+            }
+        }
+
+        let annotations = mecab.tokenize(text: text)
+        for ann in annotations {
+            let surface = String(text[ann.range])
+            if !surface.containsKanji { continue }
+            let nsRange = NSRange(ann.range, in: text)
+            if nsRange.location == NSNotFound || nsRange.length == 0 { continue }
+            let raw = nsRange.location ..< (nsRange.location + nsRange.length)
+            if covered.contains(integersIn: raw) { continue }
+            let reading = ann.reading
+            if reading.isEmpty || reading == surface { continue }
+            covered.insert(integersIn: raw)
+            targets.append((nsRange, toHiragana(reading)))
+        }
     }
 
     static func buildAttributedText(text: String, showFurigana: Bool, forceMeCabOnly: Bool = false) -> NSAttributedString {

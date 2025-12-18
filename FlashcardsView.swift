@@ -217,9 +217,7 @@ struct FlashcardsView: View {
                 if scope == .mostRecent {
                     Stepper("Most recent: \u{200E}\(mostRecentCount)", value: $mostRecentCount, in: 5...200, step: 5)
                 } else if scope == .fromNote {
-                    Text("Review from a specific note is not yet wired to notes metadata.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    NotePicker(selectedNoteID: $selectedNoteID)
                 }
 
                 // Direction selection
@@ -305,9 +303,33 @@ struct FlashcardsView: View {
             let wrong = ReviewPersistence.allWrong()
             base = base.filter { wrong.contains($0.id) }
         case .fromNote:
-            // Requires Note linkage on Word to filter; currently not available.
-            base = store.words
+            if let id = selectedNoteID {
+                base = base.filter { $0.sourceNoteID == id }
+            }
         }
         return base
     }
 }
+private struct NotePicker: View {
+    @EnvironmentObject var notes: NotesStore
+    @Binding var selectedNoteID: UUID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if notes.notes.isEmpty {
+                Text("No notes available.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker("Note", selection: $selectedNoteID) {
+                    Text("Any Note").tag(UUID?.none)
+                    ForEach(notes.notes) { note in
+                        Text(note.title?.isEmpty == false ? note.title! : "Untitled").tag(UUID?.some(note.id))
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+        }
+    }
+}
+

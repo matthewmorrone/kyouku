@@ -10,6 +10,7 @@ import UIKit
 import Mecab_Swift
 import IPADic
 import OSLog
+import CoreFoundation
 
 fileprivate let interactionLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Interaction")
 
@@ -23,13 +24,12 @@ extension NSAttributedString.Key {
 
 final class RoundedBackgroundLayoutManager: NSLayoutManager {
     var cornerRadius: CGFloat = 5
-    var horizontalPadding: CGFloat = 2
-    var verticalPadding: CGFloat = 0.5
+    var interTokenGap: CGFloat = 0.75
 
     override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
         super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
 
-        guard let textStorage = self.textStorage, let textContainer = self.textContainers.first else { return }
+        guard let textStorage = self.textStorage, let _ = self.textContainers.first else { return }
 
         let fullLength = textStorage.length
         guard fullLength > 0 else { return }
@@ -48,12 +48,43 @@ final class RoundedBackgroundLayoutManager: NSLayoutManager {
 
                 let tight = self.boundingRect(forGlyphRange: intersection, in: container)
                 var drawRect = tight.offsetBy(dx: origin.x, dy: origin.y)
+                let lineRect = usedRect.offsetBy(dx: origin.x, dy: origin.y)
 
-                // Slightly inset highlight vertically to avoid colliding with ruby drawn above the glyphs
-                drawRect = drawRect.insetBy(dx: 0, dy: 2)
+                // Align vertically with the line fragment so the highlight reaches the top of the text line.
+                _ = textStorage.attributes(at: range.location, effectiveRange: nil)
+                var hasRuby = false
+                textStorage.enumerateAttribute(.rubyReading, in: range, options: []) { value, _, stop in
+                    if let reading = value as? String, !reading.isEmpty {
+                        hasRuby = true
+                        stop.pointee = true
+                    }
+                }
+                let top = lineRect.minY
+                let bottomInset: CGFloat = hasRuby ? 1.5 : 0.5
+                let bottom = max(top + 1, lineRect.maxY - bottomInset)
+                drawRect.origin.y = top
+                drawRect.size.height = bottom - top
 
-                drawRect = drawRect.insetBy(dx: -self.horizontalPadding, dy: -self.verticalPadding)
-                let path = UIBezierPath(roundedRect: drawRect, cornerRadius: self.cornerRadius)
+                if drawRect.width <= 0 || drawRect.height <= 0 { return }
+
+                // Add a small horizontal gap to keep rounded corners from touching neighbors.
+                let horizontalPad: CGFloat = 1.0
+                if drawRect.width > horizontalPad * 2 {
+                    drawRect = drawRect.insetBy(dx: horizontalPad, dy: 0)
+                }
+
+                if drawRect.minX < lineRect.minX {
+                    let delta = lineRect.minX - drawRect.minX
+                    drawRect.origin.x += delta
+                    drawRect.size.width -= delta
+                }
+                if drawRect.maxX > lineRect.maxX {
+                    let delta = drawRect.maxX - lineRect.maxX
+                    drawRect.size.width -= delta
+                }
+                if drawRect.width <= 0 || drawRect.height <= 0 { return }
+                let radius = min(self.cornerRadius, drawRect.height / 2, drawRect.width / 2)
+                let path = UIBezierPath(roundedRect: drawRect, cornerRadius: radius)
                 color.setFill()
                 path.fill()
             }
@@ -77,7 +108,7 @@ final class RoundedBackgroundLayoutManager: NSLayoutManager {
                 if intersection.length == 0 { return }
 
                 let tight = self.boundingRect(forGlyphRange: intersection, in: container)
-                var drawRect = tight.offsetBy(dx: origin.x, dy: origin.y)
+                let drawRect = tight.offsetBy(dx: origin.x, dy: origin.y)
 
                 // Determine a small font relative to the base font at this location
                 var rubyFont: UIFont = .systemFont(ofSize: 9)
@@ -109,6 +140,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
     var isEditable: Bool = true
     var allowTokenTap: Bool = true
     var onTokenTap: (ParsedToken) -> Void
+    var onSelectionCleared: () -> Void = {}
     var showSegmentHighlighting: Bool = true
 
     var baseFontSize: Double? = nil
@@ -123,6 +155,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
         // Use a custom layout manager to draw rounded token backgrounds
         let textStorage = NSTextStorage()
         let layoutManager = RoundedBackgroundLayoutManager()
+        let _ = NSTextContainer(size: .zero)
         let textContainer = NSTextContainer(size: .zero)
         textContainer.lineFragmentPadding = 0
         textContainer.widthTracksTextView = true
@@ -164,10 +197,15 @@ struct FuriganaTextEditor: UIViewRepresentable {
         context.coordinator.tapRecognizer = tap
         tv.addGestureRecognizer(tap)
         tv.accessibilityIdentifier = "FuriganaTextEditorTextView"
-        let grCount = tv.gestureRecognizers?.count ?? 0
+        _ = tv.gestureRecognizers?.count ?? 0
 
         // Initial content
         context.coordinator.updateTextView(tv, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap, showSegmentHighlighting: showSegmentHighlighting)
+        DispatchQueue.main.async {
+            tv.layoutManager.ensureLayout(for: tv.textContainer)
+            tv.setNeedsLayout()
+            tv.layoutIfNeeded()
+        }
         return tv
     }
 
@@ -188,6 +226,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 uiView.textContainerInset = UIEdgeInsets(top: baseTop, left: currentInsets.left, bottom: currentInsets.bottom, right: currentInsets.right)
             }
         }
+        uiView.layoutManager.ensureLayout(for: uiView.textContainer)
 
         // Keep text container size in sync with view for accurate multi-line hit-testing
         let width = max(0, uiView.bounds.width - (uiView.textContainerInset.left + uiView.textContainerInset.right))
@@ -225,6 +264,11 @@ struct FuriganaTextEditor: UIViewRepresentable {
         
         private var cachedSegments: [Segment] = []
         private var cachedSegmentsKey: String = ""
+        
+        func invalidateSegmentCache() {
+            cachedSegments = []
+            cachedSegmentsKey = ""
+        }
 
         init(_ parent: FuriganaTextEditor) {
             self.parent = parent
@@ -271,7 +315,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 let key = "\(currentText)|\(hr?.location ?? -1):\(hr?.length ?? -1)|\(base?.description ?? "nil")|\(ruby?.description ?? "nil")|\(spacing?.description ?? "nil")"
 
                 // If we've already applied this exact build, skip
-                if lastAppliedBuildKey == key, textView.attributedText != nil {
+                if lastAppliedBuildKey == key, !(textView.attributedText?.string.isEmpty ?? true) {
                     return
                 }
                 // If an identical build is already pending, let it finish
@@ -296,20 +340,20 @@ struct FuriganaTextEditor: UIViewRepresentable {
                             baseFontSize: CGFloat(base),
                             rubyFontSize: CGFloat(ruby),
                             lineSpacing: CGFloat(spacing),
-                            segments: segmentsArg,
-                            forceMeCabOnly: true
+                            segments: segmentsArg
                         )
                     } else {
                         if let segsNonEmpty = segmentsArg {
-                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, segments: segsNonEmpty, forceMeCabOnly: true)
+                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, segments: segsNonEmpty)
                         } else {
-                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, forceMeCabOnly: true)
+                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true)
                         }
                     }
                     let mutable = NSMutableAttributedString(attributedString: attributed)
                     if !isEditable && showSegmentHighlighting {
                         applySegmentShading(to: mutable, baseText: currentText)
                     }
+                    // Always apply the yellow highlight if hr is valid, regardless of showSegmentHighlighting
                     if let hr = hr, hr.location != NSNotFound, hr.location + hr.length <= mutable.length {
                         mutable.addAttribute(.tokenBackgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.35), range: hr)
                     }
@@ -377,10 +421,17 @@ struct FuriganaTextEditor: UIViewRepresentable {
                     if showSegmentHighlighting {
                         applySegmentShading(to: mutable, baseText: text)
                     }
+                    // Always apply the yellow highlight if hr is valid, regardless of showSegmentHighlighting
+                    if let hr = highlightedRange, hr.location != NSNotFound, hr.location + hr.length <= mutable.length {
+                        mutable.addAttribute(.tokenBackgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.35), range: hr)
+                    }
                     textView.attributedText = mutable
                     textView.isEditable = false
-                    highlightedRange = nil
                 }
+
+                // Force the next furigana build to refresh when toggled back on.
+                lastAppliedBuildKey = nil
+                pendingBuildKey = nil
             }
 
             // Restore selection if still valid
@@ -396,7 +447,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard let tv = gesture.view as? UITextView else { return }
             let rawPoint = gesture.location(in: tv)
-            var point = CGPoint(x: rawPoint.x - tv.textContainerInset.left,
+            let point = CGPoint(x: rawPoint.x - tv.textContainerInset.left,
                                 y: rawPoint.y - tv.textContainerInset.top)
 
             let lm = tv.layoutManager
@@ -417,7 +468,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
             let segs = segments(for: fullText)
 
             // Try direct NSRange containment first to avoid String.Index cross-string issues
-            for (i, seg) in segs.enumerated() {
+            for seg in segs {
                 let ns = NSRange(seg.range, in: fullText)
                 guard ns.location != NSNotFound else { continue }
                 if idx >= ns.location && idx < ns.location + ns.length {
@@ -429,7 +480,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
             // If no direct match (e.g., tapped exactly on a boundary), bias left then right
             if idx > 0 {
                 let left = idx - 1
-                for (i, seg) in segs.enumerated() {
+                for seg in segs {
                     let ns = NSRange(seg.range, in: fullText)
                     guard ns.location != NSNotFound else { continue }
                     if left >= ns.location && left < ns.location + ns.length {
@@ -441,7 +492,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
             if idx + 1 < nsLen {
                 let right = idx + 1
-                for (i, seg) in segs.enumerated() {
+                for seg in segs {
                     let ns = NSRange(seg.range, in: fullText)
                     guard ns.location != NSNotFound else { continue }
                     if right >= ns.location && right < ns.location + ns.length {
@@ -450,12 +501,14 @@ struct FuriganaTextEditor: UIViewRepresentable {
                     }
                 }
             }
+
+            clearSelection(fullText: fullText, textView: textView)
         }
 
         private func select(seg: Segment, fullText: String, textView: UITextView) {
             // Compute the index of the selected segment within the current segmentation
             let segs = segments(for: fullText)
-            let idx = segs.firstIndex(where: { $0.range == seg.range }) ?? -1
+            _ = segs.firstIndex(where: { $0.range == seg.range }) ?? -1
 
             let ns = NSRange(seg.range, in: fullText)
             let nsText = fullText as NSString
@@ -468,38 +521,91 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
             let surface = seg.surface
             let readingFromAttr = textView.textStorage.attribute(.rubyReading, at: ns.location, effectiveRange: nil) as? String
-            let reading = (readingFromAttr?.isEmpty == false) ? readingFromAttr! : SegmentReadingAttacher.reading(for: surface, tokenizer: TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic())))
+            var reading = (readingFromAttr?.isEmpty == false) ? readingFromAttr! : SegmentReadingAttacher.reading(for: surface, tokenizer: TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic())))
+            if surface.isKatakanaWord {
+                if reading.isEmpty {
+                    reading = surface
+                } else {
+                    reading = reading.katakanaTransformed()
+                }
+            }
 
-            let token = ParsedToken(surface: surface, reading: reading, meaning: nil)
+            let token = ParsedToken(surface: surface, reading: reading, meaning: nil, range: ns)
 
-            interactionLogger.info("Resolved tap to segment: index=\(idx), line=\(line), surface='\(surface, privacy: .public)', reading='\(reading, privacy: .public)'")
+            interactionLogger.info("Resolved tap to segment: index=\(line), line=\(line), surface='\(surface, privacy: .public)', reading='\(reading, privacy: .public)'")
 
-            highlightedRange = ns
+            highlightedRange = parent.showSegmentHighlighting ? ns : nil
             updateTextView(textView, with: fullText, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap, showSegmentHighlighting: parent.showSegmentHighlighting)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             parent.onTokenTap(token)
         }
+
+        private func clearSelection(fullText: String, textView: UITextView) {
+            let hadHighlight = highlightedRange != nil
+            highlightedRange = nil
+            if hadHighlight {
+                updateTextView(textView, with: fullText, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap, showSegmentHighlighting: parent.showSegmentHighlighting)
+            }
+            parent.onSelectionCleared()
+        }
         
         private func applySegmentShading(to attributed: NSMutableAttributedString, baseText: String) {
             let segments = segments(for: baseText)
-            for (i, seg) in segments.enumerated() {
+            for (idx, seg) in segments.enumerated() {
                 let nsRange = NSRange(seg.range, in: baseText)
                 if nsRange.location == NSNotFound { continue }
-                let color: UIColor = (i % 2 == 0)
-                    ? UIColor.systemMint.withAlphaComponent(0.24)
-                    : UIColor.systemYellow.withAlphaComponent(0.30)
+                let color: UIColor = (idx % 2 == 0)
+                    ? UIColor.systemRed.withAlphaComponent(0.24)
+                    : UIColor.systemBlue.withAlphaComponent(0.28)
                 attributed.addAttribute(.tokenBackgroundColor, value: color, range: nsRange)
             }
         }
         
         private func segments(for text: String) -> [Segment] {
-            guard let trie = JMdictTrieCache.shared else { return [] }
-            let key = text
-            if key == cachedSegmentsKey { return cachedSegments }
-            let segs = DictionarySegmenter.segment(text: text, trie: trie)
+            let engine = SegmentationEngine.current()
+            let cacheKey = "\(engine.rawValue)|\(text)"
+            if cacheKey == cachedSegmentsKey {
+                return cachedSegments
+            }
+
+            let segs: [Segment]
+            switch engine {
+            case .dictionaryTrie:
+                if let trie = JMdictTrieCache.shared {
+                    segs = DictionarySegmenter.segment(text: text, trie: trie)
+                } else {
+                    segs = AppleSegmenter.segment(text: text)
+                }
+            case .appleTokenizer:
+                segs = AppleSegmenter.segment(text: text)
+            }
+
             cachedSegments = segs
-            cachedSegmentsKey = key
+            cachedSegmentsKey = cacheKey
             return segs
+        }
+        
+        // Merge the segment containing `boundaryLeft` with the segment immediately to its right, if contiguous.
+        func mergeAtBoundary(text: String, boundaryLeft: Int) -> String? {
+            let segs = segments(for: text)
+            guard !segs.isEmpty else { return nil }
+            // Find the left segment whose upperBound (in UTF16) equals boundaryLeft
+            for (i, s) in segs.enumerated() {
+                let ns = NSRange(s.range, in: text)
+                guard ns.location != NSNotFound else { continue }
+                if ns.location + ns.length == boundaryLeft {
+                    // Ensure there is a right neighbor and that they are contiguous
+                    guard i + 1 < segs.count else { return nil }
+                    let right = segs[i + 1]
+                    let nsRight = NSRange(right.range, in: text)
+                    guard nsRight.location == boundaryLeft else { return nil }
+                    // Build new text by replacing the two ranges with their concatenation (which is effectively the same substring),
+                    // but we will add the combined surface to the custom lexicon so future segmentations keep them as one token.
+                    // Here, we simply return the original text because surface text doesn't change; caller will update lexicon.
+                    return text
+                }
+            }
+            return nil
         }
     }
 }
@@ -510,6 +616,29 @@ private extension String {
         guard let start = utf16.index(utf16.startIndex, offsetBy: offset, limitedBy: utf16.endIndex) else { return nil }
         guard let scalarIndex = String.Index(start, within: self) else { return nil }
         return scalarIndex
+    }
+
+    var isKatakanaWord: Bool {
+        let filtered = unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }
+        guard !filtered.isEmpty else { return false }
+        var sawSyllable = false
+        for scalar in filtered {
+            let value = scalar.value
+            if value == 0x30FC || value == 0x30FB { continue } // prolong mark or middle dot
+            if (0x30A0...0x30FF).contains(value) || (0x31F0...0x31FF).contains(value) {
+                sawSyllable = true
+                continue
+            }
+            return false
+        }
+        return sawSyllable
+    }
+
+    func katakanaTransformed() -> String {
+        guard !isEmpty else { return self }
+        let mutable = NSMutableString(string: self)
+        CFStringTransform(mutable, nil, kCFStringTransformHiraganaKatakana, false)
+        return mutable as String
     }
 }
 

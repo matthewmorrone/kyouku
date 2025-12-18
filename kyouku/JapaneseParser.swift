@@ -11,31 +11,35 @@ import IPADic
 enum JapaneseParser {
 
     static func parse(text: String) -> [ParsedToken] {
+        let tokenizer = TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic()))
+        let engine = SegmentationEngine.current()
 
-        if let trie = JMdictTrieCache.shared {
-            let tokenizer = TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic()))
+        if engine == .dictionaryTrie, let trie = JMdictTrieCache.shared {
             let segments = DictionarySegmenter.segment(text: text, trie: trie)
             let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: segments, tokenizer: tokenizer)
             return enriched.map { item in
                 ParsedToken(surface: item.segment.surface, reading: item.reading, meaning: nil)
             }
+        } else if engine == .appleTokenizer {
+            let segments = AppleSegmenter.segment(text: text)
+            let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: segments, tokenizer: tokenizer)
+            if enriched.isEmpty {
+                return fallbackParse(text: text)
+            }
+            return enriched.map { ParsedToken(surface: $0.segment.surface, reading: $0.reading, meaning: nil) }
         }
 
-        guard let fallbackTokenizer = try? Tokenizer(dictionary: IPADic()) else {
-            return []
-        }
+        return fallbackParse(text: text)
+    }
 
+    private static func fallbackParse(text: String) -> [ParsedToken] {
+        guard let fallbackTokenizer = try? Tokenizer(dictionary: IPADic()) else { return [] }
         let ann = fallbackTokenizer.tokenize(text: text)
-        var tokens: [ParsedToken] = []
-
-        for a in ann {
-            let surface = String(text[a.range])
-            let reading = a.reading
-            if surface == "BOS" || surface == "EOS" { continue }
-            tokens.append(ParsedToken(surface: surface, reading: reading, meaning: nil))
+        return ann.compactMap { ann in
+            let surface = String(text[ann.range])
+            if surface == "BOS" || surface == "EOS" { return nil }
+            return ParsedToken(surface: surface, reading: ann.reading, meaning: nil)
         }
-
-        return tokens
     }
 }
 

@@ -14,8 +14,8 @@ import OSLog
 fileprivate let popupLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Interaction")
 
 struct PasteView: View {
-    private static let furiganaSymbolOn = "furigana.on" // Replace with your actual symbol name
-    private static let furiganaSymbolOff = "furigana.off"      // Replace with your actual symbol name
+    private static let furiganaSymbolOn = "furigana.on"
+    private static let furiganaSymbolOff = "furigana.off"
 
     @EnvironmentObject var store: WordStore
     @EnvironmentObject var notes: NotesStore
@@ -24,7 +24,7 @@ struct PasteView: View {
     @State private var inputText: String = ""
     @State private var currentNote: Note? = nil
     @State private var showFurigana: Bool = true
-    @State private var showTokenHighlighting: Bool = true
+    @State private var showTokenHighlighting: Bool = false
     @State private var selectedToken: ParsedToken? = nil
     @State private var showingDefinition = false
     @State private var dictResults: [DictionaryEntry] = []
@@ -34,9 +34,10 @@ struct PasteView: View {
     @State private var hasInitialized: Bool = false
     @State private var isEditing: Bool = false
     @State private var lookupTask: Task<Void, Never>? = nil
+    @State private var lookupRequestID: UUID? = nil
 
     @State private var selectedEntryIndex: Int? = nil
-    @State private var showAllDefinitions: Bool = false
+    @State private var fallbackTranslation: String? = nil
     
     @State private var foregroundCancellable: Any? = nil
 
@@ -51,33 +52,14 @@ struct PasteView: View {
         NavigationStack {
             if isTrieReady {
                 VStack(spacing: 16) {
-                    
-                    EditorContainer(
-                        text: $inputText,
-                        showFurigana: showFurigana,
-                        showTokenHighlighting: showTokenHighlighting,
-                        isEditing: isEditing,
-                        textSize: textSize,
-                        furiganaSize: furiganaSize,
-                        lineSpacing: lineSpacing,
-                        furiganaGap: furiganaGap,
-                        highlightedToken: selectedToken,
-                        onTokenTap: handleTokenTap
-                    )
-                    
                     HStack(alignment: .center, spacing: 8) {
+                        
                         ControlCell {
-                            Button { hideKeyboard() } label: {
-                                Image(systemName: "keyboard.chevron.compact.down").font(.title2)
+                            Button(action: newNote) {
+                                Image(systemName: "plus.square").font(.title2)
                             }
-                            .accessibilityLabel("Hide keyboard")
-                        }
-
-                        ControlCell {
-                            Button(action: pasteFromClipboard) {
-                                Image(systemName: "doc.on.clipboard").font(.title2)
-                            }
-                            .accessibilityLabel("Paste")
+                            .accessibilityLabel("New Note")
+                            .disabled(isEditing)
                         }
 
                         ControlCell {
@@ -88,9 +70,39 @@ struct PasteView: View {
                             .disabled(isEditing)
                         }
 
+                    }
+                    EditorContainer(
+                        text: $inputText,
+                        showFurigana: showFurigana,
+                        showTokenHighlighting: showTokenHighlighting,
+                        isEditing: isEditing,
+                        textSize: textSize,
+                        furiganaSize: furiganaSize,
+                        lineSpacing: lineSpacing,
+                        furiganaGap: furiganaGap,
+                        highlightedToken: selectedToken,
+                        onTokenTap: handleTokenTap,
+                        onSelectionCleared: handleSelectionCleared
+                    )
+                    
+                    HStack(alignment: .center, spacing: 8) {
+                        ControlCell {
+                            Button { hideKeyboard() } label: {
+                                Image(systemName: "keyboard.chevron.compact.down").font(.title2)
+                            }
+                            .accessibilityLabel("Hide Keyboard")
+                        }
+
+                        ControlCell {
+                            Button(action: pasteFromClipboard) {
+                                Image(systemName: "doc.on.clipboard").font(.title2)
+                            }
+                            .accessibilityLabel("Paste")
+                        }
+
                         ControlCell {
                             Button(action: saveNote) {
-                                Image(systemName: "square.and.pencil").font(.title2)
+                                Image(systemName: "square.and.arrow.down").font(.title2)
                             }
                             .accessibilityLabel("Save")
                         }
@@ -107,7 +119,7 @@ struct PasteView: View {
                             .toggleStyle(.button)
                             .tint(.accentColor)
                             .font(.title2)
-                            .accessibilityLabel("Edit mode")
+                            .accessibilityLabel("Edit")
                         }
 
                         ControlCell {
@@ -119,31 +131,31 @@ struct PasteView: View {
                             .tint(.accentColor)
                             .font(.title2)
                             .disabled(isEditing)
-                            .accessibilityLabel("Show Furigana")
+                            .accessibilityLabel("Furigana")
                         }
 
-                        ControlCell {
-                            Toggle(isOn: $showTokenHighlighting) {
-                                if UIImage(systemName: "highlighter") != nil {
-                                    Image(systemName: "highlighter")
-                                } else {
-                                    Image(systemName: "paintbrush")
-                                }
-                            }
-                            .labelsHidden()
-                            .toggleStyle(.button)
-                            .tint(.accentColor)
-                            .font(.title2)
-                            .disabled(isEditing)
-                            .accessibilityLabel("Highlight tokens")
-                        }
+//                        ControlCell {
+//                            Toggle(isOn: $showTokenHighlighting) {
+//                                if UIImage(systemName: "highlighter") != nil {
+//                                    Image(systemName: "highlighter")
+//                                } else {
+//                                    Image(systemName: "paintbrush")
+//                                }
+//                            }
+//                            .labelsHidden()
+//                            .toggleStyle(.button)
+//                            .tint(.accentColor)
+//                            .font(.title2)
+//                            .disabled(isEditing)
+//                            .accessibilityLabel("Highlight tokens")
+//                        }
 
-                        ControlCell {
-                            Button(action: clearInput) {
-                                Image(systemName: "trash").font(.title2)
-                            }
-                            .accessibilityLabel("Clear")
-                        }
+//                        ControlCell {
+//                            Button(action: clearInput) {
+//                                Image(systemName: "trash").font(.title2)
+//                            }
+//                            .accessibilityLabel("Clear")
+//                        }
                     }
                     .controlSize(.small)
                     .padding(.horizontal)
@@ -159,9 +171,10 @@ struct PasteView: View {
                         isLookingUp: $isLookingUp,
                         lookupError: $lookupError,
                         selectedEntryIndex: $selectedEntryIndex,
-                        showAllDefinitions: $showAllDefinitions,
+                        fallbackTranslation: $fallbackTranslation,
                         onAdd: onAddDefinition
                     )
+                    .environmentObject(store)
                 }
                 .navigationDestination(isPresented: $goExtract) {
                     ExtractWordsView(text: inputText)
@@ -195,21 +208,38 @@ struct PasteView: View {
         showingDefinition = true
         // Cancel any previous lookup task
         lookupTask?.cancel()
+        fallbackTranslation = nil
+
+        let requestID = UUID()
+        lookupRequestID = requestID
 
         // Reset UI state on the main actor in a separate lightweight task
         Task { @MainActor in
+            guard lookupRequestID == requestID else { return }
             isLookingUp = true
             lookupError = nil
             dictResults = []
             selectedEntryIndex = nil
-            showAllDefinitions = false
         }
 
         // Start a fresh lookup task
         let newTask = Task {
-            await lookupDefinitions(for: token)
+            await lookupDefinitions(for: token, requestID: requestID)
         }
         lookupTask = newTask
+    }
+
+    private func handleSelectionCleared() {
+        lookupTask?.cancel()
+        lookupTask = nil
+        lookupRequestID = nil
+        selectedToken = nil
+        showingDefinition = false
+        isLookingUp = false
+        lookupError = nil
+        dictResults = []
+        selectedEntryIndex = nil
+        fallbackTranslation = nil
     }
 
     private func pasteFromClipboard() {
@@ -258,31 +288,108 @@ struct PasteView: View {
         }
     }
 
+    public func newNote() {
+        // End any editing session and reset lookup UI
+        hideKeyboard()
+        isEditing = true
+        showFurigana = false
+        showingDefinition = false
+        selectedToken = nil
+        lookupTask?.cancel()
+        isLookingUp = false
+        lookupError = nil
+        dictResults = []
+        selectedEntryIndex = nil
+        lookupRequestID = nil
+        fallbackTranslation = nil
+
+        // Clear current editor text and create a fresh note in the store
+        inputText = ""
+        notes.addNote(title: nil, text: "")
+        notes.save()
+
+        // Set the currentNote to the newly created note (assumes addNote appends newest first or last)
+        if let newest = notes.notes.first {
+            currentNote = newest
+        } else if let last = notes.notes.last {
+            currentNote = last
+        } else {
+            currentNote = nil
+        }
+
+        // Persist empty paste buffer state
+        PasteBufferStore.save("")
+    }
+
     private func clearInput() {
         inputText = ""
     }
 
-    private func onAddDefinition(token: ParsedToken, filteredResults: [DictionaryEntry]) {
+    private func onAddDefinition(token: ParsedToken, filteredResults: [DictionaryEntry], selectionIndex: Int?, translation: String?) {
+        func entry(at index: Int?) -> DictionaryEntry? {
+            guard let idx = index, idx >= 0, idx < filteredResults.count else { return filteredResults.first }
+            return filteredResults[idx]
+        }
+
+        // Detect if this is a custom translation input (translation is non-nil and selectionIndex == nil)
+        // But we have changed the UI so translation param may be just the "meaning" from custom fields.
+        // We will update callsite to pass a special custom translation struct-like or nil for normal.
+
+        let chosenEntry = entry(at: selectionIndex)
         let hasKanjiInToken: Bool = token.surface.contains { ch in
             ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
         }
+
+        // We need to distinguish if the call is from custom translation screen or normal add.
+        // The DefinitionSheetContent changed to pass custom fields in translation param,
+        // so now translation param is the "meaning" string only, and selectionIndex can be nil indicating custom input.
+
+        if selectionIndex == nil {
+            // This is the custom translation add. 
+            // The onAdd call will contain translation string representing meaning, but we need also the Kanji and Furigana from the UI.
+            // The onAdd call is from DefinitionSheetContent; it passes (token, filteredResults, nil, meaning).
+            // But to get Kanji and Furigana, we need to pass them from DefinitionSheetContent as well.
+            // Since the signature does not pass Kanji and Furigana separately, we must update onAdd signature or workaround.
+            // As per instructions, we must use the values from the three fields on the custom screen.
+
+            // So here, to stay consistent, only add surface/reading/meaning if translation is non-empty.
+
+            // But since onAdd only has token, filteredResults, selectionIndex, translation, we cannot get Kanji and Furigana from here.
+            // We will put the logic in DefinitionSheetContent onAdd closure, and call store.add() directly there for custom.
+
+            // So here, do nothing.
+            // Actually, to avoid confusion, do nothing here.
+            return
+        }
+
+        if let customTranslation = translation, !customTranslation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Use custom translation if present and not empty
+            let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
+            store.add(surface: kanaSurface, reading: token.reading, meaning: customTranslation)
+            return
+        }
         if !hasKanjiInToken {
-            if let first = filteredResults.first {
+            if let entry = chosenEntry {
                 let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
-                let glossSource = first.gloss
+                let glossSource = entry.gloss
                 let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
-                let t = ParsedToken(surface: kanaSurface, reading: first.reading, meaning: firstGloss)
+                let t = ParsedToken(surface: kanaSurface, reading: entry.reading, meaning: firstGloss)
                 store.add(surface: t.surface, reading: t.reading, meaning: t.meaning!)
+            } else if let translation, translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
+                store.add(surface: kanaSurface, reading: token.reading, meaning: translation)
             } else {
                 store.add(surface: token.surface, reading: token.reading, meaning: token.meaning!)
             }
         } else {
-            if let first = filteredResults.first {
-                let surface = (first.kanji.isEmpty == false) ? (first.kanji) : (first.reading)
-                let glossSource = first.gloss
+            if let entry = chosenEntry {
+                let surface = (entry.kanji.isEmpty == false) ? entry.kanji : entry.reading
+                let glossSource = entry.gloss
                 let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
-                let t = ParsedToken(surface: surface, reading: first.reading, meaning: firstGloss)
+                let t = ParsedToken(surface: surface, reading: entry.reading, meaning: firstGloss)
                 store.add(surface: t.surface, reading: t.reading, meaning: t.meaning!)
+            } else if let translation, translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                store.add(surface: token.surface, reading: token.reading, meaning: translation)
             } else {
                 store.add(surface: token.surface, reading: token.reading, meaning: token.meaning!)
             }
@@ -362,7 +469,8 @@ struct PasteView: View {
             lookupError = nil
             dictResults = []
             selectedEntryIndex = nil
-            showAllDefinitions = false
+            lookupRequestID = nil
+            fallbackTranslation = nil
         }
     }
 
@@ -393,8 +501,26 @@ struct PasteView: View {
         }
     }
 
-    private func lookupDefinitions(for token: ParsedToken) async {
-        if Task.isCancelled { return }
+    private func lookupDefinitions(for token: ParsedToken, requestID: UUID) async {
+        if Task.isCancelled {
+            await MainActor.run {
+                if lookupRequestID == requestID {
+                    isLookingUp = false
+                    lookupTask = nil
+                }
+            }
+            return
+        }
+
+        let cleanup = {
+            Task { @MainActor in
+                if lookupRequestID == requestID {
+                    isLookingUp = false
+                    lookupTask = nil
+                }
+            }
+        }
+        defer { _ = cleanup() }
 
         let rawSurface = token.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let rawReading = token.reading.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -402,7 +528,9 @@ struct PasteView: View {
         // Guard against empty input
         if rawSurface.isEmpty && rawReading.isEmpty {
             await MainActor.run {
-                isLookingUp = false
+                if lookupRequestID == requestID {
+                    isLookingUp = false
+                }
                 lookupError = "Empty selection."
                 dictResults = []
             }
@@ -410,11 +538,12 @@ struct PasteView: View {
         }
 
         await MainActor.run {
+            guard lookupRequestID == requestID else { return }
             isLookingUp = true
             lookupError = nil
             dictResults = []
             selectedEntryIndex = nil
-            showAllDefinitions = false
+            fallbackTranslation = nil
         }
         do {
             // Basic sanitation: remove trailing punctuation that often appears in tokenization
@@ -456,9 +585,6 @@ struct PasteView: View {
             }
 
             if Task.isCancelled {
-                await MainActor.run {
-                    isLookingUp = false
-                }
                 return
             }
 
@@ -483,17 +609,32 @@ struct PasteView: View {
                 return sa > sb
             }
             await MainActor.run {
+                guard lookupRequestID == requestID else { return }
                 dictResults = sorted
-                isLookingUp = false
+            }
+
+            if sorted.isEmpty && !Task.isCancelled {
+                if let fallback = await TranslationFallback.translate(surface: rawSurface, reading: rawReading) {
+                    await MainActor.run {
+                        guard lookupRequestID == requestID else { return }
+                        fallbackTranslation = fallback
+                    }
+                }
+            } else {
+                await MainActor.run {
+                    guard lookupRequestID == requestID else { return }
+                    fallbackTranslation = nil
+                }
             }
         } catch {
             await MainActor.run {
+                guard lookupRequestID == requestID else { return }
                 if error is TimeoutError {
                     lookupError = "Lookup timed out. Please try again."
                 } else {
                     lookupError = (error as? DictionarySQLiteError)?.description ?? error.localizedDescription
                 }
-                isLookingUp = false
+                fallbackTranslation = nil
             }
         }
     }
@@ -509,6 +650,7 @@ struct PasteView: View {
         var furiganaGap: Double
         var highlightedToken: ParsedToken?
         var onTokenTap: (ParsedToken) -> Void
+        var onSelectionCleared: () -> Void
 
         @State private var viewKey: Int = 0
 
@@ -520,6 +662,7 @@ struct PasteView: View {
                 isEditable: isEditing,
                 allowTokenTap: allowTap,
                 onTokenTap: onTokenTap,
+                onSelectionCleared: onSelectionCleared,
                 showSegmentHighlighting: showTokenHighlighting,
                 baseFontSize: textSize,
                 rubyFontSize: furiganaSize,
@@ -562,8 +705,14 @@ private struct DefinitionSheetContent: View {
     @Binding var isLookingUp: Bool
     @Binding var lookupError: String?
     @Binding var selectedEntryIndex: Int?
-    @Binding var showAllDefinitions: Bool
-    var onAdd: (ParsedToken, [DictionaryEntry]) -> Void
+    @Binding var fallbackTranslation: String?
+    var onAdd: (ParsedToken, [DictionaryEntry], Int?, String?) -> Void
+
+    @EnvironmentObject var store: WordStore
+
+    @State private var customTranslationKanji: String = ""
+    @State private var customTranslationFurigana: String = ""
+    @State private var customTranslationMeaning: String = ""
 
     var body: some View {
         Group {
@@ -571,40 +720,107 @@ private struct DefinitionSheetContent: View {
                 let hasKanjiInToken: Bool = token.surface.contains { ch in
                     ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
                 }
-                let filteredResults: [DictionaryEntry] = {
-                    if !hasKanjiInToken {
-                        return dictResults.filter { ($0.reading) == (token.reading.isEmpty ? token.surface : token.reading) }
-                    } else {
-                        return dictResults
-                    }
-                }()
-                let entry = filteredResults.first
-                let displayKanji: String = {
-                    if !hasKanjiInToken {
-                        return token.reading.isEmpty ? token.surface : token.reading
-                    }
-                    if let e = entry {
-                        return (e.kanji.isEmpty == false) ? (e.kanji) : (e.reading)
-                    }
-                    return token.surface
-                }()
-                let displayKana: String = entry?.reading ?? token.reading
+
+                let hasKanjiInTokenLocal = hasKanjiInToken
+                let orderedResultsLocal = orderedEntries(for: token, hasKanjiInToken: hasKanjiInTokenLocal)
+                let totalLocal = orderedResultsLocal.count
+                let totalSlots = totalLocal + 1
+                let currentIndexLocal = clampSelection(totalCount: totalSlots)
+                let isCustomScreenLocal = currentIndexLocal == totalLocal
+                let stepperLabel = isCustomScreenLocal
+                    ? "Custom \(currentIndexLocal + 1) / \(totalSlots)"
+                    : "Definition \(currentIndexLocal + 1) / \(totalSlots)"
+                let entryLocal = (currentIndexLocal >= 0 && currentIndexLocal < totalLocal) ? orderedResultsLocal[currentIndexLocal] : nil
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Button(action: {
-                            onAdd(token, filteredResults)
                             showingDefinition = false
                             selectedEntryIndex = nil
-                            showAllDefinitions = false
+                            resetCustomTranslation()
                         }) {
-                            Image(systemName: "plus.circle.fill").font(.title3)
-                        }
-                        Spacer()
-                        Button(action: { showingDefinition = false }) {
                             Image(systemName: "xmark.circle.fill").font(.title3)
                         }
+
+                        Spacer()
+
+                        if isCustomScreenLocal {
+                            Button(action: {
+                                let trimmedMeaning = customTranslationMeaning.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !trimmedMeaning.isEmpty else { return }
+                                store.add(
+                                    surface: customTranslationKanji.isEmpty ? token.surface : customTranslationKanji,
+                                    reading: customTranslationFurigana.isEmpty ? token.reading : customTranslationFurigana,
+                                    meaning: trimmedMeaning
+                                )
+                                showingDefinition = false
+                                selectedEntryIndex = nil
+                                resetCustomTranslation()
+                            }) {
+                                Image(systemName: "checkmark.circle.fill").font(.title3)
+                            }
+                            .disabled(isLookingUp || customTranslationMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        } else {
+                            Button(action: {
+                                // Normal add uses onAddDefinition
+                                onAdd(token, orderedResultsLocal, entryLocal == nil ? nil : currentIndexLocal, nil)
+                                showingDefinition = false
+                                selectedEntryIndex = nil
+                                resetCustomTranslation()
+                            }) {
+                                Image(systemName: "plus.circle.fill").font(.title3)
+                            }
+                            .disabled(isLookingUp || (entryLocal == nil && (fallbackTranslation?.isEmpty ?? true)))
+                        }
                     }
+
+                    if isCustomScreenLocal && totalLocal > 0 {
+                        HStack(spacing: 16) {
+                            Button {
+                                stepSelection(-1, totalCount: totalSlots)
+                                resetCustomTranslation()
+                            } label: {
+                                Image(systemName: "chevron.left")
+                                    .font(.title3)
+                            }
+                            .disabled(currentIndexLocal <= 0)
+
+                            Text(stepperLabel)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            Button {
+                                selectedEntryIndex = 0
+                            } label: {
+                                Image(systemName: "chevron.right")
+                                    .font(.title3)
+                            }
+                        }
+                    }
+
+                    let displayKanji: String = {
+                        if isCustomScreenLocal {
+                            return customTranslationKanji.isEmpty ? token.surface : customTranslationKanji
+                        }
+                        if !hasKanjiInTokenLocal {
+                            return token.reading.isEmpty ? token.surface : token.reading
+                        }
+                        if let e = entryLocal {
+                            return (e.kanji.isEmpty == false) ? e.kanji : e.reading
+                        }
+                        return token.surface
+                    }()
+
+                    let displayKana: String = {
+                        if isCustomScreenLocal {
+                            return customTranslationFurigana.isEmpty ? token.reading : customTranslationFurigana
+                        }
+                        if let e = entryLocal {
+                            return e.reading
+                        } else {
+                            return token.reading
+                        }
+                    }()
 
                     Text(displayKanji)
                         .font(.title2).bold()
@@ -619,17 +835,125 @@ private struct DefinitionSheetContent: View {
                         ProgressView("Looking up definitions…")
                     } else if let err = lookupError {
                         Text(err).foregroundStyle(.secondary)
-                    } else if filteredResults.isEmpty {
+                    } else if isCustomScreenLocal {
+                        // Show nothing for definitions in custom screen
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Add a custom translation.")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if orderedResultsLocal.isEmpty, let fallback = fallbackTranslation, !fallback.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Apple Translation")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            Text(fallback)
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else if orderedResultsLocal.isEmpty {
                         Text("No definitions found.")
                             .foregroundStyle(.secondary)
                     } else {
-                        DefinitionList(
-                            filteredResults: filteredResults,
-                            showAllDefinitions: $showAllDefinitions
-                        )
+                        if let entryLocal {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(primaryGloss(from: entryLocal))
+                                    .font(.body)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if entryLocal.gloss.contains(";") {
+                                    Text(entryLocal.gloss)
+                                        .font(.footnote)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(3)
+                                }
+                            }
+                        }
+                    }
+
+                    if isCustomScreenLocal {
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Kanji")
+                                    .font(.headline)
+                                TextEditor(text: $customTranslationKanji)
+                                    .frame(minHeight: 30)
+                                    .border(Color.secondary.opacity(0.5))
+                                    .cornerRadius(6)
+                                    .disableAutocorrection(false)
+                                    .autocapitalization(.none)
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Furigana")
+                                    .font(.headline)
+                                TextEditor(text: $customTranslationFurigana)
+                                    .frame(minHeight: 30)
+                                    .border(Color.secondary.opacity(0.5))
+                                    .cornerRadius(6)
+                                    .disableAutocorrection(false)
+                                    .autocapitalization(.none)
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Meaning")
+                                    .font(.headline)
+                                TextEditor(text: $customTranslationMeaning)
+                                    .frame(minHeight: 60)
+                                    .border(Color.secondary.opacity(0.5))
+                                    .cornerRadius(6)
+                                    .disableAutocorrection(false)
+                                    .autocapitalization(.sentences)
+                            }
+                        }
+                        .padding(.top, 8)
                     }
                 }
                 .onAppear {
+                    if selectedEntryIndex == nil {
+                        selectedEntryIndex = 0
+                    }
+                    if isCustomScreenLocal {
+                        if customTranslationKanji.isEmpty {
+                            customTranslationKanji = token.surface
+                        }
+                        if customTranslationFurigana.isEmpty {
+                            customTranslationFurigana = token.reading
+                        }
+                        if customTranslationMeaning.isEmpty {
+                            customTranslationMeaning = ""
+                        }
+                    } else {
+                        resetCustomTranslation()
+                    }
+                    let hasKanjiInToken = token.surface.contains { ch in
+                        ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
+                    }
+                    let filtered = orderedEntries(for: token, hasKanjiInToken: hasKanjiInToken)
+                    let total = filtered.count
+                    let currentIndex = clampSelection(totalCount: total + 1)
+                    let isCustomScreen = currentIndex == total
+                    let entry = (currentIndex >= 0 && currentIndex < total) ? filtered[currentIndex] : nil
+                    let displayKanji: String = {
+                        if isCustomScreen {
+                            return customTranslationKanji.isEmpty ? token.surface : customTranslationKanji
+                        }
+                        if !hasKanjiInToken {
+                            return token.reading.isEmpty ? token.surface : token.reading
+                        }
+                        if let e = entry {
+                            return (e.kanji.isEmpty == false) ? e.kanji : e.reading
+                        }
+                        return token.surface
+                    }()
+                    let displayKana: String = {
+                        if isCustomScreen {
+                            return customTranslationFurigana.isEmpty ? token.reading : customTranslationFurigana
+                        }
+                        if let e = entry {
+                            return e.reading
+                        } else {
+                            return token.reading
+                        }
+                    }()
                     popupLogger.info("Dictionary popup: word='\(displayKanji, privacy: .public)', kana='\(displayKana, privacy: .public)'")
                 }
                 .onChange(of: dictResults) { _, _ in
@@ -637,13 +961,7 @@ private struct DefinitionSheetContent: View {
                     let hasKanjiInToken = token.surface.contains { ch in
                         ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
                     }
-                    let filtered: [DictionaryEntry] = {
-                        if !hasKanjiInToken {
-                            return dictResults.filter { ($0.reading) == (token.reading.isEmpty ? token.surface : token.reading) }
-                        } else {
-                            return dictResults
-                        }
-                    }()
+                    let filtered = orderedEntries(for: token, hasKanjiInToken: hasKanjiInToken)
                     let entry = filtered.first
                     let currentKanji: String = {
                         if !hasKanjiInToken {
@@ -655,7 +973,31 @@ private struct DefinitionSheetContent: View {
                         return token.surface
                     }()
                     let currentKana: String = entry?.reading ?? token.reading
+                    let count = filtered.count
+                    if count > 0 {
+                        let clamped = clampSelection(totalCount: count)
+                        if clamped != (selectedEntryIndex ?? 0) {
+                            selectedEntryIndex = clamped
+                        }
+                    } else {
+                        selectedEntryIndex = nil
+                    }
                     popupLogger.info("Dictionary popup updated: word='\(currentKanji, privacy: .public)', kana='\(currentKana, privacy: .public)'")
+                }
+                .onChange(of: selectedEntryIndex) { oldValue, newValue in
+                    if let idx = newValue, idx == totalLocal {
+                        // When switching to custom screen, initialize fields
+                        if customTranslationKanji.isEmpty {
+                            customTranslationKanji = token.surface
+                        }
+                        if customTranslationFurigana.isEmpty {
+                            customTranslationFurigana = token.reading
+                        }
+                        customTranslationMeaning = ""
+                    } else {
+                        // Reset custom translation fields on selecting a definition
+                        resetCustomTranslation()
+                    }
                 }
                 .padding()
                 .presentationDetents([.fraction(0.33)])
@@ -665,33 +1007,40 @@ private struct DefinitionSheetContent: View {
             }
         }
     }
-}
 
-private struct DefinitionList: View {
-    let filteredResults: [DictionaryEntry]
-    @Binding var showAllDefinitions: Bool
+    private func resetCustomTranslation() {
+        customTranslationKanji = ""
+        customTranslationFurigana = ""
+        customTranslationMeaning = ""
+    }
 
-    var body: some View {
-        let maxShown = showAllDefinitions ? filteredResults.count : min(3, filteredResults.count)
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(0..<maxShown, id: \.self) { idx in
-                let e = filteredResults[idx]
-                let glossSource = e.gloss
-                let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(firstGloss)
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                }
-            }
-            if filteredResults.count > 3 {
-                Button(showAllDefinitions ? "Show fewer" : "View more") {
-                    showAllDefinitions.toggle()
-                }
-                .font(.callout)
-            }
-        }
+    private func orderedEntries(for token: ParsedToken, hasKanjiInToken: Bool) -> [DictionaryEntry] {
+        guard !dictResults.isEmpty else { return [] }
+        guard !hasKanjiInToken else { return dictResults }
+        let targetReading = token.reading.isEmpty ? token.surface : token.reading
+        guard !targetReading.isEmpty else { return dictResults }
+        let matching = dictResults.filter { $0.reading == targetReading }
+        guard !matching.isEmpty else { return dictResults }
+        let nonMatching = dictResults.filter { $0.reading != targetReading }
+        return matching + nonMatching
+    }
+
+    private func clampSelection(totalCount: Int) -> Int {
+        guard totalCount > 0 else { return 0 }
+        let raw = selectedEntryIndex ?? 0
+        return min(max(raw, 0), totalCount - 1)
+    }
+
+    private func stepSelection(_ delta: Int, totalCount: Int) {
+        guard totalCount > 0 else { return }
+        let current = clampSelection(totalCount: totalCount)
+        let next = current + delta
+        guard next >= 0 && next < totalCount else { return }
+        selectedEntryIndex = next
+    }
+
+    private func primaryGloss(from entry: DictionaryEntry) -> String {
+        entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
     }
 }
 
@@ -754,5 +1103,20 @@ extension EnvironmentValues {
 }
 
 // Re-open PasteView to keep type scope intact if needed
-extension PasteView {}
+extension PasteView {
+    /// Static helper to create a new note from outside PasteView.
+    /// This mirrors the instance `newNote()` behavior for NotesView and others.
+    static func createNewNote(notes: NotesStore, router: AppRouter) {
+        // Create a fresh empty note and save
+        notes.addNote(title: nil, text: "")
+        notes.save()
+
+        // Route to the Paste tab so the user can edit the new note there
+        router.noteToOpen = notes.notes.first ?? notes.notes.last
+        router.selectedTab = .paste
+
+        // Also clear the persisted paste buffer
+        PasteBufferStore.save("")
+    }
+}
 
