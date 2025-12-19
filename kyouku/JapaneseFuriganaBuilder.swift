@@ -107,18 +107,30 @@ enum JapaneseFuriganaBuilder {
 
             let remaining = rIndex < rTrimmed.count ? String(rTrimmed[rIndex...]) : ""
             var slice = remaining
+            var consumedAnchorCount = 0
             if !nextKanaSeq.isEmpty, let rangeInReading = remaining.range(of: nextKanaSeq) {
                 slice = String(remaining[..<rangeInReading.lowerBound])
-                // Do not consume the kana anchor; leave it for the next iteration
+                // Skip over the kana anchor before processing the next kanji run
+                consumedAnchorCount = nextKanaSeq.count
             } else if idx < kanjiRuns.count - 1 {
-                // No anchor found but more kanji runs remain: split remaining roughly equally by remaining runs
+                // No anchor found but more kanji runs remain. First, see if the remaining reading can be split
+                // exactly evenly across the remaining kanji runs; this helps for words like 巡り合う where the reading
+                // (めぐりあう) needs "めぐ" + "り" + "あ" over the consecutive kanji segments.
                 let remainingRuns = kanjiRuns.count - idx
                 let remCount = remaining.count
-                let per = max(1, remCount / remainingRuns)
-                slice = String(remaining.prefix(per))
+                if remCount % remainingRuns == 0 {
+                    let chunk = remCount / remainingRuns
+                    slice = String(remaining.prefix(max(1, chunk)))
+                } else {
+                    let per = max(1, remCount / remainingRuns)
+                    slice = String(remaining.prefix(per))
+                }
             }
             // Advance rIndex by slice length
             rIndex += slice.count
+            if consumedAnchorCount > 0 {
+                rIndex += consumedAnchorCount
+            }
 
             // Build NSRange for this kanji run relative to original text
             let rLoc = innerStart + run.start
