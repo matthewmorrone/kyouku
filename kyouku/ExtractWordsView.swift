@@ -27,6 +27,10 @@ struct ExtractWordsView: View {
 
     @State private var isSelecting: Bool = false
     @State private var selectedTokenIDs: Set<UUID> = []
+    @State private var splitContext: SplitContext? = nil
+    @State private var splitLeftText: String = ""
+    @State private var splitRightText: String = ""
+    @State private var splitError: String? = nil
 
     var body: some View {
         VStack(spacing: 8) {
@@ -195,6 +199,76 @@ struct ExtractWordsView: View {
             .presentationDragIndicator(.visible)
             .presentationContentInteraction(.scrolls)
         }
+        .sheet(item: $splitContext, onDismiss: { splitError = nil }) { context in
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Separate Token")
+                    .font(.title2)
+                    .bold()
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Original surface")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(context.token.surface)
+                        .font(.headline)
+                }
+
+                Text("Use the arrows to move characters between the two fields, then apply the split.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading) {
+                        Text("Left side")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Left", text: $splitLeftText)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(true)
+                    }
+
+                    VStack(spacing: 8) {
+                        Button(action: moveCharacterToLeft) {
+                            Image(systemName: "arrow.left")
+                                .font(.title2)
+                        }
+                        .disabled(splitRightText.isEmpty)
+
+                        Button(action: moveCharacterToRight) {
+                            Image(systemName: "arrow.right")
+                                .font(.title2)
+                        }
+                        .disabled(splitLeftText.isEmpty)
+                    }
+
+                    VStack(alignment: .leading) {
+                        Text("Right side")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("Right", text: $splitRightText)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(true)
+                    }
+                }
+
+                if let splitError {
+                    Text(splitError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                HStack {
+                    Button("Cancel") { cancelSplitFlow() }
+                    Spacer()
+                    Button("Apply Split") { applySplit(for: context) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canApplySplit(for: context))
+                }
+            }
+            .padding()
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(isSelecting ? "Done" : "Select") {
@@ -221,6 +295,10 @@ struct ExtractWordsView: View {
                             combineSelectedTokens()
                         }
                         .disabled(!canCombineSelected())
+                        Button("Separate Selected") {
+                            beginSplitFlow()
+                        }
+                        .disabled(!canSplitSelected())
                         Button("Add Selected (\(selectedTokenIDs.count))") {
                             addSelectedTokens()
                         }
@@ -305,6 +383,12 @@ struct ExtractWordsView: View {
                 selectedTokenIDs.insert(token.id)
             }
         }
+    }
+
+    private struct SplitContext: Identifiable {
+        let id = UUID()
+        let token: ParsedToken
+        let originalIndex: Int
     }
 
     private func containsKanji(_ text: String) -> Bool {
@@ -423,6 +507,27 @@ struct ExtractWordsView: View {
         return true
     }
 
+    private func canSplitSelected() -> Bool {
+        let idxs = selectedIndicesInTokens()
+        guard idxs.count == 1 else { return false }
+        let idx = idxs[0]
+        guard idx >= 0 && idx < tokens.count else { return false }
+        return tokens[idx].surface.count >= 2
+    }
+
+    private func beginSplitFlow() {
+        let idxs = selectedIndicesInTokens()
+        guard idxs.count == 1 else { return }
+        let idx = idxs[0]
+        guard idx >= 0 && idx < tokens.count else { return }
+        let token = tokens[idx]
+        guard token.surface.count >= 2 else { return }
+        splitLeftText = ""
+        splitRightText = token.surface
+        splitError = nil
+        splitContext = SplitContext(token: token, originalIndex: idx)
+    }
+
     private func combineSelectedTokens() {
         let idxs = selectedIndicesInTokens()
         guard idxs.count >= 2 else { return }
@@ -437,10 +542,93 @@ struct ExtractWordsView: View {
         let combinedReading = slice.map { $0.reading }.joined()
         let newToken = ParsedToken(surface: combinedSurface, reading: combinedReading, meaning: nil)
         tokens.replaceSubrange(start...end, with: [newToken])
+        persistCombinedToken(combinedSurface)
         // Clear selection state and exit selection mode
         selectedTokenIDs.removeAll()
         isSelecting = false
         onTokensUpdated?(tokens)
+    }
+
+    private func persistCombinedToken(_ surface: String) {
+        if CustomTokenizerLexicon.add(word: surface) {
+            refreshTrieCache()
+        }
+    }
+
+    private func cancelSplitFlow() {
+        splitContext = nil
+        splitLeftText = ""
+        splitRightText = ""
+        splitError = nil
+    }
+
+    private func moveCharacterToLeft() {
+        guard splitContext != nil else { return }
+        guard let first = splitRightText.first else { return }
+        splitRightText.removeFirst()
+        splitLeftText.append(first)
+        splitError = nil
+    }
+
+    private func moveCharacterToRight() {
+        guard splitContext != nil else { return }
+        guard let last = splitLeftText.popLast() else { return }
+        splitRightText = String(last) + splitRightText
+        splitError = nil
+    }
+
+    private func canApplySplit(for context: SplitContext) -> Bool {
+        guard splitContext != nil else { return false }
+        guard splitLeftText.isEmpty == false, splitRightText.isEmpty == false else { return false }
+        return splitLeftText + splitRightText == context.token.surface
+    }
+
+    private func applySplit(for context: SplitContext) {
+        guard canApplySplit(for: context) else {
+            splitError = "Choose a boundary that keeps both sides non-empty."
+            return
+        }
+        guard let idx = currentIndex(for: context) else {
+            splitError = "The token changed. Please reselect it."
+            return
+        }
+        let leftSurface = splitLeftText
+        let rightSurface = splitRightText
+        let tokenizer = TokenizerFactory.make()
+        let leftReading = SegmentReadingAttacher.reading(for: leftSurface, tokenizer: tokenizer)
+        let rightReading = SegmentReadingAttacher.reading(for: rightSurface, tokenizer: tokenizer)
+        let leftToken = ParsedToken(surface: leftSurface, reading: leftReading, meaning: nil)
+        let rightToken = ParsedToken(surface: rightSurface, reading: rightReading, meaning: nil)
+        tokens.replaceSubrange(idx...idx, with: [leftToken, rightToken])
+        selectedTokenIDs.removeAll()
+        onTokensUpdated?(tokens)
+        splitError = nil
+        removeCustomTokenIfNeeded(context.token.surface)
+        cancelSplitFlow()
+    }
+
+    private func currentIndex(for context: SplitContext) -> Int? {
+        if context.originalIndex < tokens.count && tokens[context.originalIndex].id == context.token.id {
+            return context.originalIndex
+        }
+        return tokens.firstIndex(where: { $0.id == context.token.id })
+    }
+
+    private func removeCustomTokenIfNeeded(_ surface: String) {
+        if CustomTokenizerLexicon.remove(word: surface) {
+            refreshTrieCache()
+        }
+    }
+
+    private func refreshTrieCache() {
+        Task {
+            let rebuilt = await JMdictTrieProvider.shared.rebuildNow()
+            await MainActor.run {
+                if let rebuilt {
+                    JMdictTrieCache.shared = rebuilt
+                }
+            }
+        }
     }
 
     private func addWord(from token: ParsedToken, with filteredResults: [DictionaryEntry], at index: Int?, translation: String?) {
@@ -502,11 +690,14 @@ struct ExtractWordsView: View {
                 results = (try? await withTimeout(0.15) { try await DictionarySQLiteStore.shared.lookup(term: kata, limit: limit) }) ?? []
             }
         } else {
+            var results: [DictionaryEntry] = []
+
             if !rawSurface.isEmpty {
-                results = (try? await withTimeout(0.15) { try await DictionarySQLiteStore.shared.lookup(term: rawSurface, limit: limit) }) ?? []
+                results = (try? await DictionarySQLiteStore.shared.lookup(term: rawSurface, limit: limit)) ?? []
             }
+
             if results.isEmpty && !rawReading.isEmpty && !Task.isCancelled {
-                results = (try? await withTimeout(0.15) { try await DictionarySQLiteStore.shared.lookup(term: rawReading, limit: limit) }) ?? []
+                results = (try? await DictionarySQLiteStore.shared.lookup(term: rawReading, limit: limit)) ?? []
             }
         }
 

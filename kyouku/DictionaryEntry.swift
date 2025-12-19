@@ -181,6 +181,11 @@ actor DictionarySQLiteStore {
             let isCommon = sqlite3_column_int(stmt, 4) != 0
             rows.append(DictionaryEntry(id: id, kanji: kanji, reading: reading, gloss: gloss, isCommon: isCommon))
         }
+
+        if containsKanjiCharacters(term) {
+            rows = rows.filter { $0.kanji == term }
+        }
+
         return rows
     }
 
@@ -287,6 +292,16 @@ actor DictionarySQLiteStore {
             rows.append(DictionaryEntry(id: id, kanji: kanji, reading: reading, gloss: gloss, isCommon: isCommon))
         }
         return rows
+    }
+
+    private func containsKanjiCharacters(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            let value = scalar.value
+            if (0x4E00...0x9FFF).contains(value) {
+                return true
+            }
+        }
+        return false
     }
 
     private func romanToHiragana(_ input: String) -> String {
