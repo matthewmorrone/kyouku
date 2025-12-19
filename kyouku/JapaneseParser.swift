@@ -14,19 +14,37 @@ enum JapaneseParser {
         let tokenizer = TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic()))
         let engine = SegmentationEngine.current()
 
-        if engine == .dictionaryTrie, let trie = JMdictTrieCache.shared {
-            let segments = DictionarySegmenter.segment(text: text, trie: trie)
+        func tokens(from segments: [Segment]) -> [ParsedToken] {
+            guard !segments.isEmpty else { return [] }
             let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: segments, tokenizer: tokenizer)
-            return enriched.map { item in
-                ParsedToken(surface: item.segment.surface, reading: item.reading, meaning: nil)
-            }
-        } else if engine == .appleTokenizer {
-            let segments = AppleSegmenter.segment(text: text)
-            let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: segments, tokenizer: tokenizer)
-            if enriched.isEmpty {
-                return fallbackParse(text: text)
-            }
             return enriched.map { ParsedToken(surface: $0.segment.surface, reading: $0.reading, meaning: nil) }
+        }
+
+        if engine == .dictionaryTrie {
+            if let trie = JMdictTrieCache.shared {
+                let segments = DictionarySegmenter.segment(text: text, trie: trie)
+                let parsed = tokens(from: segments)
+                if !parsed.isEmpty {
+                    return parsed
+                }
+            }
+            // Dictionary engine selected but trie is not yet ready: fall back to the same Apple tokenizer
+            // path that FuriganaTextEditor uses so both UIs stay in sync.
+            let appleSegments = AppleSegmenter.segment(text: text)
+            let parsed = tokens(from: appleSegments)
+            if !parsed.isEmpty {
+                return parsed
+            }
+            return fallbackParse(text: text)
+        }
+
+        if engine == .appleTokenizer {
+            let appleSegments = AppleSegmenter.segment(text: text)
+            let parsed = tokens(from: appleSegments)
+            if !parsed.isEmpty {
+                return parsed
+            }
+            return fallbackParse(text: text)
         }
 
         return fallbackParse(text: text)

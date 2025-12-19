@@ -105,6 +105,36 @@ struct WordImporter {
         }
         return items
     }
+    
+    static func parseItems(fromString text: String, delimiter: Character?) -> [ImportItem] {
+        // If no delimiter override is provided, fall back to existing behavior
+        guard let delimiter = delimiter else { return parseItems(fromString: text) }
+        var items: [ImportItem] = []
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        // Treat as delimited values with the chosen delimiter
+        let rows = parseCSV(normalized, delimiter: delimiter)
+        var headerMap: [Int: String] = [:]
+        var startIndex = 0
+        if !rows.isEmpty, looksLikeHeader(rows[0]) {
+            for (i, h) in rows[0].enumerated() { headerMap[i] = canonicalHeaderName(h) }
+            startIndex = 1
+        }
+        for (idx, row) in rows[startIndex...].enumerated() {
+            let provided = mapRow(row, headerMap: headerMap)
+            let item = ImportItem(
+                lineNumber: startIndex + idx + 1,
+                providedSurface: provided.surface?.nilIfEmpty,
+                providedReading: provided.reading?.nilIfEmpty,
+                providedMeaning: provided.meaning?.nilIfEmpty,
+                note: provided.note?.nilIfEmpty,
+                computedSurface: nil,
+                computedReading: nil,
+                computedMeaning: nil
+            )
+            items.append(item)
+        }
+        return items
+    }
 
     static func fillMissing(items: inout [ImportItem], preferKanaOnly: Bool) async {
         for i in items.indices {
@@ -250,6 +280,44 @@ struct WordImporter {
             prevChar = ch
         }
         // Flush last field/row
+        if !field.isEmpty || !current.isEmpty { endRow() }
+        return rows
+    }
+    
+    private static func parseCSV(_ text: String, delimiter: Character) -> [[String]] {
+        var rows: [[String]] = []
+        var current: [String] = []
+        var field = ""
+        var inQuotes = false
+        var iter = text.makeIterator()
+
+        func endField() { current.append(field); field = "" }
+        func endRow() { endField(); rows.append(current); current = [] }
+
+        while let ch = iter.next() {
+            if inQuotes {
+                if ch == "\"" {
+                    if let next = iter.next() {
+                        if next == "\"" { field.append("\"") }
+                        else if next == delimiter { endField(); inQuotes = false }
+                        else if next == "\n" { endRow(); inQuotes = false }
+                        else { field.append(next) }
+                    } else {
+                        inQuotes = false
+                    }
+                } else {
+                    field.append(ch)
+                }
+            } else {
+                switch ch {
+                case "\"": inQuotes = true
+                case _ where ch == delimiter: endField()
+                case "\n": endRow()
+                case "\r": continue
+                default: field.append(ch)
+                }
+            }
+        }
         if !field.isEmpty || !current.isEmpty { endRow() }
         return rows
     }

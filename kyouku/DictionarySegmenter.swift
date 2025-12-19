@@ -7,6 +7,13 @@ struct Segment: Hashable {
 }
 
 enum DictionarySegmenter {
+    private static let shortHiraganaStopwords: Set<String> = [
+        "は","が","を","に","へ","と","で","や","の","も","ね","よ","な","ぞ","ぜ","さ","か","わ",
+        "まで","から","より","だけ","しか","でも","とも","です","ます","する","して",
+        "こと","もの","ところ","ため","つもり","はず","わけ","ふり","ぶり","まま","たち",
+        "これ","それ","あれ","どれ","ここ","そこ","どこ","こそ","さえ","ずつ","って","っと","など"
+    ]
+
     static func segment(text: String, trie: Trie?) -> [Segment] {
         let s = text.precomposedStringWithCanonicalMapping
         guard let t = trie else { return [] }
@@ -36,11 +43,11 @@ enum DictionarySegmenter {
             out.append(Segment(range: r, surface: String(s[r]), isDictionaryMatch: false))
             i = next
         }
-        return postProcessJapaneseSegments(s, out)
+        return postProcessJapaneseSegments(s, out, trie: trie)
     }
 
     // MARK: - Post-processing rules for Japanese morphology
-    private static func postProcessJapaneseSegments(_ s: String, _ segments: [Segment]) -> [Segment] {
+    private static func postProcessJapaneseSegments(_ s: String, _ segments: [Segment], trie: Trie) -> [Segment] {
         // Iteratively apply merge rules until stable
         var segs = segments
         var changed = true
@@ -69,6 +76,14 @@ enum DictionarySegmenter {
 
                 // Rule 0: Merge contiguous non-dictionary Japanese runs (only if adjacent)
                 if areContiguous && !a.isDictionaryMatch && !b.isDictionaryMatch && isJapaneseString(a.surface) && isJapaneseString(b.surface) {
+                    newSegs.append(mergeAB())
+                    i += 2
+                    changed = true
+                    continue
+                }
+
+                // Rule 0b: Merge kanji runs with short hiragana suffixes (e.g., 泳 + いだ) even if the suffix pretends to be its own dictionary hit
+                if areContiguous && containsKanji(a.surface) && isShortHiraganaSuffix(b.surface) {
                     newSegs.append(mergeAB())
                     i += 2
                     changed = true
@@ -139,7 +154,39 @@ enum DictionarySegmenter {
             }
             segs = newSegs
         }
-        return segs
+        return splitTrailingCopulaSegments(s, segs, trie: trie)
+    }
+
+    private static func splitTrailingCopulaSegments(_ text: String, _ segments: [Segment], trie: Trie) -> [Segment] {
+        var output: [Segment] = []
+        output.reserveCapacity(segments.count)
+        for seg in segments {
+            if let split = splitCopula(from: seg, in: text, trie: trie) {
+                output.append(contentsOf: split)
+            } else {
+                output.append(seg)
+            }
+        }
+        return output
+    }
+
+    private static func splitCopula(from segment: Segment, in text: String, trie: Trie) -> [Segment]? {
+        let surface = segment.surface
+        guard surface.count >= 2 else { return nil }
+        guard surface.hasSuffix("だ") else { return nil }
+        let prefixSurface = String(surface.dropLast())
+        guard prefixSurface.count >= 2 else { return nil }
+        guard trie.contains(word: prefixSurface) else { return nil }
+
+        // Only split if the prefix is a dictionary entry; this avoids breaking verb past-tense forms.
+        let suffixStart = text.index(before: segment.range.upperBound)
+        let prefixRange = segment.range.lowerBound..<suffixStart
+        let suffixRange = suffixStart..<segment.range.upperBound
+        guard !prefixRange.isEmpty else { return nil }
+
+        let prefix = Segment(range: prefixRange, surface: String(text[prefixRange]), isDictionaryMatch: segment.isDictionaryMatch)
+        let suffix = Segment(range: suffixRange, surface: String(text[suffixRange]), isDictionaryMatch: false)
+        return [prefix, suffix]
     }
 
     // MARK: - Character helpers
@@ -178,5 +225,32 @@ enum DictionarySegmenter {
     private static func startsWithAny(_ s: String, _ prefixes: [String]) -> Bool {
         for p in prefixes { if s.hasPrefix(p) { return true } }
         return false
+    }
+
+    private static func containsKanji(_ s: String) -> Bool {
+        for ch in s {
+            for scalar in ch.unicodeScalars {
+                if (0x4E00...0x9FFF).contains(scalar.value) { return true }
+            }
+        }
+        return false
+    }
+
+    private static func isHiraganaOnly(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        for ch in s {
+            for scalar in ch.unicodeScalars {
+                if !(0x3040...0x309F).contains(scalar.value) {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private static func isShortHiraganaSuffix(_ s: String) -> Bool {
+        if s.count == 0 || s.count > 2 { return false }
+        if shortHiraganaStopwords.contains(s) { return false }
+        return isHiraganaOnly(s)
     }
 }

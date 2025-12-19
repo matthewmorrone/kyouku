@@ -28,56 +28,7 @@ struct SettingsView: View {
     @State private var exportURL: URL? = nil
     @State private var isImporting: Bool = false
     @State private var importError: String? = nil
-    @State private var isImportingWords: Bool = false
-    @State private var preferKanaOnly: Bool = false
     @State private var importSummary: String? = nil
-
-    @State private var importPreviewURL: URL? = nil
-    @State private var previewItems: [ImportPreviewItem] = []
-    @State private var showImportPreview: Bool = false
-
-    // MARK: - Import bridging helpers
-    private func toImporterItems(_ items: [ImportPreviewItem]) -> [WordImporter.ImportItem] {
-        return items.map { it in
-            WordImporter.ImportItem(
-                lineNumber: it.lineNumber,
-                providedSurface: it.providedSurface,
-                providedReading: it.providedReading,
-                providedMeaning: it.providedMeaning,
-                note: it.note,
-                computedSurface: it.computedSurface,
-                computedReading: it.computedReading,
-                computedMeaning: it.computedMeaning
-            )
-        }
-    }
-
-    private func updatePreviewItems(from importerItems: [WordImporter.ImportItem]) {
-        self.previewItems = importerItems.map { it in
-            ImportPreviewItem(
-                lineNumber: it.lineNumber,
-                providedSurface: it.providedSurface,
-                providedReading: it.providedReading,
-                providedMeaning: it.providedMeaning,
-                note: it.note,
-                computedSurface: it.computedSurface,
-                computedReading: it.computedReading,
-                computedMeaning: it.computedMeaning
-            )
-        }
-    }
-
-    @MainActor
-    private func fillMissingForPreviewItems() async {
-        var importerItems = toImporterItems(self.previewItems)
-        await WordImporter.fillMissing(items: &importerItems, preferKanaOnly: self.preferKanaOnly)
-        updatePreviewItems(from: importerItems)
-    }
-
-    private func finalizePreviewItems() -> [(surface: String, reading: String, meaning: String, note: String?)] {
-        let prepared = WordImporter.finalize(items: toImporterItems(self.previewItems), preferKanaOnly: self.preferKanaOnly)
-        return prepared.map { (surface: $0.surface, reading: $0.reading, meaning: $0.meaning, note: $0.note) }
-    }
 
     var body: some View {
         NavigationStack {
@@ -98,7 +49,6 @@ struct SettingsView: View {
             }
             .onReceive(store.$words) { _ in refreshPreviewWord() }
             .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json], onCompletion: handleBackupImport)
-            .fileImporter(isPresented: $isImportingWords, allowedContentTypes: [.commaSeparatedText, .plainText], onCompletion: handleWordsImport)
             .sheet(isPresented: exportSheetBinding) {
                 if let exportURL {
                     ShareLink(item: exportURL) { Text("Share Backup") }
@@ -114,10 +64,6 @@ struct SettingsView: View {
                 Button("OK") { importSummary = nil }
             } message: {
                 Text(importSummary ?? "")
-            }
-            .sheet(isPresented: $showImportPreview) {
-                makeImportPreviewSheet()
-                    .presentationDetents([.large])
             }
         }
     }
@@ -226,8 +172,6 @@ struct SettingsView: View {
             Button("Import…") { isImporting = true }
                 .tint(.red)
                 .foregroundStyle(.red)
-
-            Button("Import Words…") { isImportingWords = true }
         }
     }
 
@@ -242,26 +186,14 @@ struct SettingsView: View {
     private func handleBackupImport(_ result: Result<URL, Error>) {
         switch result {
         case .success(let url):
+            let needsStop = url.startAccessingSecurityScopedResource()
+            defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
             do {
+                // Best-effort: ensure iCloud items are downloaded
+                try? FileManager.default.startDownloadingUbiquitousItem(at: url)
                 let backup = try AppDataBackup.importData(from: url)
                 store.replaceAll(with: backup.words)
                 NotificationCenter.default.post(name: .didImportNotesBackup, object: backup.notes)
-            } catch {
-                importError = error.localizedDescription
-            }
-        case .failure(let err):
-            importError = err.localizedDescription
-        }
-    }
-
-    private func handleWordsImport(_ result: Result<URL, Error>) {
-        switch result {
-        case .success(let url):
-            do {
-                let items = try WordImporter.parseItems(from: url)
-                importPreviewURL = url
-                self.updatePreviewItems(from: items)
-                showImportPreview = true
             } catch {
                 importError = error.localizedDescription
             }
@@ -358,127 +290,9 @@ struct SettingsView: View {
             importError = error.localizedDescription
         }
     }
-
-    @ViewBuilder
-    private func makeImportPreviewSheet() -> some View {
-        ImportPreviewSheet(
-            items: $previewItems,
-            preferKanaOnly: $preferKanaOnly,
-            onFill: {
-                Task { await fillMissingForPreviewItems() }
-            },
-            onConfirm: {
-                let prepared = finalizePreviewItems()
-                var added = 0
-                for w in prepared {
-                    let before = store.allWords().count
-                    store.add(surface: w.surface, reading: w.reading, meaning: w.meaning, note: w.note)
-                    let after = store.allWords().count
-                    if after > before { added += 1 }
-                }
-                importSummary = "Imported words: \(added). Skipped: \(prepared.count - added)."
-                showImportPreview = false
-            },
-            onCancel: {
-                showImportPreview = false
-            }
-        )
-    }
 }
 
 extension Notification.Name {
     static let didImportNotesBackup = Notification.Name("didImportNotesBackup")
-}
-
-// Local mirror of WordImporter.ImportItem to avoid direct cross-file type dependency at property level
-private struct ImportPreviewItem: Identifiable, Hashable {
-    let id: UUID
-    let lineNumber: Int
-    var providedSurface: String?
-    var providedReading: String?
-    var providedMeaning: String?
-    var note: String?
-    var computedSurface: String?
-    var computedReading: String?
-    var computedMeaning: String?
-
-    init(id: UUID = UUID(), lineNumber: Int, providedSurface: String?, providedReading: String?, providedMeaning: String?, note: String?, computedSurface: String?, computedReading: String?, computedMeaning: String?) {
-        self.id = id
-        self.lineNumber = lineNumber
-        self.providedSurface = providedSurface
-        self.providedReading = providedReading
-        self.providedMeaning = providedMeaning
-        self.note = note
-        self.computedSurface = computedSurface
-        self.computedReading = computedReading
-        self.computedMeaning = computedMeaning
-    }
-}
-private struct ImportPreviewSheet: View {
-    @Binding var items: [ImportPreviewItem]
-    @Binding var preferKanaOnly: Bool
-    var onFill: () -> Void
-    var onConfirm: () -> Void
-    var onCancel: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Options") {
-                    Toggle("Prefer kana-only surface when only kana provided", isOn: $preferKanaOnly)
-                        .tint(.accentColor)
-                }
-                Section("Preview") {
-                    if items.isEmpty {
-                        Text("No items parsed.").foregroundStyle(.secondary)
-                    } else {
-                        ForEach(items) { it in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                    Text((it.providedSurface ?? it.computedSurface) ?? "—")
-                                        .font(.headline)
-                                    let kana = (it.providedReading ?? it.computedReading) ?? ""
-                                    if !kana.isEmpty {
-                                        Text(kana)
-                                            .font(.subheadline)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                if let m = (it.providedMeaning ?? it.computedMeaning), !m.isEmpty {
-                                    Text(m)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                } else {
-                                    Text("<no meaning>")
-                                        .font(.footnote)
-                                        .foregroundStyle(.tertiary)
-                                }
-                                if let n = it.note, !n.isEmpty {
-                                    Text(n)
-                                        .font(.footnote)
-                                        .foregroundStyle(.tertiary)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Import Preview")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { onCancel() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 12) {
-                        Button("Fill Missing") { onFill() }
-                        Button("Confirm") { onConfirm() }
-                            .buttonStyle(.borderedProminent)
-                    }
-                }
-            }
-        }
-    }
 }
 

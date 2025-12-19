@@ -710,99 +710,55 @@ private struct DefinitionSheetContent: View {
 
     @EnvironmentObject var store: WordStore
 
-    @State private var customTranslationKanji: String = ""
-    @State private var customTranslationFurigana: String = ""
-    @State private var customTranslationMeaning: String = ""
-
     var body: some View {
         Group {
             if let token = selectedToken {
                 let hasKanjiInToken: Bool = token.surface.contains { ch in
                     ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
                 }
-
-                let hasKanjiInTokenLocal = hasKanjiInToken
-                let orderedResultsLocal = orderedEntries(for: token, hasKanjiInToken: hasKanjiInTokenLocal)
+                let orderedResultsLocal = orderedEntries(for: token, hasKanjiInToken: hasKanjiInToken)
                 let totalLocal = orderedResultsLocal.count
-                let totalSlots = totalLocal + 1
-                let currentIndexLocal = clampSelection(totalCount: totalSlots)
-                let isCustomScreenLocal = currentIndexLocal == totalLocal
-                let stepperLabel = isCustomScreenLocal
-                    ? "Custom \(currentIndexLocal + 1) / \(totalSlots)"
-                    : "Definition \(currentIndexLocal + 1) / \(totalSlots)"
+                let currentIndexLocal = clampSelection(totalCount: totalLocal)
                 let entryLocal = (currentIndexLocal >= 0 && currentIndexLocal < totalLocal) ? orderedResultsLocal[currentIndexLocal] : nil
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Button(action: {
-                            showingDefinition = false
-                            selectedEntryIndex = nil
-                            resetCustomTranslation()
-                        }) {
-                            Image(systemName: "xmark.circle.fill").font(.title3)
-                        }
-
                         Spacer()
 
-                        if isCustomScreenLocal {
-                            Button(action: {
-                                let trimmedMeaning = customTranslationMeaning.trimmingCharacters(in: .whitespacesAndNewlines)
-                                guard !trimmedMeaning.isEmpty else { return }
-                                store.add(
-                                    surface: customTranslationKanji.isEmpty ? token.surface : customTranslationKanji,
-                                    reading: customTranslationFurigana.isEmpty ? token.reading : customTranslationFurigana,
-                                    meaning: trimmedMeaning
-                                )
-                                showingDefinition = false
-                                selectedEntryIndex = nil
-                                resetCustomTranslation()
-                            }) {
-                                Image(systemName: "checkmark.circle.fill").font(.title3)
-                            }
-                            .disabled(isLookingUp || customTranslationMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        } else {
-                            Button(action: {
-                                // Normal add uses onAddDefinition
-                                onAdd(token, orderedResultsLocal, entryLocal == nil ? nil : currentIndexLocal, nil)
-                                showingDefinition = false
-                                selectedEntryIndex = nil
-                                resetCustomTranslation()
-                            }) {
-                                Image(systemName: "plus.circle.fill").font(.title3)
-                            }
-                            .disabled(isLookingUp || (entryLocal == nil && (fallbackTranslation?.isEmpty ?? true)))
+                        Button(action: {
+                            onAdd(token, orderedResultsLocal, entryLocal == nil ? nil : currentIndexLocal, nil)
+                            showingDefinition = false
+                            selectedEntryIndex = nil
+                        }) {
+                            Image(systemName: "plus.circle.fill").font(.title3)
                         }
+                        .disabled(isLookingUp || (entryLocal == nil && (fallbackTranslation?.isEmpty ?? true)))
                     }
 
-                    if isCustomScreenLocal && totalLocal > 0 {
+                    if totalLocal > 1 {
                         HStack(spacing: 16) {
                             Button {
-                                stepSelection(-1, totalCount: totalSlots)
-                                resetCustomTranslation()
+                                stepSelection(-1, totalCount: totalLocal)
                             } label: {
-                                Image(systemName: "chevron.left")
-                                    .font(.title3)
+                                Image(systemName: "chevron.left").font(.title3)
                             }
                             .disabled(currentIndexLocal <= 0)
 
-                            Text(stepperLabel)
+                            Text("Definition \(currentIndexLocal + 1) / \(totalLocal)")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
 
                             Button {
-                                selectedEntryIndex = 0
+                                stepSelection(1, totalCount: totalLocal)
                             } label: {
-                                Image(systemName: "chevron.right")
-                                    .font(.title3)
+                                Image(systemName: "chevron.right").font(.title3)
                             }
+                            .disabled(currentIndexLocal >= totalLocal - 1)
                         }
                     }
 
                     let displayKanji: String = {
-                        if isCustomScreenLocal {
-                            return customTranslationKanji.isEmpty ? token.surface : customTranslationKanji
-                        }
-                        if !hasKanjiInTokenLocal {
+                        if !hasKanjiInToken {
                             return token.reading.isEmpty ? token.surface : token.reading
                         }
                         if let e = entryLocal {
@@ -811,16 +767,7 @@ private struct DefinitionSheetContent: View {
                         return token.surface
                     }()
 
-                    let displayKana: String = {
-                        if isCustomScreenLocal {
-                            return customTranslationFurigana.isEmpty ? token.reading : customTranslationFurigana
-                        }
-                        if let e = entryLocal {
-                            return e.reading
-                        } else {
-                            return token.reading
-                        }
-                    }()
+                    let displayKana: String = entryLocal?.reading ?? token.reading
 
                     Text(displayKanji)
                         .font(.title2).bold()
@@ -835,12 +782,6 @@ private struct DefinitionSheetContent: View {
                         ProgressView("Looking up definitions…")
                     } else if let err = lookupError {
                         Text(err).foregroundStyle(.secondary)
-                    } else if isCustomScreenLocal {
-                        // Show nothing for definitions in custom screen
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Add a custom translation.")
-                                .foregroundStyle(.secondary)
-                        }
                     } else if orderedResultsLocal.isEmpty, let fallback = fallbackTranslation, !fallback.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Apple Translation")
@@ -870,109 +811,12 @@ private struct DefinitionSheetContent: View {
                             }
                         }
                     }
-
-                    if isCustomScreenLocal {
-                        VStack(alignment: .leading, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Kanji")
-                                    .font(.headline)
-                                TextEditor(text: $customTranslationKanji)
-                                    .frame(minHeight: 30)
-                                    .border(Color.secondary.opacity(0.5))
-                                    .cornerRadius(6)
-                                    .disableAutocorrection(false)
-                                    .autocapitalization(.none)
-                            }
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Furigana")
-                                    .font(.headline)
-                                TextEditor(text: $customTranslationFurigana)
-                                    .frame(minHeight: 30)
-                                    .border(Color.secondary.opacity(0.5))
-                                    .cornerRadius(6)
-                                    .disableAutocorrection(false)
-                                    .autocapitalization(.none)
-                            }
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Meaning")
-                                    .font(.headline)
-                                TextEditor(text: $customTranslationMeaning)
-                                    .frame(minHeight: 60)
-                                    .border(Color.secondary.opacity(0.5))
-                                    .cornerRadius(6)
-                                    .disableAutocorrection(false)
-                                    .autocapitalization(.sentences)
-                            }
-                        }
-                        .padding(.top, 8)
-                    }
                 }
                 .onAppear {
-                    if selectedEntryIndex == nil {
-                        selectedEntryIndex = 0
-                    }
-                    if isCustomScreenLocal {
-                        if customTranslationKanji.isEmpty {
-                            customTranslationKanji = token.surface
-                        }
-                        if customTranslationFurigana.isEmpty {
-                            customTranslationFurigana = token.reading
-                        }
-                        if customTranslationMeaning.isEmpty {
-                            customTranslationMeaning = ""
-                        }
-                    } else {
-                        resetCustomTranslation()
-                    }
-                    let hasKanjiInToken = token.surface.contains { ch in
-                        ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
-                    }
-                    let filtered = orderedEntries(for: token, hasKanjiInToken: hasKanjiInToken)
-                    let total = filtered.count
-                    let currentIndex = clampSelection(totalCount: total + 1)
-                    let isCustomScreen = currentIndex == total
-                    let entry = (currentIndex >= 0 && currentIndex < total) ? filtered[currentIndex] : nil
-                    let displayKanji: String = {
-                        if isCustomScreen {
-                            return customTranslationKanji.isEmpty ? token.surface : customTranslationKanji
-                        }
-                        if !hasKanjiInToken {
-                            return token.reading.isEmpty ? token.surface : token.reading
-                        }
-                        if let e = entry {
-                            return (e.kanji.isEmpty == false) ? e.kanji : e.reading
-                        }
-                        return token.surface
-                    }()
-                    let displayKana: String = {
-                        if isCustomScreen {
-                            return customTranslationFurigana.isEmpty ? token.reading : customTranslationFurigana
-                        }
-                        if let e = entry {
-                            return e.reading
-                        } else {
-                            return token.reading
-                        }
-                    }()
-                    popupLogger.info("Dictionary popup: word='\(displayKanji, privacy: .public)', kana='\(displayKana, privacy: .public)'")
+                    if selectedEntryIndex == nil { selectedEntryIndex = 0 }
                 }
                 .onChange(of: dictResults) { _, _ in
-                    // Recompute display values when results update to log the current header
-                    let hasKanjiInToken = token.surface.contains { ch in
-                        ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
-                    }
                     let filtered = orderedEntries(for: token, hasKanjiInToken: hasKanjiInToken)
-                    let entry = filtered.first
-                    let currentKanji: String = {
-                        if !hasKanjiInToken {
-                            return token.reading.isEmpty ? token.surface : token.reading
-                        }
-                        if let e = entry {
-                            return (e.kanji.isEmpty == false) ? (e.kanji) : (e.reading)
-                        }
-                        return token.surface
-                    }()
-                    let currentKana: String = entry?.reading ?? token.reading
                     let count = filtered.count
                     if count > 0 {
                         let clamped = clampSelection(totalCount: count)
@@ -982,22 +826,6 @@ private struct DefinitionSheetContent: View {
                     } else {
                         selectedEntryIndex = nil
                     }
-                    popupLogger.info("Dictionary popup updated: word='\(currentKanji, privacy: .public)', kana='\(currentKana, privacy: .public)'")
-                }
-                .onChange(of: selectedEntryIndex) { oldValue, newValue in
-                    if let idx = newValue, idx == totalLocal {
-                        // When switching to custom screen, initialize fields
-                        if customTranslationKanji.isEmpty {
-                            customTranslationKanji = token.surface
-                        }
-                        if customTranslationFurigana.isEmpty {
-                            customTranslationFurigana = token.reading
-                        }
-                        customTranslationMeaning = ""
-                    } else {
-                        // Reset custom translation fields on selecting a definition
-                        resetCustomTranslation()
-                    }
                 }
                 .padding()
                 .presentationDetents([.fraction(0.33)])
@@ -1006,12 +834,6 @@ private struct DefinitionSheetContent: View {
                 Text("No selection").padding()
             }
         }
-    }
-
-    private func resetCustomTranslation() {
-        customTranslationKanji = ""
-        customTranslationFurigana = ""
-        customTranslationMeaning = ""
     }
 
     private func orderedEntries(for token: ParsedToken, hasKanjiInToken: Bool) -> [DictionaryEntry] {

@@ -102,6 +102,17 @@ public final class Trie {
         return tokens
     }
 
+    public func contains(word: String) -> Bool {
+        let normalized = Trie.normalize(word)
+        guard !normalized.isEmpty else { return false }
+        var node = root
+        for ch in normalized {
+            guard let next = node.children[ch] else { return false }
+            node = next
+        }
+        return node.isWord
+    }
+
     /// Returns the end index of the longest dictionary match starting at `start` in `input`.
     /// IMPORTANT: `input` must already be normalized with `precomposedStringWithCanonicalMapping`.
     /// If no match, returns nil. The search is limited by the trie's maxWordLength.
