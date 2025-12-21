@@ -17,15 +17,43 @@ struct FuriganaTextView: UIViewRepresentable {
         self.attributedText = attributedText
     }
 
-    init(text: String, showFurigana: Bool = true) {
+    init(text: String, showFurigana: Bool = true, perKanjiFurigana: Bool = true) {
         self.attributedText = JapaneseFuriganaBuilder.buildAttributedText(
             text: text,
-            showFurigana: showFurigana
+            showFurigana: showFurigana,
+            perKanjiSplit: perKanjiFurigana
         )
     }
 
-    init(token: ParsedToken) {
-        self.init(text: token.surface, showFurigana: true)
+    init(token: ParsedToken, perKanjiFurigana: Bool = true) {
+        if perKanjiFurigana {
+            self.init(text: token.surface, showFurigana: true, perKanjiFurigana: true)
+            return
+        }
+
+        let surface = token.surface
+        guard surface.isEmpty == false else {
+            self.init(attributedText: NSAttributedString(string: surface))
+            return
+        }
+
+        let trimmedReading = token.reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedReading.isEmpty == false {
+            let attributed = JapaneseFuriganaBuilder.buildWholeWordRuby(text: surface, reading: trimmedReading)
+            self.init(attributedText: attributed)
+            return
+        }
+
+        let range = surface.startIndex..<surface.endIndex
+        let segment = Segment(range: range, surface: surface, isDictionaryMatch: true)
+        let attributed = JapaneseFuriganaBuilder.buildAttributedText(
+            text: surface,
+            showFurigana: true,
+            segments: [segment],
+            forceMeCabOnly: true,
+            perKanjiSplit: false
+        )
+        self.init(attributedText: attributed)
     }
 
     func makeUIView(context: Context) -> UILabel {

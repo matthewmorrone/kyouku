@@ -27,10 +27,12 @@ struct ExtractWordsView: View {
 
     @State private var isSelecting: Bool = false
     @State private var selectedTokenIDs: Set<UUID> = []
+    @AppStorage("perKanjiFuriganaEnabled") private var perKanjiFuriganaEnabled: Bool = true
     @State private var splitContext: SplitContext? = nil
     @State private var splitLeftText: String = ""
     @State private var splitRightText: String = ""
     @State private var splitError: String? = nil
+    @FocusState private var splitLeftFocused: Bool
 
     var body: some View {
         VStack(spacing: 8) {
@@ -39,6 +41,9 @@ struct ExtractWordsView: View {
                     .toggleStyle(.switch).lineLimit(1)
                 Toggle("Hide Particles", isOn: $hideParticles)
                     .toggleStyle(.switch).lineLimit(1)
+                Toggle("Per-kanji Furigana", isOn: $perKanjiFuriganaEnabled)
+                    .toggleStyle(.switch)
+                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal)
@@ -49,8 +54,12 @@ struct ExtractWordsView: View {
                     isSelecting: $isSelecting,
                     selectedTokenIDs: $selectedTokenIDs,
                     store: store,
+                    perKanjiFurigana: perKanjiFuriganaEnabled,
                     presentDefinition: { token in
                         presentDefinition(for: token)
+                    },
+                    onAdd: { token in
+                        addTokenDirectly(token)
                     }
                 )
             }
@@ -201,7 +210,7 @@ struct ExtractWordsView: View {
         }
         .sheet(item: $splitContext, onDismiss: { splitError = nil }) { context in
             VStack(alignment: .leading, spacing: 20) {
-                Text("Separate Token")
+                Text("Split Token")
                     .font(.title2)
                     .bold()
 
@@ -213,7 +222,7 @@ struct ExtractWordsView: View {
                         .font(.headline)
                 }
 
-                Text("Use the arrows to move characters between the two fields, then apply the split.")
+                Text("Use the arrows (or edit either field directly) to decide where the split should land.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
@@ -224,7 +233,9 @@ struct ExtractWordsView: View {
                             .foregroundStyle(.secondary)
                         TextField("Left", text: $splitLeftText)
                             .textFieldStyle(.roundedBorder)
-                            .disabled(true)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                            .focused($splitLeftFocused)
                     }
 
                     VStack(spacing: 8) {
@@ -247,7 +258,8 @@ struct ExtractWordsView: View {
                             .foregroundStyle(.secondary)
                         TextField("Right", text: $splitRightText)
                             .textFieldStyle(.roundedBorder)
-                            .disabled(true)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
                     }
                 }
 
@@ -268,6 +280,7 @@ struct ExtractWordsView: View {
             .padding()
             .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
+            .onAppear { splitLeftFocused = true }
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -295,13 +308,13 @@ struct ExtractWordsView: View {
                             combineSelectedTokens()
                         }
                         .disabled(!canCombineSelected())
-                        Button("Separate Selected") {
+                        Button("Split Selected") {
                             beginSplitFlow()
                         }
                         .disabled(!canSplitSelected())
-                        Button("Add Selected (\(selectedTokenIDs.count))") {
-                            addSelectedTokens()
-                        }
+//                        Button("Add Selected (\(selectedTokenIDs.count))") {
+//                            addSelectedTokens()
+//                        }
                         .disabled(selectedTokenIDs.isEmpty)
                     }
                     .padding(.horizontal, 16)
@@ -317,7 +330,9 @@ struct ExtractWordsView: View {
         @Binding var isSelecting: Bool
         @Binding var selectedTokenIDs: Set<UUID>
         let store: WordStore
+        let perKanjiFurigana: Bool
         let presentDefinition: (ParsedToken) -> Void
+        let onAdd: (ParsedToken) -> Void
 
         var body: some View {
             ForEach(tokens) { token in
@@ -326,7 +341,9 @@ struct ExtractWordsView: View {
                     isSelecting: $isSelecting,
                     selectedTokenIDs: $selectedTokenIDs,
                     isAlreadyAdded: store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }),
-                    onTap: { presentDefinition(token) }
+                    perKanjiFurigana: perKanjiFurigana,
+                    onTap: { presentDefinition(token) },
+                    onAdd: { onAdd(token) }
                 )
             }
         }
@@ -337,7 +354,9 @@ struct ExtractWordsView: View {
         @Binding var isSelecting: Bool
         @Binding var selectedTokenIDs: Set<UUID>
         let isAlreadyAdded: Bool
+        let perKanjiFurigana: Bool
         let onTap: () -> Void
+        let onAdd: () -> Void
 
         var body: some View {
             let isSelected = selectedTokenIDs.contains(token.id)
@@ -350,11 +369,14 @@ struct ExtractWordsView: View {
                     .buttonStyle(.plain)
                 }
 
-                FuriganaTextView(token: token)
+                FuriganaTextView(token: token, perKanjiFurigana: perKanjiFurigana)
+                    .onTapGesture {
+                        if !isSelecting { onTap() }
+                    }
                 Spacer()
 
                 if !isSelecting {
-                    Button(action: { onTap() }) {
+                    Button(action: { onAdd() }) {
                         if isAlreadyAdded {
                             Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.green)
                         } else {
@@ -369,8 +391,6 @@ struct ExtractWordsView: View {
             .onTapGesture {
                 if isSelecting {
                     toggleSelect(token)
-                } else {
-                    onTap()
                 }
             }
             .padding(.vertical, 6)
@@ -394,6 +414,38 @@ struct ExtractWordsView: View {
     private func containsKanji(_ text: String) -> Bool {
         for ch in text { if ("\u{4E00}"..."\u{9FFF}").contains(String(ch)) { return true } }
         return false
+    }
+
+    private func deinflectCandidates(from s: String) -> [String] {
+        var out: [String] = []
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return out }
+        // Handle common negative forms by proposing stems and simple ichidan base forms
+        if trimmed.hasSuffix("ない") {
+            let stem = String(trimmed.dropLast(2))
+            if !stem.isEmpty { out.append(stem) }
+            if !stem.isEmpty { out.append(stem + "る") }
+        }
+        if trimmed.hasSuffix("ません") {
+            let stem = String(trimmed.dropLast(3))
+            if !stem.isEmpty { out.append(stem) }
+            if !stem.isEmpty { out.append(stem + "る") }
+        }
+        if trimmed.hasSuffix("なかった") {
+            let stem = String(trimmed.dropLast(4))
+            if !stem.isEmpty { out.append(stem) }
+            if !stem.isEmpty { out.append(stem + "る") }
+        }
+        // Deduplicate while preserving order
+        var seen = Set<String>()
+        var unique: [String] = []
+        for c in out where !c.isEmpty {
+            if !seen.contains(c) {
+                seen.insert(c)
+                unique.append(c)
+            }
+        }
+        return unique
     }
 
     private func latinToHiragana(_ text: String) -> String? {
@@ -522,8 +574,13 @@ struct ExtractWordsView: View {
         guard idx >= 0 && idx < tokens.count else { return }
         let token = tokens[idx]
         guard token.surface.count >= 2 else { return }
-        splitLeftText = ""
-        splitRightText = token.surface
+        if let first = token.surface.first {
+            splitLeftText = String(first)
+            splitRightText = String(token.surface.dropFirst())
+        } else {
+            splitLeftText = ""
+            splitRightText = token.surface
+        }
         splitError = nil
         splitContext = SplitContext(token: token, originalIndex: idx)
     }
@@ -621,14 +678,7 @@ struct ExtractWordsView: View {
     }
 
     private func refreshTrieCache() {
-        Task {
-            let rebuilt = await JMdictTrieProvider.shared.rebuildNow()
-            await MainActor.run {
-                if let rebuilt {
-                    JMdictTrieCache.shared = rebuilt
-                }
-            }
-        }
+        TokenizerBoundaryManager.refreshSharedTrieInBackground()
     }
 
     private func addWord(from token: ParsedToken, with filteredResults: [DictionaryEntry], at index: Int?, translation: String?) {
@@ -647,6 +697,56 @@ struct ExtractWordsView: View {
             store.add(surface: token.surface, reading: token.reading, meaning: translation, sourceNoteID: sourceNoteID)
         } else if let meaning = token.meaning, !meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             store.add(surface: token.surface, reading: token.reading, meaning: meaning, sourceNoteID: sourceNoteID)
+        }
+    }
+
+    private func addTokenDirectly(_ token: ParsedToken) {
+        // Skip if already added with the same surface+reading as the token
+        if store.words.contains(where: { $0.surface == token.surface && $0.reading == token.reading }) {
+            return
+        }
+        Task {
+            let limit = 1
+            let rawSurface = token.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawReading = token.reading.trimmingCharacters(in: .whitespacesAndNewlines)
+            var results: [DictionaryEntry] = []
+            if !rawSurface.isEmpty {
+                results = (try? await DictionarySQLiteStore.shared.lookup(term: rawSurface, limit: limit)) ?? []
+            }
+            if results.isEmpty && !rawReading.isEmpty && !Task.isCancelled {
+                results = (try? await DictionarySQLiteStore.shared.lookup(term: rawReading, limit: limit)) ?? []
+            }
+            let ordered = orderedEntries(for: token, entries: results)
+            let hasKanjiInToken = containsKanji(token.surface)
+            if let entry = ordered.first {
+                let meaning = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
+                if hasKanjiInToken {
+                    let surface = entry.kanji.isEmpty ? entry.reading : entry.kanji
+                    await MainActor.run {
+                        store.add(surface: surface, reading: entry.reading, meaning: meaning, sourceNoteID: sourceNoteID)
+                    }
+                } else {
+                    // Prefer kana-only surface when the token has no kanji
+                    let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
+                    await MainActor.run {
+                        store.add(surface: kanaSurface, reading: entry.reading, meaning: meaning, sourceNoteID: sourceNoteID)
+                    }
+                }
+            } else if let meaning = token.meaning, !meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // No dictionary hit; use token-provided meaning, preferring kana-only surface if no kanji in the token
+                let surfaceToUse: String = {
+                    if hasKanjiInToken { return token.surface }
+                    return token.reading.isEmpty ? token.surface : token.reading
+                }()
+                await MainActor.run {
+                    store.add(surface: surfaceToUse, reading: token.reading, meaning: meaning, sourceNoteID: sourceNoteID)
+                }
+            } else {
+                // Fallback: present the definition popup to let the user choose
+                await MainActor.run {
+                    presentDefinition(for: token)
+                }
+            }
         }
     }
 
@@ -690,7 +790,7 @@ struct ExtractWordsView: View {
                 results = (try? await withTimeout(0.15) { try await DictionarySQLiteStore.shared.lookup(term: kata, limit: limit) }) ?? []
             }
         } else {
-            var results: [DictionaryEntry] = []
+            results = []
 
             if !rawSurface.isEmpty {
                 results = (try? await DictionarySQLiteStore.shared.lookup(term: rawSurface, limit: limit)) ?? []
@@ -698,6 +798,30 @@ struct ExtractWordsView: View {
 
             if results.isEmpty && !rawReading.isEmpty && !Task.isCancelled {
                 results = (try? await DictionarySQLiteStore.shared.lookup(term: rawReading, limit: limit)) ?? []
+            }
+
+            // If still no results, try simple deinflection candidates (e.g., 忘れない -> 忘れ, 忘れる)
+            if results.isEmpty && !Task.isCancelled {
+                let surfaceCands = deinflectCandidates(from: rawSurface)
+                for cand in surfaceCands {
+                    if Task.isCancelled { break }
+                    let hit = (try? await DictionarySQLiteStore.shared.lookup(term: cand, limit: limit)) ?? []
+                    if !hit.isEmpty {
+                        results = hit
+                        break
+                    }
+                }
+            }
+            if results.isEmpty && !rawReading.isEmpty && !Task.isCancelled {
+                let readingCands = deinflectCandidates(from: rawReading)
+                for cand in readingCands {
+                    if Task.isCancelled { break }
+                    let hit = (try? await DictionarySQLiteStore.shared.lookup(term: cand, limit: limit)) ?? []
+                    if !hit.isEmpty {
+                        results = hit
+                        break
+                    }
+                }
             }
         }
 

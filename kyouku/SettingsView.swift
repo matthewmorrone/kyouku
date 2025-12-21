@@ -29,6 +29,10 @@ struct SettingsView: View {
     @State private var isImporting: Bool = false
     @State private var importError: String? = nil
     @State private var importSummary: String? = nil
+    @State private var boundaryResetStatus: String? = nil
+    @State private var showBoundaryResetConfirmation: Bool = false
+    @State private var isResettingBoundaries: Bool = false
+    @State private var hasCustomBoundaries: Bool = CustomTokenizerLexicon.words().isEmpty == false
 
     var body: some View {
         NavigationStack {
@@ -37,6 +41,9 @@ struct SettingsView: View {
                 tokenizerSection
                 wordOfTheDaySection
                 backupRestoreSection
+                Section("Diagnostics") {
+                    NavigationLink("Lookup Tests") { LookupTestsView() }
+                }
             }
             .navigationTitle("Settings")
             .onAppear { rebuildPreview() }
@@ -46,8 +53,12 @@ struct SettingsView: View {
             .onAppear {
                 syncWotdTime()
                 refreshPreviewWord()
+                updateCustomBoundaryState()
             }
             .onReceive(store.$words) { _ in refreshPreviewWord() }
+            .onReceive(NotificationCenter.default.publisher(for: .customTokenizerLexiconDidChange)) { _ in
+                updateCustomBoundaryState()
+            }
             .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json], onCompletion: handleBackupImport)
             .sheet(isPresented: exportSheetBinding) {
                 if let exportURL {
@@ -64,6 +75,18 @@ struct SettingsView: View {
                 Button("OK") { importSummary = nil }
             } message: {
                 Text(importSummary ?? "")
+            }
+            .confirmationDialog(
+                "Reset custom word boundaries?",
+                isPresented: $showBoundaryResetConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Reset", role: .destructive) {
+                    resetWordBoundaryCustomizations()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This removes every custom merge or split you've saved so future extractions use the default dictionary boundaries.")
             }
         }
     }
@@ -112,6 +135,18 @@ struct SettingsView: View {
             Text(selectedSegmentationEngine.description)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Button("Reset Word Boundaries") {
+                showBoundaryResetConfirmation = true
+            }
+            .tint(.red)
+            .disabled(isResettingBoundaries || !hasCustomBoundaries)
+
+            if let boundaryResetStatus {
+                Text(boundaryResetStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -278,6 +313,24 @@ struct SettingsView: View {
         guard query.isEmpty == false else { return nil }
         guard let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
         return URL(string: "https://jisho.org/search/\(encoded)")
+    }
+
+    private func resetWordBoundaryCustomizations() {
+        showBoundaryResetConfirmation = false
+        isResettingBoundaries = true
+        let removed = CustomTokenizerLexicon.clearAll()
+        Task {
+            _ = await TokenizerBoundaryManager.rebuildSharedTrie()
+            await MainActor.run {
+                boundaryResetStatus = removed ? "Custom boundaries cleared." : "No custom boundaries found."
+                isResettingBoundaries = false
+                updateCustomBoundaryState()
+            }
+        }
+    }
+
+    private func updateCustomBoundaryState() {
+        hasCustomBoundaries = CustomTokenizerLexicon.words().isEmpty == false
     }
 
     private func exportAll() {

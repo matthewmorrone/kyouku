@@ -1,400 +1,331 @@
+//
+//  WordImporter.swift
+//
+//  IMPORTANT:
+//  This file provides the WordImporter implementation for the current target.
+//  If both WordImporter.swift and WordImporter+Dummy.swift exist in the same target,
+//  you must exclude one of them to avoid duplicate type definitions.
+//
+
 import Foundation
 
-struct WordImporter {
-    struct PreparedWord {
-        let surface: String
-        let reading: String
-        let meaning: String
-        let note: String?
+public struct WordImporter {
+    public init() {}
+
+    // MARK: - Types
+    public struct ImportItem: Identifiable, Hashable {
+        public let id: UUID
+        public let lineNumber: Int
+        public var providedSurface: String?
+        public var providedReading: String?
+        public var providedMeaning: String?
+        public var note: String?
+        public var computedSurface: String?
+        public var computedReading: String?
+        public var computedMeaning: String?
+
+        public init(
+            id: UUID = UUID(),
+            lineNumber: Int,
+            providedSurface: String?,
+            providedReading: String?,
+            providedMeaning: String?,
+            note: String?,
+            computedSurface: String? = nil,
+            computedReading: String? = nil,
+            computedMeaning: String? = nil
+        ) {
+            self.id = id
+            self.lineNumber = lineNumber
+            self.providedSurface = providedSurface
+            self.providedReading = providedReading
+            self.providedMeaning = providedMeaning
+            self.note = note
+            self.computedSurface = computedSurface
+            self.computedReading = computedReading
+            self.computedMeaning = computedMeaning
+        }
     }
 
-    struct ImportResult {
-        let prepared: [PreparedWord]
-        let errors: [String]
+    public struct FinalizedItem: Identifiable, Hashable {
+        public let id: UUID
+        public let surface: String
+        public let reading: String
+        public let meaning: String
+        public let note: String?
+
+        public init(id: UUID = UUID(), surface: String, reading: String, meaning: String, note: String?) {
+            self.id = id
+            self.surface = surface
+            self.reading = reading
+            self.meaning = meaning
+            self.note = note
+        }
     }
 
-    struct ImportItem: Identifiable, Hashable {
-        let id = UUID()
-        let lineNumber: Int
-        var providedSurface: String?
-        var providedReading: String?
-        var providedMeaning: String?
-        var note: String?
-        // Filled by dictionary when requested
-        var computedSurface: String?
-        var computedReading: String?
-        var computedMeaning: String?
+    // Existing simple file import (kept for compatibility)
+    public func importWords(from url: URL) throws -> [String] {
+        let content = try String(contentsOf: url)
+        let words = content.components(separatedBy: .newlines)
+        return words.filter { !$0.isEmpty }
     }
 
-    // MARK: - Public API used by WordsView
-
-    static func parseItems(fromString text: String) -> [ImportItem] {
+    // MARK: - Parsing
+    public static func parseItems(fromString text: String) -> [ImportItem] {
+        // Find first non-empty line
+        let lines = text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\r" || $0 == "\n" })
+        guard let firstNonEmpty = lines.first(where: { !$0.trimmingCharacters(in: CharacterSet.whitespaces).isEmpty }) else {
+            return []
+        }
+        let firstLine = String(firstNonEmpty)
+        if let delim = autoDelimiter(forFirstLine: firstLine) {
+            return parseItems(fromString: text, delimiter: delim)
+        }
+        // List mode: each non-empty line is one item
         var items: [ImportItem] = []
-        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        if normalized.contains(",") {
-            // CSV path
-            let rows = parseCSV(normalized)
-            var headerMap: [Int: String] = [:]
-            var startIndex = 0
-            if !rows.isEmpty, looksLikeHeader(rows[0]) {
-                for (i, h) in rows[0].enumerated() { headerMap[i] = canonicalHeaderName(h) }
-                startIndex = 1
+        var lineNo = 0
+        for raw in text.components(separatedBy: CharacterSet.newlines) {
+            lineNo += 1
+            let trimmedLine = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedLine.isEmpty { continue }
+            let value = trimmed(trimmedLine)
+            let surface: String?
+            let reading: String?
+            if let v = value {
+                if containsKanji(v) {
+                    surface = v
+                    reading = nil
+                } else {
+                    surface = nil
+                    reading = v
+                }
+            } else {
+                surface = nil
+                reading = nil
             }
-            for (idx, row) in rows[startIndex...].enumerated() {
-                let provided = mapRow(row, headerMap: headerMap)
-                let item = ImportItem(
-                    lineNumber: startIndex + idx + 1,
-                    providedSurface: provided.surface?.nilIfEmpty,
-                    providedReading: provided.reading?.nilIfEmpty,
-                    providedMeaning: provided.meaning?.nilIfEmpty,
-                    note: provided.note?.nilIfEmpty,
-                    computedSurface: nil,
-                    computedReading: nil,
-                    computedMeaning: nil
-                )
-                items.append(item)
-            }
-        } else {
-            // List path
-            let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            for (i, line) in lines.enumerated() {
-                let provided = parseLineHeuristics(line.trimmingCharacters(in: .whitespacesAndNewlines))
-                let item = ImportItem(
-                    lineNumber: i + 1,
-                    providedSurface: provided.surface?.nilIfEmpty,
-                    providedReading: provided.reading?.nilIfEmpty,
-                    providedMeaning: provided.meaning?.nilIfEmpty,
-                    note: provided.note?.nilIfEmpty,
-                    computedSurface: nil,
-                    computedReading: nil,
-                    computedMeaning: nil
-                )
-                items.append(item)
-            }
+            items.append(ImportItem(lineNumber: lineNo, providedSurface: surface, providedReading: reading, providedMeaning: nil, note: nil))
         }
         return items
     }
 
-    static func parseItems(fromString text: String, delimiter: Character?) -> [ImportItem] {
+    public static func parseItems(fromString text: String, delimiter: Character?) -> [ImportItem] {
         guard let delimiter = delimiter else { return parseItems(fromString: text) }
         var items: [ImportItem] = []
-        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        let rows = parseCSV(normalized, delimiter: delimiter)
-        var headerMap: [Int: String] = [:]
-        var startIndex = 0
-        if !rows.isEmpty, looksLikeHeader(rows[0]) {
-            for (i, h) in rows[0].enumerated() { headerMap[i] = canonicalHeaderName(h) }
-            startIndex = 1
-        }
-        for (idx, row) in rows[startIndex...].enumerated() {
-            let provided = mapRow(row, headerMap: headerMap)
+        var lineNo = 0
+        for raw in text.components(separatedBy: CharacterSet.newlines) {
+            lineNo += 1
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+            let cols = splitCSVLine(line, delimiter: delimiter)
+            let c0 = cols.indices.contains(0) ? trimmed(cols[0]) : nil
+            let c1 = cols.indices.contains(1) ? trimmed(cols[1]) : nil
+            let c2 = cols.indices.contains(2) ? trimmed(cols[2]) : nil
+            let c3 = cols.indices.contains(3) ? trimmed(cols[3]) : nil
             let item = ImportItem(
-                lineNumber: startIndex + idx + 1,
-                providedSurface: provided.surface?.nilIfEmpty,
-                providedReading: provided.reading?.nilIfEmpty,
-                providedMeaning: provided.meaning?.nilIfEmpty,
-                note: provided.note?.nilIfEmpty,
-                computedSurface: nil,
-                computedReading: nil,
-                computedMeaning: nil
+                lineNumber: lineNo,
+                providedSurface: c0,
+                providedReading: c1,
+                providedMeaning: c2,
+                note: c3
             )
             items.append(item)
         }
         return items
     }
 
-    static func fillMissing(items: inout [ImportItem], preferKanaOnly: Bool) async {
-        for i in items.indices {
-            let prov = ProvidedRow(
-                surface: items[i].providedSurface,
-                reading: items[i].providedReading,
-                meaning: items[i].providedMeaning,
-                note: items[i].note
-            )
-            if let prepared = try? await fillRow(prov, preferKanaOnly: preferKanaOnly) {
-                if (items[i].providedSurface?.isEmpty ?? true) { items[i].computedSurface = prepared.surface }
-                if (items[i].providedReading?.isEmpty ?? true) { items[i].computedReading = prepared.reading }
-                if (items[i].providedMeaning?.isEmpty ?? true) { items[i].computedMeaning = prepared.meaning }
-            }
-        }
-    }
+    // MARK: - Enrichment
+    public static func fillMissing(items: inout [ImportItem], preferKanaOnly: Bool) async {
+        let count = items.count
+        guard count > 0 else { return }
 
-    static func finalize(items: [ImportItem], preferKanaOnly: Bool) -> [PreparedWord] {
-        var out: [PreparedWord] = []
-        for it in items {
-            var surface = (it.providedSurface?.nilIfEmpty) ?? (it.computedSurface?.nilIfEmpty) ?? ""
-            let reading = (it.providedReading?.nilIfEmpty) ?? (it.computedReading?.nilIfEmpty) ?? ""
-            let meaning = (it.providedMeaning?.nilIfEmpty) ?? (it.computedMeaning?.nilIfEmpty) ?? ""
-            let note = it.note?.nilIfEmpty
-            if surface.isEmpty && !reading.isEmpty { surface = reading }
-            if preferKanaOnly, (it.providedSurface?.isEmpty ?? true), !(it.providedReading?.isEmpty ?? true), !reading.isEmpty {
-                surface = reading
-            }
-            guard !meaning.isEmpty else { continue }
-            out.append(PreparedWord(surface: surface, reading: reading, meaning: meaning, note: note))
-        }
-        return out
-    }
+        var updated = Array<ImportItem?>(repeating: nil, count: count)
 
-    // MARK: - CSV helpers
+        await withTaskGroup(of: (Int, ImportItem).self) { group in
+            for i in items.indices {
+                let original = items[i]
+                group.addTask {
+                    var item = original
+                    let providedSurface = item.providedSurface?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let providedReading = item.providedReading?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let providedMeaning = item.providedMeaning?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-    private struct ProvidedRow { var surface: String?; var reading: String?; var meaning: String?; var note: String? }
+                    let needsReading = (providedReading?.isEmpty ?? true) && (item.computedReading?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    let needsMeaning = (providedMeaning?.isEmpty ?? true) && (item.computedMeaning?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    let needsSurface = (providedSurface?.isEmpty ?? true) && (item.computedSurface?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
 
-    private static func looksLikeHeader(_ fields: [String]) -> Bool {
-        guard !fields.isEmpty else { return false }
-        let keys = Set(fields.map { canonicalHeaderName($0) })
-        let known: Set<String> = [
-            "kanji", "surface", "word", "term",
-            "kana", "reading", "furigana", "yomi",
-            "english", "meaning", "gloss", "definition", "def",
-            "note", "notes", "comment"
-        ]
-        return !keys.intersection(known).isEmpty
-    }
+                    var candidates: [String] = []
+                    if let s = providedSurface, !s.isEmpty { candidates.append(s) }
+                    if let r = providedReading, !r.isEmpty { candidates.append(r) }
+                    if let s = item.computedSurface?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty { candidates.append(s) }
+                    if let r = item.computedReading?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty { candidates.append(r) }
+                    if let pm = providedMeaning, !pm.isEmpty, (containsKanji(pm) || isKana(pm)) { candidates.append(pm) }
 
-    private static func canonicalHeaderName(_ raw: String) -> String {
-        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
+                    var seen = Set<String>()
+                    candidates = candidates.filter { seen.insert($0).inserted }
 
-    private static func mapRow(_ row: [String], headerMap: [Int: String]) -> ProvidedRow {
-        var out = ProvidedRow()
-        if headerMap.isEmpty {
-            if row.indices.contains(0) { out.surface = row[0].trimmingCharacters(in: .whitespacesAndNewlines) }
-            if row.indices.contains(1) { out.reading = row[1].trimmingCharacters(in: .whitespacesAndNewlines) }
-            if row.indices.contains(2) { out.meaning = row[2].trimmingCharacters(in: .whitespacesAndNewlines) }
-            if row.indices.contains(3) { out.note = row[3].trimmingCharacters(in: .whitespacesAndNewlines) }
-            return out
-        }
-        for (i, valRaw) in row.enumerated() {
-            let val = valRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !val.isEmpty else { continue }
-            switch headerMap[i] ?? "" {
-            case "kanji", "surface", "word", "term": out.surface = val
-            case "kana", "reading", "furigana", "yomi": out.reading = val
-            case "english", "meaning", "gloss", "definition", "def": out.meaning = val
-            case "note", "notes", "comment": out.note = val
-            default:
-                if out.meaning == nil { out.meaning = val }
-                else if out.reading == nil { out.reading = val }
-                else if out.surface == nil { out.surface = val }
-                else if out.note == nil { out.note = val }
-            }
-        }
-        return out
-    }
-
-    private static func parseCSV(_ text: String) -> [[String]] {
-        var rows: [[String]] = []
-        var current: [String] = []
-        var field = ""
-        var inQuotes = false
-        var iter = text.makeIterator()
-
-        func endField() { current.append(field); field = "" }
-        func endRow() { endField(); rows.append(current); current = [] }
-
-        while let ch = iter.next() {
-            if inQuotes {
-                if ch == "\"" {
-                    if let next = iter.next() {
-                        if next == "\"" { field.append("\"") }
-                        else if next == "," { endField(); inQuotes = false }
-                        else if next == "\n" { endRow(); inQuotes = false }
-                        else { field.append(next) }
-                    } else {
-                        inQuotes = false
-                    }
-                } else {
-                    field.append(ch)
-                }
-            } else {
-                switch ch {
-                case "\"": inQuotes = true
-                case ",": endField()
-                case "\n": endRow()
-                case "\r": continue
-                default: field.append(ch)
-                }
-            }
-        }
-        if !field.isEmpty || !current.isEmpty { endRow() }
-        return rows
-    }
-
-    private static func parseCSV(_ text: String, delimiter: Character) -> [[String]] {
-        var rows: [[String]] = []
-        var current: [String] = []
-        var field = ""
-        var inQuotes = false
-        var iter = text.makeIterator()
-
-        func endField() { current.append(field); field = "" }
-        func endRow() { endField(); rows.append(current); current = [] }
-
-        while let ch = iter.next() {
-            if inQuotes {
-                if ch == "\"" {
-                    if let next = iter.next() {
-                        if next == "\"" { field.append("\"") }
-                        else if next == delimiter { endField(); inQuotes = false }
-                        else if next == "\n" { endRow(); inQuotes = false }
-                        else { field.append(next) }
-                    } else {
-                        inQuotes = false
-                    }
-                } else {
-                    field.append(ch)
-                }
-            } else {
-                switch ch {
-                case "\"": inQuotes = true
-                case _ where ch == delimiter: endField()
-                case "\n": endRow()
-                case "\r": continue
-                default: field.append(ch)
-                }
-            }
-        }
-        if !field.isEmpty || !current.isEmpty { endRow() }
-        return rows
-    }
-
-    // MARK: - Plain-list parsing
-
-    private static func parseLineHeuristics(_ line: String) -> ProvidedRow {
-        var out = ProvidedRow()
-        // Pattern 1: Kanji【reading】 - meaning
-        if let open = line.firstIndex(of: "【"), let close = line.firstIndex(of: "】"), open < close {
-            let kanji = String(line[..<open]).trimmingCharacters(in: .whitespaces)
-            let reading = String(line[line.index(after: open)..<close]).trimmingCharacters(in: .whitespaces)
-            let rest = String(line[line.index(after: close)...]).trimmingCharacters(in: .whitespaces)
-            out.surface = kanji
-            out.reading = reading
-            if let dash = rest.firstIndex(of: "-") {
-                let meaning = String(rest[rest.index(after: dash)...]).trimmingCharacters(in: .whitespaces)
-                if !meaning.isEmpty { out.meaning = meaning }
-            } else if !rest.isEmpty {
-                out.meaning = rest
-            }
-            return out
-        }
-        // Pattern 2: split by tab or 2+ spaces (kanji [kana] english)
-        let tabParts = line.split(separator: "\t").map { String($0).trimmingCharacters(in: .whitespaces) }
-        if tabParts.count >= 2 {
-            out.surface = tabParts[safe: 0]
-            if tabParts.count >= 3 {
-                out.reading = tabParts[safe: 1]
-                out.meaning = tabParts[safe: 2]
-            } else {
-                let second = tabParts[1]
-                if containsKana(second) || containsKanji(second) {
-                    out.reading = second
-                } else {
-                    out.meaning = second
-                }
-            }
-            return out
-        }
-        let parts = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-        if parts.count >= 3 {
-            out.surface = parts[0]
-            let second = parts[1]
-            if containsKana(second) || containsKanji(second) {
-                out.reading = second
-                out.meaning = parts.dropFirst(2).joined(separator: " ")
-            } else {
-                out.meaning = parts.dropFirst(1).joined(separator: " ")
-            }
-            return out
-        }
-        if !line.isEmpty {
-            if containsKana(line) || containsKanji(line) {
-                out.surface = line
-            } else {
-                out.meaning = line
-            }
-        }
-        return out
-    }
-
-    private static func containsKanji(_ s: String) -> Bool {
-        for ch in s.unicodeScalars { if ch.value >= 0x4E00 && ch.value <= 0x9FFF { return true } }
-        return false
-    }
-    private static func containsKana(_ s: String) -> Bool {
-        for ch in s.unicodeScalars {
-            if (0x3040...0x309F).contains(ch.value) { return true }
-            if (0x30A0...0x30FF).contains(ch.value) { return true }
-        }
-        return false
-    }
-
-    // MARK: - Enrichment via dictionary
-
-    private static func fillRow(_ row: ProvidedRow, preferKanaOnly: Bool) async throws -> PreparedWord? {
-        var surface = row.surface?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        var reading = row.reading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        var meaning = row.meaning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let note = row.note?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        func primaryGloss(_ e: DictionaryEntry) -> String {
-            e.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? e.gloss
-        }
-
-        let needLookup = (meaning.isEmpty || reading.isEmpty || surface.isEmpty)
-        if needLookup {
-            let term: String? = {
-                if !surface.isEmpty { return surface }
-                if !reading.isEmpty { return reading }
-                if !meaning.isEmpty { return meaning }
-                return nil
-            }()
-
-            if let t = term, !t.isEmpty {
-                let entries = try await DictionarySQLiteStore.shared.lookup(term: t, limit: 1)
-                if let e = entries.first {
-                    if meaning.isEmpty { meaning = primaryGloss(e) }
-                    if reading.isEmpty { reading = e.reading }
-                    if surface.isEmpty {
-                        if preferKanaOnly && !reading.isEmpty && row.surface?.isEmpty != false && row.reading?.isEmpty == false {
-                            surface = reading
-                        } else {
-                            surface = e.kanji.isEmpty ? e.reading : e.kanji
+                    var hit: DictionaryEntry? = nil
+                    for cand in candidates {
+                        if let res = try? await DictionarySQLiteStore.shared.lookup(term: cand, limit: 1), let first = res.first {
+                            hit = first
+                            break
                         }
                     }
+
+                    if let entry = hit {
+                        if needsReading {
+                            item.computedReading = entry.reading
+                        }
+                        if needsMeaning {
+                            item.computedMeaning = firstGloss(entry.gloss)
+                        }
+                        if needsSurface {
+                            let surfaceCandidate = entry.kanji.isEmpty ? entry.reading : entry.kanji
+                            item.computedSurface = surfaceCandidate
+                        } else if !preferKanaOnly {
+                            // If insert-kanji is enabled, and current surface lacks kanji, prefer the dictionary kanji form for preview
+                            let providedSurfaceHasKanji = containsKanji(providedSurface ?? "")
+                            let computedSurfaceHasKanji = containsKanji((item.computedSurface ?? ""))
+                            if !providedSurfaceHasKanji && !computedSurfaceHasKanji && !entry.kanji.isEmpty {
+                                item.computedSurface = entry.kanji
+                            }
+                        }
+                    }
+
+                    return (i, item)
                 }
+            }
+
+            for await (idx, newItem) in group {
+                updated[idx] = newItem
             }
         }
 
-        guard !meaning.isEmpty else { return nil }
-        if surface.isEmpty && !reading.isEmpty { surface = reading }
-        return PreparedWord(surface: surface, reading: reading, meaning: meaning, note: note)
-    }
-}
-
-// MARK: - Helpers
-
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        return indices.contains(index) ? self[index] : nil
-    }
-}
-
-private extension Optional where Wrapped == String {
-    var nilIfEmpty: String? {
-        switch self {
-        case .some(let s):
-            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            return t.isEmpty ? nil : t
-        case .none:
-            return nil
+        for i in items.indices {
+            if let u = updated[i] {
+                items[i] = u
+            }
         }
     }
-}
 
-private extension String {
-    var nilIfEmpty: String? {
-        let t = self.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? nil : t
+    public static func finalize(items: [ImportItem], preferKanaOnly: Bool) -> [FinalizedItem] {
+        var out: [FinalizedItem] = []
+        for it in items {
+            // Choose provided over computed
+            let s0 = trimmed(it.providedSurface ?? it.computedSurface)
+            let r0 = trimmed(it.providedReading ?? it.computedReading)
+            let m0 = trimmed(it.providedMeaning ?? it.computedMeaning)
+            let note = trimmed(it.note)
+
+            var surface = s0 ?? ""
+            let reading = r0 ?? ""
+            let meaning = m0 ?? ""
+
+            if preferKanaOnly {
+                // If chosen surface has no kanji and we have a reading, prefer reading as surface (for kana-only entries)
+                if !surface.isEmpty && !containsKanji(surface), !reading.isEmpty {
+                    surface = reading
+                }
+                if surface.isEmpty, !reading.isEmpty {
+                    surface = reading
+                }
+            } else {
+                if surface.isEmpty, !reading.isEmpty {
+                    surface = reading
+                }
+            }
+
+            if surface.isEmpty || reading.isEmpty || meaning.isEmpty {
+                continue
+            }
+            out.append(FinalizedItem(surface: surface, reading: reading, meaning: meaning, note: note))
+        }
+        return out
+    }
+
+    // MARK: - Helpers
+    private static func containsKanji(_ s: String) -> Bool {
+        for scalar in s.unicodeScalars {
+            if scalar.value >= 0x4E00 && scalar.value <= 0x9FFF { return true }
+        }
+        return false
+    }
+
+    private static func isKana(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        for scalar in s.unicodeScalars {
+            let v = scalar.value
+            let isHiragana = (0x3040...0x309F).contains(v)
+            let isKatakana = (0x30A0...0x30FF).contains(v) || (0x31F0...0x31FF).contains(v)
+            let isProlonged = v == 0x30FC // ー
+            let isSmallTsu = v == 0x3063 || v == 0x30C3
+            let isPunctuation = v == 0x3001 || v == 0x3002 // 、 。
+            if !(isHiragana || isKatakana || isProlonged || isSmallTsu || isPunctuation) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func firstGloss(_ gloss: String) -> String {
+        let parts = gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
+        return parts.first.map(String.init) ?? gloss
+    }
+
+    private static func autoDelimiter(forFirstLine line: String) -> Character? {
+        let candidates: [Character] = [",", ";", "\t", "|"]
+        var best: (ch: Character, count: Int)? = nil
+        for c in candidates {
+            let count = line.filter { $0 == c }.count
+            if count > 0 {
+                if best == nil || count > best!.count { best = (c, count) }
+            }
+        }
+        return best?.ch
+    }
+
+    private static func splitCSVLine(_ line: String, delimiter: Character) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var inQuotes = false
+        var i = line.startIndex
+        while i < line.endIndex {
+            let ch = line[i]
+            if ch == "\"" { // double quote
+                if inQuotes {
+                    // lookahead for escaped double quote
+                    let next = line.index(after: i)
+                    if next < line.endIndex && line[next] == "\"" {
+                        current.append("\"")
+                        i = next
+                    } else {
+                        inQuotes = false
+                    }
+                } else {
+                    inQuotes = true
+                }
+            } else if ch == delimiter && !inQuotes {
+                fields.append(current)
+                current = ""
+            } else {
+                current.append(ch)
+            }
+            i = line.index(after: i)
+        }
+        fields.append(current)
+        return fields
+    }
+
+    private static func trimmed(_ s: String?) -> String? {
+        guard var str = s?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        guard !str.isEmpty else { return nil }
+        // Remove surrounding matching quotes
+        if str.count >= 2, str.first == "\"", str.last == "\"" {
+            str.removeFirst()
+            str.removeLast()
+        }
+        // Un-escape doubled quotes
+        str = str.replacingOccurrences(of: "\"\"", with: "\"")
+        let final = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        return final.isEmpty ? nil : final
     }
 }

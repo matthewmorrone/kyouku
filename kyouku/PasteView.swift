@@ -42,11 +42,16 @@ struct PasteView: View {
     @State private var foregroundCancellable: Any? = nil
 
     @State private var isTrieReady: Bool = true
+    @State private var boundaryVersion: Int = 0
+
+    @AppStorage("perKanjiFuriganaEnabled") private var perKanjiFuriganaEnabled: Bool = true
 
     @AppStorage("readingTextSize") private var textSize: Double = 17
     @AppStorage("readingFuriganaSize") private var furiganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var lineSpacing: Double = 4
     @AppStorage("readingFuriganaGap") private var furiganaGap: Double = 2
+
+    @State private var readingOverride: ReadingOverride? = nil
 
     var body: some View {
         NavigationStack {
@@ -80,9 +85,12 @@ struct PasteView: View {
                         furiganaSize: furiganaSize,
                         lineSpacing: lineSpacing,
                         furiganaGap: furiganaGap,
+                        perKanjiSplit: perKanjiFuriganaEnabled,
                         highlightedToken: selectedToken,
                         onTokenTap: handleTokenTap,
-                        onSelectionCleared: handleSelectionCleared
+                        onSelectionCleared: handleSelectionCleared,
+                        boundaryVersion: boundaryVersion,
+                        readingOverrides: readingOverride.map { [$0] } ?? []
                     )
                     
                     HStack(alignment: .center, spacing: 8) {
@@ -184,6 +192,7 @@ struct PasteView: View {
                 .onAppear(perform: onAppearHandler)
                 .onDisappear {
                     NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+                    NotificationCenter.default.removeObserver(self, name: .applyReadingOverride, object: nil)
                     lookupTask?.cancel()
                 }
                 .onChange(of: inputText) { _, newValue in
@@ -192,6 +201,17 @@ struct PasteView: View {
                 }
                 .onChange(of: isEditing) { _, nowEditing in
                     onEditingChanged(nowEditing)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .customTokenizerLexiconDidChange)) { _ in
+                    Task {
+                        let rebuilt = await TokenizerBoundaryManager.rebuildSharedTrie()
+                        await MainActor.run {
+                            if let rebuilt {
+                                JMdictTrieCache.shared = rebuilt
+                            }
+                            boundaryVersion &+= 1
+                        }
+                    }
                 }
             } else {
                 VStack(spacing: 12) {
@@ -365,7 +385,7 @@ struct PasteView: View {
         if let customTranslation = translation, !customTranslation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // Use custom translation if present and not empty
             let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
-            store.add(surface: kanaSurface, reading: token.reading, meaning: customTranslation)
+            store.add(surface: kanaSurface, reading: token.reading, meaning: customTranslation, sourceNoteID: currentNote?.id)
             return
         }
         if !hasKanjiInToken {
@@ -374,12 +394,12 @@ struct PasteView: View {
                 let glossSource = entry.gloss
                 let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
                 let t = ParsedToken(surface: kanaSurface, reading: entry.reading, meaning: firstGloss)
-                store.add(surface: t.surface, reading: t.reading, meaning: t.meaning!)
+                store.add(surface: t.surface, reading: t.reading, meaning: t.meaning!, sourceNoteID: currentNote?.id)
             } else if let translation, translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
                 let kanaSurface = token.reading.isEmpty ? token.surface : token.reading
-                store.add(surface: kanaSurface, reading: token.reading, meaning: translation)
+                store.add(surface: kanaSurface, reading: token.reading, meaning: translation, sourceNoteID: currentNote?.id)
             } else {
-                store.add(surface: token.surface, reading: token.reading, meaning: token.meaning!)
+                store.add(surface: token.surface, reading: token.reading, meaning: token.meaning!, sourceNoteID: currentNote?.id)
             }
         } else {
             if let entry = chosenEntry {
@@ -387,11 +407,11 @@ struct PasteView: View {
                 let glossSource = entry.gloss
                 let firstGloss = glossSource.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? glossSource
                 let t = ParsedToken(surface: surface, reading: entry.reading, meaning: firstGloss)
-                store.add(surface: t.surface, reading: t.reading, meaning: t.meaning!)
+                store.add(surface: t.surface, reading: t.reading, meaning: t.meaning!, sourceNoteID: currentNote?.id)
             } else if let translation, translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-                store.add(surface: token.surface, reading: token.reading, meaning: translation)
+                store.add(surface: token.surface, reading: token.reading, meaning: translation, sourceNoteID: currentNote?.id)
             } else {
-                store.add(surface: token.surface, reading: token.reading, meaning: token.meaning!)
+                store.add(surface: token.surface, reading: token.reading, meaning: token.meaning!, sourceNoteID: currentNote?.id)
             }
         }
     }
@@ -437,6 +457,13 @@ struct PasteView: View {
         ingestSharedInbox()
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
             ingestSharedInbox()
+        }
+
+        NotificationCenter.default.addObserver(forName: .applyReadingOverride, object: nil, queue: .main) { note in
+            if let ov = note.object as? ReadingOverride {
+                readingOverride = ov
+                boundaryVersion &+= 1
+            }
         }
     }
 
@@ -648,14 +675,38 @@ struct PasteView: View {
         var furiganaSize: Double
         var lineSpacing: Double
         var furiganaGap: Double
+        var perKanjiSplit: Bool
         var highlightedToken: ParsedToken?
         var onTokenTap: (ParsedToken) -> Void
         var onSelectionCleared: () -> Void
+        var boundaryVersion: Int
+        var readingOverrides: [ReadingOverride]
 
         @State private var viewKey: Int = 0
 
         var body: some View {
             let allowTap = !isEditing
+            let highlightColor = Color.yellow.opacity(0.25)
+            let selectionColor = Color.accentColor.opacity(0.35)
+
+            buildEditor(allowTap: allowTap, highlightColor: highlightColor, selectionColor: selectionColor, readingOverrides: readingOverrides)
+                .onChange(of: textSize) { _, _ in bumpKey() }
+                .onChange(of: furiganaSize) { _, _ in bumpKey() }
+                .onChange(of: lineSpacing) { _, _ in bumpKey() }
+                .onChange(of: furiganaGap) { _, _ in bumpKey() }
+                .onChange(of: showFurigana) { _, _ in bumpKey() }
+                .onChange(of: isEditing) { _, _ in bumpKey() }
+                .onChange(of: showTokenHighlighting) { _, _ in bumpKey() }
+                .onChange(of: perKanjiSplit) { _, _ in bumpKey() }
+                .onChange(of: boundaryVersion) { _, _ in bumpKey() }
+        }
+
+        private func bumpKey() {
+            // Force a lightweight view refresh without huge string interpolation
+            viewKey &+= 1
+        }
+
+        private func buildEditor(allowTap: Bool, highlightColor: Color, selectionColor: Color, readingOverrides: [ReadingOverride]) -> some View {
             FuriganaTextEditor(
                 text: $text,
                 showFurigana: showFurigana,
@@ -664,205 +715,26 @@ struct PasteView: View {
                 onTokenTap: onTokenTap,
                 onSelectionCleared: onSelectionCleared,
                 showSegmentHighlighting: showTokenHighlighting,
+                perKanjiSplit: perKanjiSplit,
                 baseFontSize: textSize,
                 rubyFontSize: furiganaSize,
-                lineSpacing: lineSpacing
+                lineSpacing: lineSpacing,
+                readingOverrides: readingOverrides
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(12)
             .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color.clear)
             .environment(\.furiganaGap, furiganaGap)
             .environment(\.highlightedToken, highlightedToken)
-            .environment(\.tokenHighlightColor, Color.yellow.opacity(0.25))
-            .environment(\.selectionHighlightColor, Color.accentColor.opacity(0.35))
+            .environment(\.tokenHighlightColor, highlightColor)
+            .environment(\.selectionHighlightColor, selectionColor)
             .environment(\.avoidOverlappingHighlights, true)
             .id(viewKey)
             .cornerRadius(12)
             .padding(.horizontal)
             .frame(maxHeight: .infinity)
             .clipped()
-            .onChange(of: textSize) { _, _ in bumpKey() }
-            .onChange(of: furiganaSize) { _, _ in bumpKey() }
-            .onChange(of: lineSpacing) { _, _ in bumpKey() }
-            .onChange(of: furiganaGap) { _, _ in bumpKey() }
-            .onChange(of: showFurigana) { _, _ in bumpKey() }
-            .onChange(of: isEditing) { _, _ in bumpKey() }
-            .onChange(of: showTokenHighlighting) { _, _ in bumpKey() }
         }
-
-        private func bumpKey() {
-            // Force a lightweight view refresh without huge string interpolation
-            viewKey &+= 1
-        }
-    }
-}
-
-// New extracted DefinitionSheetContent view
-private struct DefinitionSheetContent: View {
-    @Binding var selectedToken: ParsedToken?
-    @Binding var showingDefinition: Bool
-    @Binding var dictResults: [DictionaryEntry]
-    @Binding var isLookingUp: Bool
-    @Binding var lookupError: String?
-    @Binding var selectedEntryIndex: Int?
-    @Binding var fallbackTranslation: String?
-    var onAdd: (ParsedToken, [DictionaryEntry], Int?, String?) -> Void
-
-    @EnvironmentObject var store: WordStore
-
-    var body: some View {
-        Group {
-            if let token = selectedToken {
-                let hasKanjiInToken: Bool = token.surface.contains { ch in
-                    ("\u{4E00}"..."\u{9FFF}").contains(String(ch))
-                }
-                let orderedResultsLocal = orderedEntries(for: token, hasKanjiInToken: hasKanjiInToken)
-                let totalLocal = orderedResultsLocal.count
-                let currentIndexLocal = clampSelection(totalCount: totalLocal)
-                let entryLocal = (currentIndexLocal >= 0 && currentIndexLocal < totalLocal) ? orderedResultsLocal[currentIndexLocal] : nil
-
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Spacer()
-
-                        Button(action: {
-                            onAdd(token, orderedResultsLocal, entryLocal == nil ? nil : currentIndexLocal, nil)
-                            showingDefinition = false
-                            selectedEntryIndex = nil
-                        }) {
-                            Image(systemName: "plus.circle.fill").font(.title3)
-                        }
-                        .disabled(isLookingUp || (entryLocal == nil && (fallbackTranslation?.isEmpty ?? true)))
-                    }
-
-                    if totalLocal > 1 {
-                        HStack(spacing: 16) {
-                            Button {
-                                stepSelection(-1, totalCount: totalLocal)
-                            } label: {
-                                Image(systemName: "chevron.left").font(.title3)
-                            }
-                            .disabled(currentIndexLocal <= 0)
-
-                            Text("Definition \(currentIndexLocal + 1) / \(totalLocal)")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-
-                            Button {
-                                stepSelection(1, totalCount: totalLocal)
-                            } label: {
-                                Image(systemName: "chevron.right").font(.title3)
-                            }
-                            .disabled(currentIndexLocal >= totalLocal - 1)
-                        }
-                    }
-
-                    let displayKanji: String = {
-                        if !hasKanjiInToken {
-                            return token.reading.isEmpty ? token.surface : token.reading
-                        }
-                        if let e = entryLocal {
-                            return (e.kanji.isEmpty == false) ? e.kanji : e.reading
-                        }
-                        return token.surface
-                    }()
-
-                    let displayKana: String = entryLocal?.reading ?? token.reading
-
-                    Text(displayKanji)
-                        .font(.title2).bold()
-
-                    if !displayKana.isEmpty && displayKana != displayKanji {
-                        Text(displayKana)
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if isLookingUp {
-                        ProgressView("Looking up definitions…")
-                    } else if let err = lookupError {
-                        Text(err).foregroundStyle(.secondary)
-                    } else if orderedResultsLocal.isEmpty, let fallback = fallbackTranslation, !fallback.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Apple Translation")
-                                .font(.headline)
-                                .foregroundStyle(.secondary)
-                            Text(fallback)
-                                .font(.body)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    } else if orderedResultsLocal.isEmpty {
-                        Text("No definitions found.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        if let entryLocal {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(primaryGloss(from: entryLocal))
-                                    .font(.body)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                if entryLocal.gloss.contains(";") {
-                                    Text(entryLocal.gloss)
-                                        .font(.footnote)
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(3)
-                                }
-                            }
-                        }
-                    }
-                }
-                .onAppear {
-                    if selectedEntryIndex == nil { selectedEntryIndex = 0 }
-                }
-                .onChange(of: dictResults) { _, _ in
-                    let filtered = orderedEntries(for: token, hasKanjiInToken: hasKanjiInToken)
-                    let count = filtered.count
-                    if count > 0 {
-                        let clamped = clampSelection(totalCount: count)
-                        if clamped != (selectedEntryIndex ?? 0) {
-                            selectedEntryIndex = clamped
-                        }
-                    } else {
-                        selectedEntryIndex = nil
-                    }
-                }
-                .padding()
-                .presentationDetents([.fraction(0.33)])
-                .presentationDragIndicator(.visible)
-            } else {
-                Text("No selection").padding()
-            }
-        }
-    }
-
-    private func orderedEntries(for token: ParsedToken, hasKanjiInToken: Bool) -> [DictionaryEntry] {
-        guard !dictResults.isEmpty else { return [] }
-        guard !hasKanjiInToken else { return dictResults }
-        let targetReading = token.reading.isEmpty ? token.surface : token.reading
-        guard !targetReading.isEmpty else { return dictResults }
-        let matching = dictResults.filter { $0.reading == targetReading }
-        guard !matching.isEmpty else { return dictResults }
-        let nonMatching = dictResults.filter { $0.reading != targetReading }
-        return matching + nonMatching
-    }
-
-    private func clampSelection(totalCount: Int) -> Int {
-        guard totalCount > 0 else { return 0 }
-        let raw = selectedEntryIndex ?? 0
-        return min(max(raw, 0), totalCount - 1)
-    }
-
-    private func stepSelection(_ delta: Int, totalCount: Int) {
-        guard totalCount > 0 else { return }
-        let current = clampSelection(totalCount: totalCount)
-        let next = current + delta
-        guard next >= 0 && next < totalCount else { return }
-        selectedEntryIndex = next
-    }
-
-    private func primaryGloss(from entry: DictionaryEntry) -> String {
-        entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
     }
 }
 
@@ -922,6 +794,15 @@ extension EnvironmentValues {
         get { self[AvoidOverlappingHighlightsKey.self] }
         set { self[AvoidOverlappingHighlightsKey.self] = newValue }
     }
+}
+
+extension Notification.Name {
+    /// Posted when the custom tokenizer lexicon changes and token boundaries may need refreshing.
+    static let customTokenizerLexiconDidChange = Notification.Name("customTokenizerLexiconDidChange")
+}
+
+extension Notification.Name {
+    static let applyReadingOverride = Notification.Name("applyReadingOverride")
 }
 
 // Re-open PasteView to keep type scope intact if needed

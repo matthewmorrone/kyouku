@@ -9,6 +9,13 @@ struct FlashcardsView: View {
     @State private var showBack: Bool = false
     @State private var shuffled: Bool = true
 
+    @State private var dragOffset: CGSize = .zero
+    @State private var isSwipingOut: Bool = false
+    @State private var swipeDirection: Int = 0
+
+    @State private var sessionCorrect: Int = 0
+    @State private var sessionAgain: Int = 0
+
     enum ReviewScope: String, CaseIterable, Identifiable {
         case all = "All"
         case mostRecent = "Most Recent"
@@ -27,7 +34,6 @@ struct FlashcardsView: View {
     @State private var direction: CardDirection = .kanjiToKana
     @State private var mostRecentCount: Int = 20
     @State private var selectedNoteID: UUID? = nil
-    @State private var dragOffset: CGSize = .zero
 
     var body: some View {
         NavigationStack {
@@ -43,30 +49,7 @@ struct FlashcardsView: View {
                 } else {
                     header
                     Spacer(minLength: 8)
-                    card
-                        .offset(x: dragOffset.width)
-                        .rotationEffect(.degrees(Double(dragOffset.width / 12)))
-                        .gesture(DragGesture()
-                            .onChanged { value in
-                                dragOffset = value.translation
-                            }
-                            .onEnded { value in
-                                let threshold: CGFloat = 80
-                                if value.translation.width > threshold {
-                                    know()
-                                } else if value.translation.width < -threshold {
-                                    again()
-                                }
-                                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                    dragOffset = .zero
-                                }
-                            }
-                        )
-                        .onTapGesture {
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                showBack.toggle()
-                            }
-                        }
+                    cardStack
                     Spacer(minLength: 8)
                     controls
                 }
@@ -107,18 +90,40 @@ struct FlashcardsView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Spacer()
+            HStack(spacing: 12) {
+                Label("\(sessionAgain)", systemImage: "arrow.uturn.left.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Label("\(sessionCorrect)", systemImage: "checkmark.circle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
-    private var card: some View {
-        let word = session[index]
+    private var cardStack: some View {
+        let count = session.count
+        let topIndex = index
+        let end = min(topIndex + 3, count)
+        return ZStack {
+            ForEach(Array((topIndex..<end)).reversed(), id: \.self) { idx in
+                let pos = idx - topIndex
+                let isTop = (idx == topIndex)
+                cardView(for: session[idx], isTop: isTop, position: pos)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: 360)
+    }
+
+    private func cardView(for word: Word, isTop: Bool, position: Int) -> some View {
+
         return ZStack {
             RoundedRectangle(cornerRadius: 16)
                 .fill(Color(UIColor.secondarySystemBackground))
                 .shadow(color: Color.black.opacity(0.08), radius: 8, x: 0, y: 4)
 
             VStack(alignment: .center, spacing: 10) {
-                if showBack {
+                if showBack && isTop {
                     switch direction {
                     case .kanjiToKana:
                         Text(word.surface).font(.title2).bold()
@@ -142,8 +147,88 @@ struct FlashcardsView: View {
             .padding(24)
             .frame(maxWidth: .infinity, maxHeight: 320)
         }
-        .frame(maxWidth: .infinity, maxHeight: 360)
+        .opacity(isTop && isSwipingOut ? 0 : 1)
+        .overlay(
+            Group {
+                if isTop {
+                    // Left: Again
+                    Text("Again")
+                        .font(.headline)
+                        .padding(8)
+                        .background(Color.red.opacity(0.2))
+                        .cornerRadius(8)
+                        .opacity(max(0, min(1, -dragOffset.width / 100)))
+                        .padding()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                    // Right: Know
+                    Text("Know")
+                        .font(.headline)
+                        .padding(8)
+                        .background(Color.green.opacity(0.2))
+                        .cornerRadius(8)
+                        .opacity(max(0, min(1, dragOffset.width / 100)))
+                        .padding()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                }
+            }
+        )
+        .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.85), value: dragOffset)
         .animation(.easeInOut(duration: 0.2), value: showBack)
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    guard isTop else { return }
+                    dragOffset = value.translation
+                }
+                .onEnded { value in
+                    guard isTop else { return }
+                    let dx: CGFloat = value.translation.width
+                    let tiny: CGFloat = 1
+                    if dx > tiny {
+                        // Reset shared drag offset immediately so the next card doesn't bounce
+                        withAnimation(.none) { dragOffset = .zero }
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                            isSwipingOut = true
+                            swipeDirection = 1
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                            know()
+                            showBack = false
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                isSwipingOut = false
+                                swipeDirection = 0
+                            }
+                        }
+                    } else if dx < -tiny {
+                        withAnimation(.none) { dragOffset = .zero }
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                            isSwipingOut = true
+                            swipeDirection = -1
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                            again()
+                            showBack = false
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                isSwipingOut = false
+                                swipeDirection = 0
+                            }
+                        }
+                    } else {
+                        // No meaningful horizontal drag: leave card in place; tap gesture handles flips
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                            dragOffset = .zero
+                        }
+                    }
+                }
+        )
+        .onTapGesture {
+            if isTop {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                    showBack.toggle()
+                }
+            }
+        }
     }
 
     private var controls: some View {
@@ -181,6 +266,27 @@ struct FlashcardsView: View {
                 .font(.largeTitle)
             Text("Session complete")
                 .font(.headline)
+
+            // Session summary
+            HStack(spacing: 16) {
+                Label("\(sessionCorrect) correct", systemImage: "checkmark.circle.fill")
+                Label("\(sessionAgain) again", systemImage: "arrow.uturn.left.circle")
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+
+            // Lifetime accuracy
+            if let acc = ReviewPersistence.lifetimeAccuracy() {
+                let pct = Int((acc * 100).rounded())
+                Text("Lifetime accuracy: \(pct)%")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Lifetime accuracy: —")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             Button {
                 startSession()
             } label: {
@@ -258,6 +364,9 @@ struct FlashcardsView: View {
             return
         }
 
+        sessionCorrect = 0
+        sessionAgain = 0
+
         session = sessionSource
         if shuffled { session.shuffle() }
         index = 0
@@ -267,6 +376,8 @@ struct FlashcardsView: View {
 
     private func again() {
         guard !session.isEmpty else { return }
+        sessionAgain += 1
+        ReviewPersistence.incrementAgain()
         let w = session[index]
         ReviewPersistence.markWrong(w.id)
         // Move current card to the end of the session
@@ -279,6 +390,8 @@ struct FlashcardsView: View {
 
     private func know() {
         guard !session.isEmpty else { return }
+        sessionCorrect += 1
+        ReviewPersistence.incrementCorrect()
         ReviewPersistence.markRight(session[index].id)
         session.remove(at: index)
         if session.isEmpty { return }

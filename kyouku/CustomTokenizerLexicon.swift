@@ -22,8 +22,7 @@ enum CustomTokenizerLexicon {
         guard inserted else { return false }
         let joined = set.sorted().joined(separator: "\n")
         UserDefaults.standard.set(joined, forKey: storageKey)
-        // Invalidate cached trie so next access rebuilds
-        JMdictTrieCache.shared = CustomTrieProvider.makeTrie()
+        NotificationCenter.default.post(name: .customTokenizerLexiconDidChange, object: nil)
         return true
     }
 
@@ -37,7 +36,17 @@ enum CustomTokenizerLexicon {
         guard removed else { return false }
         let joined = set.sorted().joined(separator: "\n")
         UserDefaults.standard.set(joined, forKey: storageKey)
-        JMdictTrieCache.shared = CustomTrieProvider.makeTrie()
+        NotificationCenter.default.post(name: .customTokenizerLexiconDidChange, object: nil)
+        return true
+    }
+
+    /// Removes every custom entry and rebuilds the cache. Returns true if anything changed.
+    @discardableResult
+    static func clearAll() -> Bool {
+        let existing = words()
+        guard existing.isEmpty == false else { return false }
+        UserDefaults.standard.removeObject(forKey: storageKey)
+        NotificationCenter.default.post(name: .customTokenizerLexiconDidChange, object: nil)
         return true
     }
 }
@@ -50,3 +59,4 @@ enum CustomTrieProvider {
         return Trie(words: ws)
     }
 }
+

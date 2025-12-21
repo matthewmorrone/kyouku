@@ -37,6 +37,7 @@ actor DictionarySQLiteStore {
     static let shared = DictionarySQLiteStore()
 
     private var db: OpaquePointer?
+    private let surfaceTokenMaxLength = 10
 
     private init() {
         self.db = nil
@@ -70,14 +71,14 @@ actor DictionarySQLiteStore {
             }
         }
 
-        // 2b) Fuzzy kana/kanji match (substring) if no hits yet
+        // 2b) Surface substring match via indexed tokens if no hits yet
         if results.isEmpty {
-            results = try selectEntriesFuzzy(matching: trimmed, limit: limit)
+            results = try selectEntriesBySurfaceToken(matching: trimmed, limit: limit)
             if !results.isEmpty { return results }
         }
 
-        // 3) English gloss search (case-insensitive substring)
-        results = try selectEntriesByGloss(containing: trimmed, limit: limit)
+        // 3) English gloss search via FTS
+        results = try selectEntriesByGloss(matching: trimmed, limit: limit)
         return results
     }
 
@@ -189,9 +190,17 @@ actor DictionarySQLiteStore {
         return rows
     }
 
-    private func selectEntriesByGloss(containing term: String, limit: Int) throws -> [DictionaryEntry] {
+    private func selectEntriesByGloss(matching term: String, limit: Int) throws -> [DictionaryEntry] {
         guard let db else { return [] }
+        guard let ftsQuery = buildFTSQuery(from: term) else { return [] }
         let sql = """
+        WITH matched AS (
+            SELECT entry_id
+            FROM glosses_fts
+            WHERE glosses_fts MATCH ?1
+            GROUP BY entry_id
+            LIMIT ?2
+        )
         SELECT e.id,
                COALESCE((SELECT k.text
                          FROM kanji k
@@ -212,13 +221,7 @@ actor DictionarySQLiteStore {
                    OR EXISTS (SELECT 1 FROM readings r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
                THEN 1 ELSE 0 END AS is_common_flag
         FROM entries e
-        WHERE EXISTS (
-            SELECT 1
-            FROM senses s2
-            JOIN glosses g2 ON g2.sense_id = s2.id
-            WHERE s2.entry_id = e.id
-              AND g2.text LIKE ?1 COLLATE NOCASE
-        )
+        JOIN matched m ON m.entry_id = e.id
         LIMIT ?2;
         """
 
@@ -228,8 +231,7 @@ actor DictionarySQLiteStore {
         }
         defer { sqlite3_finalize(stmt) }
 
-        let pattern = "%" + term + "%"
-        sqlite3_bind_text(stmt, 1, pattern, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(stmt, 1, ftsQuery, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
         var rows: [DictionaryEntry] = []
@@ -244,9 +246,19 @@ actor DictionarySQLiteStore {
         return rows
     }
 
-    private func selectEntriesFuzzy(matching term: String, limit: Int) throws -> [DictionaryEntry] {
+    private func selectEntriesBySurfaceToken(matching term: String, limit: Int) throws -> [DictionaryEntry] {
         guard let db else { return [] }
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        guard trimmed.count <= surfaceTokenMaxLength else { return [] }
         let sql = """
+        WITH matched AS (
+            SELECT entry_id
+            FROM surface_index
+            WHERE token = ?1
+            GROUP BY entry_id
+            LIMIT ?2
+        )
         SELECT e.id,
                COALESCE((SELECT k.text
                          FROM kanji k
@@ -267,8 +279,7 @@ actor DictionarySQLiteStore {
                    OR EXISTS (SELECT 1 FROM readings r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
                THEN 1 ELSE 0 END AS is_common_flag
         FROM entries e
-        WHERE EXISTS (SELECT 1 FROM kanji k2 WHERE k2.entry_id = e.id AND k2.text LIKE ?1)
-           OR EXISTS (SELECT 1 FROM readings r2 WHERE r2.entry_id = e.id AND r2.text LIKE ?1)
+        JOIN matched m ON m.entry_id = e.id
         LIMIT ?2;
         """
 
@@ -278,8 +289,7 @@ actor DictionarySQLiteStore {
         }
         defer { sqlite3_finalize(stmt) }
 
-        let pattern = "%" + term + "%"
-        sqlite3_bind_text(stmt, 1, pattern, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(stmt, 1, trimmed, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
         var rows: [DictionaryEntry] = []
@@ -302,6 +312,26 @@ actor DictionarySQLiteStore {
             }
         }
         return false
+    }
+
+    private func buildFTSQuery(from term: String) -> String? {
+        let lower = term.lowercased()
+        var tokens: [String] = []
+        var current = ""
+        for ch in lower {
+            if ch.isLetter || ch.isNumber {
+                current.append(ch)
+            } else {
+                if !current.isEmpty {
+                    tokens.append(current)
+                    current.removeAll(keepingCapacity: false)
+                }
+            }
+        }
+        if !current.isEmpty { tokens.append(current) }
+        guard !tokens.isEmpty else { return nil }
+        let prefixed = tokens.map { "\($0)*" }
+        return prefixed.joined(separator: " AND ")
     }
 
     private func romanToHiragana(_ input: String) -> String {

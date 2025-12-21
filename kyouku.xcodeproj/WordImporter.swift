@@ -218,27 +218,78 @@ struct WordImporter {
     private static func mapRow(_ row: [String], headerMap: [Int: String]) -> ProvidedRow {
         var out = ProvidedRow()
         if headerMap.isEmpty {
-            // Positional default: kanji, kana, english, note
-            if row.indices.contains(0) { out.surface = row[0].trimmingCharacters(in: .whitespacesAndNewlines) }
-            if row.indices.contains(1) { out.reading = row[1].trimmingCharacters(in: .whitespacesAndNewlines) }
-            if row.indices.contains(2) { out.meaning = row[2].trimmingCharacters(in: .whitespacesAndNewlines) }
-            if row.indices.contains(3) { out.note = row[3].trimmingCharacters(in: .whitespacesAndNewlines) }
-            return out
+            // No headers: classify fields by content, order-agnostic
+            for valRaw in row {
+                let val = valRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !val.isEmpty else { continue }
+                if containsKanji(val) {
+                    if out.surface == nil { out.surface = val; continue }
+                }
+                if isKanaOnly(val) {
+                    if out.reading == nil { out.reading = val; continue }
+                    if out.surface == nil { out.surface = val; continue }
+                }
+                if isLatinOnly(val) {
+                    if out.meaning == nil { out.meaning = val; continue }
+                    if out.note == nil { out.note = val; continue }
+                }
+                if out.note == nil { out.note = val }
+            }
+            // Fallback to positional if nothing was classified
+            if out.surface == nil, out.reading == nil, out.meaning == nil, out.note == nil {
+                if row.indices.contains(0) { out.surface = row[0].trimmingCharacters(in: .whitespacesAndNewlines) }
+                if row.indices.contains(1) { out.reading = row[1].trimmingCharacters(in: .whitespacesAndNewlines) }
+                if row.indices.contains(2) { out.meaning = row[2].trimmingCharacters(in: .whitespacesAndNewlines) }
+                if row.indices.contains(3) { out.note = row[3].trimmingCharacters(in: .whitespacesAndNewlines) }
+            }
+        } else {
+            // Headers present: map by header, but still correct by content if unknown headers
+            for (i, valRaw) in row.enumerated() {
+                let val = valRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !val.isEmpty else { continue }
+                switch headerMap[i] ?? "" {
+                case "kanji", "surface", "word", "term": out.surface = val
+                case "kana", "reading", "furigana", "yomi": out.reading = val
+                case "english", "meaning", "gloss", "definition", "def": out.meaning = val
+                case "note", "notes", "comment": out.note = val
+                default:
+                    // Unknown header: classify by content
+                    if containsKanji(val) {
+                        if out.surface == nil { out.surface = val }
+                    } else if isKanaOnly(val) {
+                        if out.reading == nil { out.reading = val } else if out.surface == nil { out.surface = val }
+                    } else if isLatinOnly(val) {
+                        if out.meaning == nil { out.meaning = val } else if out.note == nil { out.note = val }
+                    } else if out.note == nil {
+                        out.note = val
+                    }
+                }
+            }
         }
-        for (i, valRaw) in row.enumerated() {
-            let val = valRaw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !val.isEmpty else { continue }
-            switch headerMap[i] ?? "" {
-            case "kanji", "surface", "word", "term": out.surface = val
-            case "kana", "reading", "furigana", "yomi": out.reading = val
-            case "english", "meaning", "gloss", "definition", "def": out.meaning = val
-            case "note", "notes", "comment": out.note = val
-            default:
-                // If unknown header, try to place into first empty slot in order: meaning, reading, surface, note
-                if out.meaning == nil { out.meaning = val }
-                else if out.reading == nil { out.reading = val }
-                else if out.surface == nil { out.surface = val }
-                else if out.note == nil { out.note = val }
+
+        // Heuristics: enforce constraints when data is sparse or mislabeled
+        // If meaning is missing but reading looks Latin-only, treat that as meaning.
+        if (out.meaning?.nilIfEmpty) == nil, let r = out.reading?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty, isLatinOnly(r) {
+            out.meaning = r
+            out.reading = nil
+        }
+        // If reading is missing but meaning looks kana-only, treat that as reading.
+        if (out.reading?.nilIfEmpty) == nil, let m = out.meaning?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty, isKanaOnly(m) {
+            out.reading = m
+            out.meaning = nil
+        }
+        // Single-field convenience: if only kana is present, set both reading and surface to kana
+        if out.surface == nil, out.reading == nil, out.meaning == nil, out.note == nil {
+            if let only = row.first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                let val = only.trimmingCharacters(in: .whitespacesAndNewlines)
+                if containsKanji(val) {
+                    out.surface = val
+                } else if isKanaOnly(val) {
+                    out.reading = val
+                    out.surface = val
+                } else if isLatinOnly(val) {
+                    out.meaning = val
+                }
             }
         }
         return out
@@ -415,6 +466,27 @@ struct WordImporter {
             if (0x30A0...0x30FF).contains(ch.value) { return true } // Katakana
         }
         return false
+    }
+    
+    private static func isKanaOnly(_ s: String) -> Bool {
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        for ch in trimmed.unicodeScalars {
+            if (0x3040...0x309F).contains(ch.value) { continue } // Hiragana
+            if (0x30A0...0x30FF).contains(ch.value) { continue } // Katakana
+            if CharacterSet.whitespacesAndNewlines.contains(ch) { continue }
+            return false
+        }
+        return true
+    }
+
+    private static func isLatinOnly(_ s: String) -> Bool {
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        // Latin-only in this context means: not containing Kana or Kanji
+        if containsKana(trimmed) { return false }
+        if containsKanji(trimmed) { return false }
+        return true
     }
 
     // MARK: - Enrichment

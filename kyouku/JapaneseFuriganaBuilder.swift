@@ -150,7 +150,8 @@ enum JapaneseFuriganaBuilder {
         rubyFontSize: CGFloat,
         lineSpacing: CGFloat,
         segments: [Segment]? = nil,
-        forceMeCabOnly: Bool = false
+        forceMeCabOnly: Bool = false,
+        perKanjiSplit: Bool = true
     ) -> NSAttributedString {
         let baseFont = UIFont.systemFont(ofSize: baseFontSize)
 
@@ -235,21 +236,56 @@ enum JapaneseFuriganaBuilder {
 
         fillMissingRubyTargets(&rubyTargets, text: text)
 
+        // If furigana is relatively long, increase inter-character spacing a bit to give ruby room
+        let computedKern = dynamicKerning(for: rubyTargets, in: text)
+        if computedKern > 0 {
+            attributed.addAttribute(.kern, value: computedKern, range: NSRange(location: 0, length: attributed.length))
+        }
+
+        func applyRuby(range: NSRange, reading: String) {
+            let ruby = CTRubyAnnotationCreateWithAttributes(
+                .auto,
+                .auto,
+                .before,
+                reading as CFString,
+                [kCTFontAttributeName as NSAttributedString.Key: rubyFont] as CFDictionary
+            )
+            attributed.addAttribute(NSAttributedString.Key(kCTRubyAnnotationAttributeName as String), value: ruby, range: range)
+            attributed.addAttribute(.rubyReading, value: reading, range: range)
+        }
+
         for (range, reading) in rubyTargets {
-            for (r2, rd2) in Self.refinedRubyTargets(range: range, reading: reading, in: text) {
-                let ruby = CTRubyAnnotationCreateWithAttributes(
-                    .auto,
-                    .auto,
-                    .before,
-                    rd2 as CFString,
-                    [kCTFontAttributeName as NSAttributedString.Key: rubyFont] as CFDictionary
-                )
-                attributed.addAttribute(NSAttributedString.Key(kCTRubyAnnotationAttributeName as String), value: ruby, range: r2)
-                attributed.addAttribute(.rubyReading, value: rd2, range: r2)
+            if perKanjiSplit {
+                for (r2, rd2) in Self.refinedRubyTargets(range: range, reading: reading, in: text) {
+                    applyRuby(range: r2, reading: rd2)
+                }
+            } else {
+                applyRuby(range: range, reading: reading)
             }
         }
 
         return attributed
+    }
+
+    private static func dynamicKerning(for targets: [(NSRange, String)], in text: String) -> CGFloat {
+        guard !targets.isEmpty else { return 0 }
+        // Compute the maximum ratio of reading length to base length across targets
+        var maxRatio: CGFloat = 1.0
+        for (range, reading) in targets {
+            guard range.length > 0 else { continue }
+            let baseLen = max(1, range.length)
+            let readingLen = max(0, reading.count)
+            if baseLen > 0 {
+                let ratio = CGFloat(readingLen) / CGFloat(baseLen)
+                if ratio > maxRatio { maxRatio = ratio }
+            }
+        }
+        if maxRatio <= 1.1 { return 0 } // no extra spacing needed
+        // Heuristic: translate overage into kerning points, capped
+        // e.g., ratio 1.6 -> 0.3pt, ratio 2.0 -> ~0.6pt, cap at 1.0pt
+        let over = maxRatio - 1.0
+        let kern = min(1.0, over * 0.6)
+        return kern
     }
 
     private static func fillMissingRubyTargets(_ targets: inout [(NSRange, String)], text: String) {
@@ -277,7 +313,7 @@ enum JapaneseFuriganaBuilder {
         }
     }
 
-    static func buildAttributedText(text: String, showFurigana: Bool, forceMeCabOnly: Bool = false) -> NSAttributedString {
+    static func buildAttributedText(text: String, showFurigana: Bool, forceMeCabOnly: Bool = false, perKanjiSplit: Bool = true) -> NSAttributedString {
         let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
         let defaults = UserDefaults.standard
         let baseSize = defaults.object(forKey: "readingTextSize") as? Double ?? Double(baseDefault)
@@ -290,11 +326,12 @@ enum JapaneseFuriganaBuilder {
             baseFontSize: CGFloat(baseSize),
             rubyFontSize: CGFloat(rubySize),
             lineSpacing: CGFloat(spacing),
-            forceMeCabOnly: forceMeCabOnly
+            forceMeCabOnly: forceMeCabOnly,
+            perKanjiSplit: perKanjiSplit
         )
     }
     
-    static func buildAttributedText(text: String, showFurigana: Bool, segments: [Segment], forceMeCabOnly: Bool = false) -> NSAttributedString {
+    static func buildAttributedText(text: String, showFurigana: Bool, segments: [Segment], forceMeCabOnly: Bool = false, perKanjiSplit: Bool = true) -> NSAttributedString {
         let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
         let defaults = UserDefaults.standard
         let baseSize = defaults.object(forKey: "readingTextSize") as? Double ?? Double(baseDefault)
@@ -307,8 +344,62 @@ enum JapaneseFuriganaBuilder {
             rubyFontSize: CGFloat(rubySize),
             lineSpacing: CGFloat(spacing),
             segments: segments,
-            forceMeCabOnly: forceMeCabOnly
+            forceMeCabOnly: forceMeCabOnly,
+            perKanjiSplit: perKanjiSplit
         )
+    }
+
+    static func buildWholeWordRuby(text: String, reading: String) -> NSAttributedString {
+        let baseDefault = UIFont.preferredFont(forTextStyle: .body).pointSize
+        let defaults = UserDefaults.standard
+        let baseSize = defaults.object(forKey: "readingTextSize") as? Double ?? Double(baseDefault)
+        let rubySize = defaults.object(forKey: "readingFuriganaSize") as? Double ?? (baseSize * 0.55)
+        let spacing = defaults.object(forKey: "readingLineSpacing") as? Double ?? 0
+        return buildWholeWordRuby(
+            text: text,
+            reading: reading,
+            baseFontSize: CGFloat(baseSize),
+            rubyFontSize: CGFloat(rubySize),
+            lineSpacing: CGFloat(spacing)
+        )
+    }
+
+    private static func buildWholeWordRuby(text: String, reading: String, baseFontSize: CGFloat, rubyFontSize: CGFloat, lineSpacing: CGFloat) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = lineSpacing
+
+        let baseAttributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: baseFontSize),
+            .paragraphStyle: paragraph,
+            .foregroundColor: UIColor.label
+        ]
+
+        let attributed = NSMutableAttributedString(string: text, attributes: baseAttributes)
+
+        // Apply a small kerning if reading is much longer than base to give ruby more space
+        if !text.isEmpty {
+            let baseLen = max(1, (text as NSString).length)
+            let readingLen = max(0, reading.count)
+            let ratio = CGFloat(readingLen) / CGFloat(baseLen)
+            if ratio > 1.1 {
+                let over = ratio - 1.0
+                let kern = min(1.0, over * 0.6)
+                if kern > 0 {
+                    attributed.addAttribute(.kern, value: kern, range: NSRange(location: 0, length: attributed.length))
+                }
+            }
+        }
+
+        let trimmedReading = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard attributed.length > 0, trimmedReading.isEmpty == false else { return attributed }
+
+        let rubyAttributes = [kCTFontAttributeName as NSAttributedString.Key: UIFont.systemFont(ofSize: rubyFontSize)] as CFDictionary
+        let normalizedReading = toHiragana(trimmedReading)
+        let ruby = CTRubyAnnotationCreateWithAttributes(.auto, .auto, .before, normalizedReading as CFString, rubyAttributes)
+        let range = NSRange(location: 0, length: attributed.length)
+        attributed.addAttribute(NSAttributedString.Key(kCTRubyAnnotationAttributeName as String), value: ruby, range: range)
+        attributed.addAttribute(.rubyReading, value: normalizedReading, range: range)
+        return attributed
     }
 }
 

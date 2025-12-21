@@ -22,6 +22,11 @@ extension NSAttributedString.Key {
     static let rubyReading = NSAttributedString.Key("RubyReading")
 }
 
+struct ReadingOverride: Equatable {
+    let range: NSRange
+    let reading: String
+}
+
 final class RoundedBackgroundLayoutManager: NSLayoutManager {
     var cornerRadius: CGFloat = 5
     var interTokenGap: CGFloat = 0.75
@@ -142,10 +147,13 @@ struct FuriganaTextEditor: UIViewRepresentable {
     var onTokenTap: (ParsedToken) -> Void
     var onSelectionCleared: () -> Void = {}
     var showSegmentHighlighting: Bool = true
+    var perKanjiSplit: Bool = true
 
     var baseFontSize: Double? = nil
     var rubyFontSize: Double? = nil
     var lineSpacing: Double? = nil
+
+    var readingOverrides: [ReadingOverride] = []
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -199,8 +207,12 @@ struct FuriganaTextEditor: UIViewRepresentable {
         tv.accessibilityIdentifier = "FuriganaTextEditorTextView"
         _ = tv.gestureRecognizers?.count ?? 0
 
+        NotificationCenter.default.addObserver(forName: .customTokenizerLexiconDidChange, object: nil, queue: .main) { _ in
+            context.coordinator.invalidateSegmentCache()
+        }
+
         // Initial content
-        context.coordinator.updateTextView(tv, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap, showSegmentHighlighting: showSegmentHighlighting)
+        context.coordinator.updateTextView(tv, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap, showSegmentHighlighting: showSegmentHighlighting, perKanjiSplit: perKanjiSplit, readingOverrides: self.readingOverrides)
         DispatchQueue.main.async {
             tv.layoutManager.ensureLayout(for: tv.textContainer)
             tv.setNeedsLayout()
@@ -236,7 +248,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
         context.coordinator.tapRecognizer?.isEnabled = allowTokenTap && !isEditable
 
-        context.coordinator.updateTextView(uiView, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap, showSegmentHighlighting: showSegmentHighlighting)
+        context.coordinator.updateTextView(uiView, with: text, showFurigana: showFurigana, isEditable: isEditable, allowTokenTap: allowTokenTap, showSegmentHighlighting: showSegmentHighlighting, perKanjiSplit: perKanjiSplit, readingOverrides: self.readingOverrides)
 
         // Auto-focus when editable and not showing furigana; resign otherwise
         if !showFurigana && isEditable {
@@ -282,7 +294,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
         }
 
         // Update helper to rebuild attributed or plain text while preserving selection
-        func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool, isEditable: Bool, allowTokenTap: Bool, showSegmentHighlighting: Bool) {
+        func updateTextView(_ textView: UITextView, with text: String, showFurigana: Bool, isEditable: Bool, allowTokenTap: Bool, showSegmentHighlighting: Bool, perKanjiSplit: Bool, readingOverrides: [ReadingOverride]) {
             tapRecognizer?.isEnabled = allowTokenTap && !isEditable
 
             // Clear highlight when token taps are disabled or furigana is off
@@ -312,7 +324,8 @@ struct FuriganaTextEditor: UIViewRepresentable {
                 let ruby = parent.rubyFontSize
                 let spacing = parent.lineSpacing
 
-                let key = "\(currentText)|\(hr?.location ?? -1):\(hr?.length ?? -1)|\(base?.description ?? "nil")|\(ruby?.description ?? "nil")|\(spacing?.description ?? "nil")"
+                let overridesKey = readingOverrides.map { "\($0.range.location):\($0.range.length)=\($0.reading)" }.joined(separator: "|")
+                let key = "\(currentText)|\(hr?.location ?? -1):\(hr?.length ?? -1)|\(base?.description ?? "nil")|\(ruby?.description ?? "nil")|\(spacing?.description ?? "nil")|\(overridesKey)"
 
                 // If we've already applied this exact build, skip
                 if lastAppliedBuildKey == key, !(textView.attributedText?.string.isEmpty ?? true) {
@@ -340,13 +353,14 @@ struct FuriganaTextEditor: UIViewRepresentable {
                             baseFontSize: CGFloat(base),
                             rubyFontSize: CGFloat(ruby),
                             lineSpacing: CGFloat(spacing),
-                            segments: segmentsArg
+                            segments: segmentsArg,
+                            perKanjiSplit: perKanjiSplit
                         )
                     } else {
                         if let segsNonEmpty = segmentsArg {
-                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, segments: segsNonEmpty)
+                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, segments: segsNonEmpty, perKanjiSplit: perKanjiSplit)
                         } else {
-                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true)
+                            attributed = JapaneseFuriganaBuilder.buildAttributedText(text: currentText, showFurigana: true, perKanjiSplit: perKanjiSplit)
                         }
                     }
                     let mutable = NSMutableAttributedString(attributedString: attributed)
@@ -356,6 +370,12 @@ struct FuriganaTextEditor: UIViewRepresentable {
                     // Always apply the yellow highlight if hr is valid, regardless of showSegmentHighlighting
                     if let hr = hr, hr.location != NSNotFound, hr.location + hr.length <= mutable.length {
                         mutable.addAttribute(.tokenBackgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.35), range: hr)
+                    }
+                    for ov in readingOverrides {
+                        let r = ov.range
+                        if r.location != NSNotFound, r.location + r.length <= mutable.length, !ov.reading.isEmpty {
+                            mutable.addAttribute(.rubyReading, value: ov.reading, range: r)
+                        }
                     }
                     DispatchQueue.main.async { [weak self] in
                         guard let self = self else { return }
@@ -453,13 +473,19 @@ struct FuriganaTextEditor: UIViewRepresentable {
             let lm = tv.layoutManager
             let container = tv.textContainer
 
-            // Resolve to a character index using TextKit mapping in container coordinates
-            let charIndex = lm.characterIndex(for: point, in: container, fractionOfDistanceBetweenInsertionPoints: nil)
-            
-            lookupToken(at: charIndex, in: tv.text, textView: tv)
+            // If tap is outside the laid-out text area, clear selection
+            let used = lm.usedRect(for: container)
+            let withinX = point.x >= 0 && point.x <= container.size.width
+            let withinY = point.y >= 0 && point.y <= used.maxY
+            if !(withinX && withinY) {
+                clearSelection(fullText: tv.text, textView: tv)
+                return
+            }
+
+            lookupToken(at: lm.characterIndex(for: point, in: container, fractionOfDistanceBetweenInsertionPoints: nil), in: tv.text, textView: tv, tapPoint: point)
         }
 
-        private func lookupToken(at charIndex: Int, in fullText: String, textView: UITextView) {
+        private func lookupToken(at charIndex: Int, in fullText: String, textView: UITextView, tapPoint: CGPoint) {
             let nsText = fullText as NSString
             let nsLen = nsText.length
             guard nsLen > 0 else { return }
@@ -467,41 +493,27 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
             let segs = segments(for: fullText)
 
-            // Try direct NSRange containment first to avoid String.Index cross-string issues
+            let lm = textView.layoutManager
+            let container = textView.textContainer
+
+            // Hit-test: only select a segment if the tap falls within its glyph bounding rect
             for seg in segs {
                 let ns = NSRange(seg.range, in: fullText)
                 guard ns.location != NSNotFound else { continue }
                 if idx >= ns.location && idx < ns.location + ns.length {
-                    select(seg: seg, fullText: fullText, textView: textView)
-                    return
-                }
-            }
-
-            // If no direct match (e.g., tapped exactly on a boundary), bias left then right
-            if idx > 0 {
-                let left = idx - 1
-                for seg in segs {
-                    let ns = NSRange(seg.range, in: fullText)
-                    guard ns.location != NSNotFound else { continue }
-                    if left >= ns.location && left < ns.location + ns.length {
+                    let glyphRange = lm.glyphRange(forCharacterRange: ns, actualCharacterRange: nil)
+                    if glyphRange.length == 0 { continue }
+                    let tight = lm.boundingRect(forGlyphRange: glyphRange, in: container)
+                    // Add a small padding to make taps near edges more forgiving
+                    let padded = tight.insetBy(dx: -3, dy: -2)
+                    if padded.contains(tapPoint) {
                         select(seg: seg, fullText: fullText, textView: textView)
                         return
                     }
                 }
             }
 
-            if idx + 1 < nsLen {
-                let right = idx + 1
-                for seg in segs {
-                    let ns = NSRange(seg.range, in: fullText)
-                    guard ns.location != NSNotFound else { continue }
-                    if right >= ns.location && right < ns.location + ns.length {
-                        select(seg: seg, fullText: fullText, textView: textView)
-                        return
-                    }
-                }
-            }
-
+            // No hit on any segment: clear selection
             clearSelection(fullText: fullText, textView: textView)
         }
 
@@ -534,8 +546,9 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
             interactionLogger.info("Resolved tap to segment: index=\(line), line=\(line), surface='\(surface, privacy: .public)', reading='\(reading, privacy: .public)'")
 
-            highlightedRange = parent.showSegmentHighlighting ? ns : nil
-            updateTextView(textView, with: fullText, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap, showSegmentHighlighting: parent.showSegmentHighlighting)
+            highlightedRange = ns
+
+            updateTextView(textView, with: fullText, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap, showSegmentHighlighting: parent.showSegmentHighlighting, perKanjiSplit: parent.perKanjiSplit, readingOverrides: parent.readingOverrides)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             parent.onTokenTap(token)
         }
@@ -544,7 +557,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
             let hadHighlight = highlightedRange != nil
             highlightedRange = nil
             if hadHighlight {
-                updateTextView(textView, with: fullText, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap, showSegmentHighlighting: parent.showSegmentHighlighting)
+                updateTextView(textView, with: fullText, showFurigana: parent.showFurigana, isEditable: parent.isEditable, allowTokenTap: parent.allowTokenTap, showSegmentHighlighting: parent.showSegmentHighlighting, perKanjiSplit: parent.perKanjiSplit, readingOverrides: parent.readingOverrides)
             }
             parent.onSelectionCleared()
         }

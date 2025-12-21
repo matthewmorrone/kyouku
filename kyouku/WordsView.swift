@@ -8,8 +8,22 @@
 import SwiftUI
 import OSLog
 import UniformTypeIdentifiers
+import UIKit
 
 fileprivate let wordsLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Words")
+
+/// Preference key used to collect the frames of word rows by their UUID.
+private struct WordRowFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        // Merge dictionaries, preferring the most recent value for duplicate keys
+        let new = nextValue()
+        for (k, v) in new {
+            value[k] = v
+        }
+    }
+}
 
 struct WordsView: View {
     @EnvironmentObject var store: WordStore
@@ -24,285 +38,181 @@ struct WordsView: View {
     @State private var lookupError: String? = nil
     @State private var searchTask: Task<Void, Never>? = nil
 
-    // Import words state
-    @State private var isImportingWords: Bool = false
-    @State private var importError: String? = nil
-    @State private var importSummary: String? = nil
-    @State private var showImportError: Bool = false
-    @State private var showImportSummary: Bool = false
-    @State private var importPreviewURL: URL? = nil
-    @State private var previewItems: [ImportPreviewItem] = []
-    @State private var showImportPreview: Bool = false
-    @State private var preferKanaOnly: Bool = false
-    @State private var delimiterSelection: DelimiterChoice = .auto
+    @StateObject private var importVM = WordsImportViewModel()
+    
+    @State private var rowFrames: [UUID: CGRect] = [:]
+    @State private var isDraggingSelection: Bool = false
+    @State private var dragSelectionMode: Bool? = nil // true = selecting, false = deselecting
+    @State private var lastDragHitIDs: Set<UUID> = []
+
+    private func vmBinding<T>(_ keyPath: ReferenceWritableKeyPath<WordsImportViewModel, T>) -> Binding<T> {
+        Binding(
+            get: { importVM[keyPath: keyPath] },
+            set: { importVM[keyPath: keyPath] = $0 }
+        )
+    }
+    
+    @ViewBuilder
+    private func legendTag(color: Color, text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.15))
+            .foregroundStyle(color.opacity(0.9))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
 
     var body: some View {
         NavigationStack {
-            List {
-                if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    savedWordsSection
-                } else {
-                    dictionarySection
-                }
-            }
+            mainList
+                .coordinateSpace(name: "WordsListSpace")
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            guard isSelecting else { return }
+                            isDraggingSelection = true
+                            // Current drag point in list space
+                            let point = value.location
+                            // Determine which rows intersect this vertical position
+                            for (id, frame) in rowFrames {
+                                guard frame.minY <= point.y && point.y <= frame.maxY else { continue }
+                                // Limit interaction to the left area where the checkbox appears (approx 44pt)
+                                let leftEdgeThreshold: CGFloat = 60
+                                guard point.x <= frame.minX + leftEdgeThreshold else { continue }
+
+                                // Establish selection mode based on the first hit
+                                if dragSelectionMode == nil {
+                                    dragSelectionMode = !selectedWordIDs.contains(id)
+                                }
+
+                                // Avoid toggling the same row multiple times in one drag
+                                if lastDragHitIDs.contains(id) { continue }
+                                lastDragHitIDs.insert(id)
+
+                                if dragSelectionMode == true {
+                                    selectedWordIDs.insert(id)
+                                } else {
+                                    selectedWordIDs.remove(id)
+                                }
+                            }
+                        }
+                        .onEnded { _ in
+                            isDraggingSelection = false
+                            dragSelectionMode = nil
+                            lastDragHitIDs.removeAll()
+                            // Provide light haptic feedback to signal end of selection gesture
+                            let generator = UIImpactFeedbackGenerator(style: .light)
+                            generator.impactOccurred()
+                        }
+                )
             .navigationTitle("Words")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(isSelecting ? "Done" : "Select") {
-                        if isSelecting {
-                            isSelecting = false
-                            selectedWordIDs.removeAll()
-                        } else {
-                            isSelecting = true
-                        }
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        isImportingWords = true
-                    } label: {
-                        Label("Import", systemImage: "tray.and.arrow.down")
-                    }
-                    .help("Import Words…")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if isSelecting {
-                        Button(role: .destructive) {
-                            deleteSelectedWords()
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                        .disabled(selectedWordIDs.isEmpty)
-                    }
-                }
-            }
-            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search dictionary")
+            .toolbar { wordsToolbar }
+            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("Search dictionary"))
             .onChange(of: searchText) { oldValue, newValue in
                 handleSearchTextChange(oldValue: oldValue, newValue: newValue)
             }
-            .sheet(isPresented: $showingDefinition) {
-                sheetContent
+            .sheet(isPresented: $showingDefinition) { definitionSheetContent }
+            .fileImporter(isPresented: vmBinding(\.isImportingWords), allowedContentTypes: [.commaSeparatedText, .plainText], allowsMultipleSelection: true, onCompletion: importVM.handleWordsImport)
+            .sheet(isPresented: vmBinding(\.showImportPaste)) { importPasteSheetContent }
+            .sheet(isPresented: vmBinding(\.showImportPreview)) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            legendTag(color: .orange, text: "Kanji/Mixed")
+                            legendTag(color: .blue, text: "Kana")
+                            legendTag(color: .green, text: "English")
+                        }
+                        .padding(.horizontal)
+                        
+                        WordsImportPreviewSheet(
+                            items: vmBinding(\.previewItems),
+                            preferKanaOnly: vmBinding(\.preferKanaOnly),
+                            onFill: {
+                                await importVM.fillMissingForPreviewItems()
+                                // No further action needed; @Published bindings will update the preview immediately
+                            },
+                            onConfirm: {
+                                let prepared = importVM.finalizePreviewItems()
+                                var added = 0
+                                for w in prepared {
+                                    let before = store.allWords().count
+                                    let normalized = normalizeSurfaceReading(surface: w.surface, reading: w.reading)
+                                    store.add(surface: normalized.surface, reading: normalized.reading, meaning: w.meaning, note: w.note)
+                                    let after = store.allWords().count
+                                    if after > before { added += 1 }
+                                }
+                                importVM.importSummary = "Imported words: \(added). Skipped: \(prepared.count - added)."
+                                importVM.showImportSummary = true
+                                importVM.showImportPreview = false
+                            },
+                            onCancel: {
+                                importVM.showImportPreview = false
+                                importVM.showImportPaste = true
+                            }
+                        )
+                    }
+                }
+                .navigationTitle("Import Preview")
+                .presentationDetents([PresentationDetent.large])
             }
-            .fileImporter(isPresented: $isImportingWords, allowedContentTypes: [.commaSeparatedText, .plainText], onCompletion: handleWordsImport)
-            .sheet(isPresented: $showImportPreview) {
-                makeImportPreviewSheet()
-                    .presentationDetents([.large])
+            .onChange(of: importVM.delimiterSelection) { _, _ in
+                importVM.reloadPreviewForDelimiter()
             }
-            .onChange(of: delimiterSelection) { _, _ in
-                reloadPreviewForDelimiter()
-            }
-            .alert("Import Error", isPresented: $showImportError, actions: {
-                Button("OK") { showImportError = false; importError = nil }
+            .alert("Import Error", isPresented: vmBinding(\.showImportError), actions: {
+                Button("OK") { importVM.showImportError = false; importVM.importError = nil }
             }, message: {
-                Text(importError ?? "Unknown error")
+                Text(importVM.importError ?? "Unknown error")
             })
-            .alert("Import Summary", isPresented: $showImportSummary) {
-                Button("OK") { showImportSummary = false; importSummary = nil }
+            .alert("Import Summary", isPresented: vmBinding(\.showImportSummary)) {
+                Button("OK") { importVM.showImportSummary = false }
             } message: {
-                Text(importSummary ?? "")
+                Text(importVM.importSummary ?? "")
             }
             .safeAreaInset(edge: .bottom) {
-                if isSelecting {
-                    VStack(spacing: 0) {
-                        Divider()
-                        HStack(spacing: 12) {
-                            Button("Cancel") {
-                                isSelecting = false
-                                selectedWordIDs.removeAll()
-                            }
-                            Spacer()
-                            Button(role: .destructive) {
-                                deleteSelectedWords()
-                            } label: {
-                                Text("Delete Selected (\(selectedWordIDs.count))")
-                            }
-                            .disabled(selectedWordIDs.isEmpty)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                    }
-                    .background(.regularMaterial)
-                }
-            }
-        }
-    }
-    
-    // MARK: - Subviews
-
-    @ViewBuilder
-    private var dictionarySection: some View {
-        Section("Dictionary") {
-            if vm.isLoading {
-                HStack { ProgressView(); Text("Searching…") }
-            } else if let msg = vm.errorMessage {
-                Text(msg).foregroundStyle(.secondary)
-            } else if vm.results.isEmpty {
-                Text("No matches")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(vm.results) { entry in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(displaySurface(for: entry))
-                                .font(.headline)
-                            Text(firstGloss(for: entry))
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button {
-                            let surface = displaySurface(for: entry)
-                            let meaning = firstGloss(for: entry)
-                            store.add(surface: surface, reading: entry.reading, meaning: meaning)
-                        } label: {
-                            if isSaved(entry) {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                            } else {
-                                Image(systemName: "plus.circle").foregroundStyle(.tint)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isSaved(entry))
-                    }
-                }
+                SelectionBarView(
+                    isSelecting: $isSelecting,
+                    selectedWordIDs: $selectedWordIDs,
+                    onDelete: { deleteSelectedWords() }
+                )
             }
         }
     }
 
-    @ViewBuilder
-    private var savedWordsSection: some View {
-        Section("Saved Words") {
-            ForEach(sortedWords) { word in
-                HStack(alignment: .top, spacing: 8) {
+    // MARK: - Toolbar
+    @ToolbarContentBuilder
+    private var wordsToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarLeading) {
+            if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Button(isSelecting ? "Done" : "Select") {
                     if isSelecting {
-                        Button(action: {
-                            if selectedWordIDs.contains(word.id) {
-                                selectedWordIDs.remove(word.id)
-                            } else {
-                                selectedWordIDs.insert(word.id)
-                            }
-                        }) {
-                            Image(systemName: selectedWordIDs.contains(word.id) ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(selectedWordIDs.contains(word.id) ? Color.accentColor : Color.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(word.surface)
-                                .font(.title3)
-                            Text("【\(word.reading)】")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        if !word.meaning.isEmpty {
-                            Text(word.meaning)
-                                .font(.subheadline)
-                        }
-                        if let note = word.note, !note.isEmpty {
-                            Text(note)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if isSelecting {
-                        if selectedWordIDs.contains(word.id) {
-                            selectedWordIDs.remove(word.id)
-                        } else {
-                            selectedWordIDs.insert(word.id)
-                        }
+                        // Finish selection
+                        isSelecting = false
+                        selectedWordIDs.removeAll()
                     } else {
-                        selectedWord = word
-//                        if let w = selectedWord {
-//                            wordsLogger.info("Saved word tapped: surface='\(w.surface, privacy: .public)', reading='\(w.reading, privacy: .public)'")
-//                        }
-                        showingDefinition = true
-                        Task { await lookup(for: word) }
+                        isSelecting = true
+                        hideKeyboard()
                     }
                 }
             }
-            .onDelete(perform: deleteSavedWords)
         }
-    }
-
-    @ViewBuilder
-    private var sheetContent: some View {
-        if isLookingUp {
-            VStack(spacing: 12) {
-                ProgressView("Looking up…")
-                if let w = selectedWord {
-                    Text("\(w.surface)【\(w.reading)】")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Menu {
+                Button {
+                    // Import from file
+                    importVM.isImportingWords = true
+                } label: {
+                    Label("Import from File…", systemImage: "doc.badge.plus")
                 }
-            }
-            .padding()
-        } else if let msg = lookupError {
-            VStack(spacing: 10) {
-                HStack {
-                    Button(action: {
-                        // Selected word already has a meaning; route through the single add method.
-                        if let w = selectedWord {
-                            store.add(surface: w.surface, reading: w.reading, meaning: w.meaning)
-                        }
-                        showingDefinition = false
-                    }) {
-                        Image(systemName: "plus.circle.fill").font(.title3)
-                    }
-                    Spacer()
-                    Button("Close") { showingDefinition = false }
+                Button {
+                    // Paste / Preview
+                    importVM.showImportPaste = true
+                } label: {
+                    Label("Paste / Preview…", systemImage: "doc.on.clipboard")
                 }
-                .padding(.bottom, 8)
-
-                Text("Lookup failed")
-                    .font(.headline)
-                Text(msg)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
+            } label: {
+                Label("Import", systemImage: "square.and.arrow.down")
             }
-            .padding()
-        } else if let entry = dictEntry {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Button(action: {
-                        let surface = displaySurface(for: entry)
-                        let meaning = firstGloss(for: entry)
-                        store.add(surface: surface, reading: entry.reading, meaning: meaning)
-                        showingDefinition = false
-                    }) {
-                        Image(systemName: "plus.circle.fill").font(.title3)
-                    }
-                    Spacer()
-                    Button(action: { showingDefinition = false }) {
-                        Image(systemName: "xmark.circle.fill").font(.title3)
-                    }
-                }
-
-                Text(displaySurface(for: entry))
-                    .font(.title2).bold()
-                if !entry.reading.isEmpty {
-                    Text(entry.reading)
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                }
-                Text(firstGloss(for: entry))
-                    .font(.body)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding()
-            .presentationDetents([.medium, .large])
-        } else {
-            VStack {
-                Text("No definition found")
-                Button("Close") { showingDefinition = false }
-            }
-            .padding()
         }
     }
 
@@ -385,261 +295,156 @@ struct WordsView: View {
         }
     }
 
-    // MARK: - Import Words Support
-    private func toImporterItems(_ items: [ImportPreviewItem]) -> [WordImporter.ImportItem] {
-        return items.map { it in
-            WordImporter.ImportItem(
-                lineNumber: it.lineNumber,
-                providedSurface: it.providedSurface,
-                providedReading: it.providedReading,
-                providedMeaning: it.providedMeaning,
-                note: it.note,
-                computedSurface: it.computedSurface,
-                computedReading: it.computedReading,
-                computedMeaning: it.computedMeaning
-            )
-        }
-    }
-    
-    private func reloadPreviewForDelimiter() {
-        guard let url = importPreviewURL else { return }
-        let needsStop = url.startAccessingSecurityScopedResource()
-        defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
-        do {
-            let data = try Data(contentsOf: url)
-            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .unicode) ?? String(data: data, encoding: .ascii) else { return }
-            let chosen: DelimiterChoice = (delimiterSelection == .auto) ? bestGuessDelimiter(for: text) : delimiterSelection
-            let delimiterChar = chosen.character
-            let items = (delimiterChar == nil) ? WordImporter.parseItems(fromString: text) : WordImporter.parseItems(fromString: text, delimiter: delimiterChar)
-            self.updatePreviewItems(from: items)
-        } catch {
-            // leave previous preview intact
-        }
-    }
-
-    private func updatePreviewItems(from importerItems: [WordImporter.ImportItem]) {
-        self.previewItems = importerItems.map { it in
-            ImportPreviewItem(
-                lineNumber: it.lineNumber,
-                providedSurface: it.providedSurface,
-                providedReading: it.providedReading,
-                providedMeaning: it.providedMeaning,
-                note: it.note,
-                computedSurface: it.computedSurface,
-                computedReading: it.computedReading,
-                computedMeaning: it.computedMeaning
-            )
-        }
-    }
-
-    @MainActor
-    private func fillMissingForPreviewItems() async {
-        var importerItems = toImporterItems(self.previewItems)
-        await WordImporter.fillMissing(items: &importerItems, preferKanaOnly: self.preferKanaOnly)
-        updatePreviewItems(from: importerItems)
-    }
-
-    private func finalizePreviewItems() -> [(surface: String, reading: String, meaning: String, note: String?)] {
-        let prepared = WordImporter.finalize(items: toImporterItems(self.previewItems), preferKanaOnly: self.preferKanaOnly)
-        return prepared.map { (surface: $0.surface, reading: $0.reading, meaning: $0.meaning, note: $0.note) }
-    }
-
-    private func handleWordsImport(_ result: Result<URL, Error>) {
-        switch result {
-        case .success(let url):
-            let needsStop = url.startAccessingSecurityScopedResource()
-            defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
-            do {
-                try? FileManager.default.startDownloadingUbiquitousItem(at: url)
-                let data = try Data(contentsOf: url)
-                guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .unicode) ?? String(data: data, encoding: .ascii) else {
-                    throw NSError(domain: "Import", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported text encoding."])
-                }
-                // Determine delimiter
-                let chosen: DelimiterChoice = (delimiterSelection == .auto) ? bestGuessDelimiter(for: text) : delimiterSelection
-                let delimiterChar = chosen.character
-                let items = (delimiterChar == nil) ? WordImporter.parseItems(fromString: text) : WordImporter.parseItems(fromString: text, delimiter: delimiterChar)
-                importPreviewURL = url
-                self.updatePreviewItems(from: items)
-                showImportPreview = true
-            } catch {
-                importError = error.localizedDescription
-                showImportError = true
+    // MARK: - Japanese text helpers
+    private func containsKanji(_ s: String) -> Bool {
+        for scalar in s.unicodeScalars {
+            if (0x4E00...0x9FFF).contains(scalar.value) || // CJK Unified Ideographs
+               (0x3400...0x4DBF).contains(scalar.value) || // CJK Unified Ideographs Extension A
+               (0xF900...0xFAFF).contains(scalar.value) {  // CJK Compatibility Ideographs
+                return true
             }
-        case .failure(let err):
-            importError = err.localizedDescription
-            showImportError = true
         }
+        return false
+    }
+
+    private func isKana(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        for scalar in s.unicodeScalars {
+            let v = scalar.value
+            let isHiragana = (0x3040...0x309F).contains(v)
+            let isKatakana = (0x30A0...0x30FF).contains(v) || (0x31F0...0x31FF).contains(v)
+            let isProlonged = v == 0x30FC // ー
+            let isSmallTsu = v == 0x3063 || v == 0x30C3
+            let isPunctuation = v == 0x3001 || v == 0x3002 // 、 。
+            if !(isHiragana || isKatakana || isProlonged || isSmallTsu || isPunctuation) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func normalizeSurfaceReading(surface: String, reading: String) -> (surface: String, reading: String) {
+        var s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        var r = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If both look like kana, keep as-is
+        // If both contain kanji or neither are kana, keep original order
+        // If one is kana and the other is kanji/mixed, ensure s=kanji/mixed and r=kana
+        let sIsKana = isKana(s)
+        let rIsKana = isKana(r)
+        let sHasKanji = containsKanji(s)
+        let rHasKanji = containsKanji(r)
+
+        if sIsKana && !rIsKana {
+            // reading in surface, swap
+            swap(&s, &r)
+        } else if !sHasKanji && rHasKanji {
+            // kana in surface, kanji in reading, swap
+            swap(&s, &r)
+        }
+        return (s, r)
     }
 
     @ViewBuilder
     private func makeImportPreviewSheet() -> some View {
         WordsImportPreviewSheet(
-            items: $previewItems,
-            preferKanaOnly: $preferKanaOnly,
-            delimiter: $delimiterSelection,
+            items: vmBinding(\.previewItems),
+            preferKanaOnly: vmBinding(\.preferKanaOnly),
             onFill: {
-                Task { await fillMissingForPreviewItems() }
+                await importVM.fillMissingForPreviewItems()
+                // No further action needed; @Published bindings will update the preview immediately
             },
             onConfirm: {
-                let prepared = finalizePreviewItems()
+                let prepared = importVM.finalizePreviewItems()
                 var added = 0
                 for w in prepared {
                     let before = store.allWords().count
-                    store.add(surface: w.surface, reading: w.reading, meaning: w.meaning, note: w.note)
+                    let normalized = normalizeSurfaceReading(surface: w.surface, reading: w.reading)
+                    store.add(surface: normalized.surface, reading: normalized.reading, meaning: w.meaning, note: w.note)
                     let after = store.allWords().count
                     if after > before { added += 1 }
                 }
-                importSummary = "Imported words: \(added). Skipped: \(prepared.count - added)."
-                showImportSummary = true
-                showImportPreview = false
+                importVM.importSummary = "Imported words: \(added). Skipped: \(prepared.count - added)."
+                importVM.showImportSummary = true
+                importVM.showImportPreview = false
             },
             onCancel: {
-                showImportPreview = false
+                importVM.showImportPreview = false
+                importVM.showImportPaste = true
             }
         )
     }
 
-    // Local mirror for preview items used by the import sheet
-    private struct ImportPreviewItem: Identifiable, Hashable {
-        let id: UUID
-        let lineNumber: Int
-        var providedSurface: String?
-        var providedReading: String?
-        var providedMeaning: String?
-        var note: String?
-        var computedSurface: String?
-        var computedReading: String?
-        var computedMeaning: String?
-
-        init(id: UUID = UUID(), lineNumber: Int, providedSurface: String?, providedReading: String?, providedMeaning: String?, note: String?, computedSurface: String?, computedReading: String?, computedMeaning: String?) {
-            self.id = id
-            self.lineNumber = lineNumber
-            self.providedSurface = providedSurface
-            self.providedReading = providedReading
-            self.providedMeaning = providedMeaning
-            self.note = note
-            self.computedSurface = computedSurface
-            self.computedReading = computedReading
-            self.computedMeaning = computedMeaning
-        }
+    @ViewBuilder
+    private var definitionSheetContent: some View {
+        DefinitionSheetView(
+            isLookingUp: isLookingUp,
+            selectedWord: selectedWord,
+            lookupError: lookupError,
+            dictEntry: dictEntry,
+            onAddFromWord: { w in
+                store.add(surface: w.surface, reading: w.reading, meaning: w.meaning)
+            },
+            onAddFromEntry: { entry in
+                let surface = entry.kanji.isEmpty ? entry.reading : entry.kanji
+                let meaning = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
+                store.add(surface: surface, reading: entry.reading, meaning: meaning)
+            },
+            onClose: { showingDefinition = false }
+        )
     }
 
-    private enum DelimiterChoice: String, CaseIterable, Identifiable {
-        case auto = "Auto"
-        case comma = ","
-        case semicolon = ";"
-        case tab = "\t"
-        case pipe = "|"
-        var id: String { rawValue }
-        var displayName: String {
-            switch self {
-            case .auto: return "Auto"
-            case .comma: return ", (comma)"
-            case .semicolon: return "; (semicolon)"
-            case .tab: return "Tab"
-            case .pipe: return "| (pipe)"
-            }
-        }
-        var character: Character? {
-            switch self {
-            case .auto: return nil
-            case .comma: return ","
-            case .semicolon: return ";"
-            case .tab: return "\t"
-            case .pipe: return "|"
-            }
-        }
+    @ViewBuilder
+    private var importPasteSheetContent: some View {
+        ImportPasteSheetView(
+            importRawText: vmBinding(\.importRawText),
+            isImportingWords: vmBinding(\.isImportingWords),
+            delimiterSelection: vmBinding(\.delimiterSelection),
+            onPreview: { items in
+                importVM.updatePreviewItems(from: items)
+                importVM.showImportPreview = true
+            },
+            onClose: { importVM.showImportPaste = false }
+        )
+        .presentationDetents([PresentationDetent.large])
     }
 
-    private struct WordsImportPreviewSheet: View {
-        @Binding var items: [ImportPreviewItem]
-        @Binding var preferKanaOnly: Bool
-        @Binding var delimiter: DelimiterChoice
-        var onFill: () -> Void
-        var onConfirm: () -> Void
-        var onCancel: () -> Void
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
 
-        var body: some View {
-            NavigationStack {
-                List {
-                    Section("Options") {
-                        Toggle("Prefer kana-only surface when only kana provided", isOn: $preferKanaOnly)
-                            .tint(.accentColor)
-                        Picker("Column Delimiter", selection: $delimiter) {
-                            ForEach(DelimiterChoice.allCases) { choice in
-                                Text(choice.displayName).tag(choice)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                    }
-                    Section("Preview") {
-                        if items.isEmpty {
-                            Text("No items parsed.").foregroundStyle(.secondary)
-                        } else {
-                            ForEach(items) { it in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                        Text((it.providedSurface ?? it.computedSurface) ?? "—")
-                                            .font(.headline)
-                                        let kana = (it.providedReading ?? it.computedReading) ?? ""
-                                        if !kana.isEmpty {
-                                            Text(kana)
-                                                .font(.subheadline)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    if let m = (it.providedMeaning ?? it.computedMeaning), !m.isEmpty {
-                                        Text(m)
-                                            .font(.subheadline)
-                                            .foregroundStyle(.secondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    } else {
-                                        Text("<no meaning>")
-                                            .font(.footnote)
-                                            .foregroundStyle(.tertiary)
-                                    }
-                                    if let n = it.note, !n.isEmpty {
-                                        Text(n)
-                                            .font(.footnote)
-                                            .foregroundStyle(.tertiary)
-                                    }
-                                }
-                                .padding(.vertical, 4)
-                            }
-                        }
-                    }
+    private var mainList: some View {
+        List { listContent }
+            .onPreferenceChange(WordRowFramePreferenceKey.self) { value in
+                rowFrames = value
+            }
+    }
+
+    @ViewBuilder
+    private var listContent: some View {
+        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            SavedWordsSectionView(
+                words: sortedWords,
+                isSelecting: $isSelecting,
+                selectedWordIDs: $selectedWordIDs,
+                onDelete: deleteSavedWords,
+                onWordTapped: { word in
+                    selectedWord = word
+                    showingDefinition = true
+                    Task { await lookup(for: word) }
                 }
-                .navigationTitle("Import Preview")
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Cancel") { onCancel() }
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        HStack(spacing: 12) {
-                            Button("Fill Missing") { onFill() }
-                            Button("Confirm") { onConfirm() }
-                                .buttonStyle(.borderedProminent)
-                        }
-                    }
+            )
+        } else {
+            DictionarySectionView(
+                vm: vm,
+                isSaved: { entry in isSaved(entry) },
+                onAdd: { entry in
+                    let surface = displaySurface(for: entry)
+                    let meaning = firstGloss(for: entry)
+                    store.add(surface: surface, reading: entry.reading, meaning: meaning)
                 }
-            }
+            )
         }
-    }
-
-    private func bestGuessDelimiter(for text: String) -> DelimiterChoice {
-        let candidates: [DelimiterChoice] = [.comma, .semicolon, .tab, .pipe]
-        guard let firstLine = text.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) else {
-            return .comma
-        }
-        var best: (DelimiterChoice, Int) = (.comma, 1)
-        for c in candidates {
-            if let ch = c.character {
-                let parts = firstLine.split(separator: ch)
-                if parts.count > best.1 { best = (c, parts.count) }
-            }
-        }
-        return best.0
     }
 }
 
