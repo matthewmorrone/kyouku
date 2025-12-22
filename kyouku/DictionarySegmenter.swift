@@ -31,10 +31,11 @@ enum DictionarySegmenter {
                 i = s.index(after: i)
                 continue
             }
-            if let end = trie.longestMatchEnd(in: s, from: i) {
-                let r = i..<end
+            if let matchEnd = trie.longestMatchEnd(in: s, from: i) {
+                let extendedEnd = extendOkuriganaTailIfNeeded(in: s, start: i, currentEnd: matchEnd)
+                let r = i..<extendedEnd
                 out.append(Segment(range: r, surface: String(s[r]), isDictionaryMatch: true))
-                i = end
+                i = extendedEnd
                 continue
             }
             // No dictionary match at i: advance by one character to avoid legacy fallbacks
@@ -252,5 +253,34 @@ enum DictionarySegmenter {
         if s.count == 0 || s.count > 2 { return false }
         if shortHiraganaStopwords.contains(s) { return false }
         return isHiraganaOnly(s)
+    }
+
+    private static func extendOkuriganaTailIfNeeded(in text: String, start: String.Index, currentEnd: String.Index) -> String.Index {
+        guard start < currentEnd else { return currentEnd }
+        let baseSurface = String(text[start..<currentEnd])
+        guard containsKanji(baseSurface) else { return currentEnd }
+
+        var end = currentEnd
+        var steps = 0
+        let maxTail = 4
+        while end < text.endIndex, steps < maxTail {
+            let ch = text[end]
+            if isOkuriganaCharacter(ch) {
+                end = text.index(after: end)
+                steps += 1
+                continue
+            }
+            break
+        }
+        return end
+    }
+
+    private static func isOkuriganaCharacter(_ ch: Character) -> Bool {
+        for scalar in ch.unicodeScalars {
+            let v = scalar.value
+            if (0x3040...0x309F).contains(v) { return true }
+            if v == 0x30FC { return true }
+        }
+        return false
     }
 }

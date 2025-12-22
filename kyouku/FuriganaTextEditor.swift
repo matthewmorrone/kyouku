@@ -11,6 +11,7 @@ import Mecab_Swift
 import IPADic
 import OSLog
 import CoreFoundation
+import CoreText
 
 fileprivate let interactionLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Interaction")
 
@@ -53,22 +54,18 @@ final class RoundedBackgroundLayoutManager: NSLayoutManager {
 
                 let tight = self.boundingRect(forGlyphRange: intersection, in: container)
                 var drawRect = tight.offsetBy(dx: origin.x, dy: origin.y)
-                let lineRect = usedRect.offsetBy(dx: origin.x, dy: origin.y)
 
-                // Align vertically with the line fragment so the highlight reaches the top of the text line.
-                _ = textStorage.attributes(at: range.location, effectiveRange: nil)
-                var hasRuby = false
-                textStorage.enumerateAttribute(.rubyReading, in: range, options: []) { value, _, stop in
-                    if let reading = value as? String, !reading.isEmpty {
-                        hasRuby = true
-                        stop.pointee = true
-                    }
+                // Use the glyph bounding rect to avoid including ruby (furigana) vertical space.
+                // Add a tiny vertical inset for aesthetics.
+                let verticalPad: CGFloat = 1.0
+                if drawRect.height > verticalPad * 2 {
+                    drawRect = drawRect.insetBy(dx: 0, dy: verticalPad)
                 }
-                let top = lineRect.minY
-                let bottomInset: CGFloat = hasRuby ? 1.5 : 0.5
-                let bottom = max(top + 1, lineRect.maxY - bottomInset)
-                drawRect.origin.y = top
-                drawRect.size.height = bottom - top
+
+                // Clamp vertically to the current line fragment's used rect to avoid overflow.
+                let lineRect = usedRect.offsetBy(dx: origin.x, dy: origin.y)
+                if drawRect.minY < lineRect.minY { drawRect.origin.y = lineRect.minY }
+                if drawRect.maxY > lineRect.maxY { drawRect.size.height = max(0, lineRect.maxY - drawRect.minY) }
 
                 if drawRect.width <= 0 || drawRect.height <= 0 { return }
 
@@ -319,6 +316,18 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
                 // Capture inputs and compute a build key
                 let currentText = text
+
+                // Initialize highlight to the first segment on first display when tapping is enabled
+                if highlightedRange == nil && allowTokenTap {
+                    let segsInit = self.segments(for: currentText)
+                    if let first = segsInit.first {
+                        let nsFirst = NSRange(first.range, in: currentText)
+                        if nsFirst.location != NSNotFound {
+                            self.highlightedRange = nsFirst
+                        }
+                    }
+                }
+
                 let hr = highlightedRange
                 let base = parent.baseFontSize
                 let ruby = parent.rubyFontSize
@@ -364,6 +373,12 @@ struct FuriganaTextEditor: UIViewRepresentable {
                         }
                     }
                     let mutable = NSMutableAttributedString(attributedString: attributed)
+                    // iOS 17 simulator/workaround: CTRuby on UITextView can cause text to disappear.
+                    if #available(iOS 18.0, *) {
+                        // Keep CTRuby annotations on iOS 18+
+                    } else {
+                        mutable.removeAttribute(NSAttributedString.Key(kCTRubyAnnotationAttributeName as String), range: NSRange(location: 0, length: mutable.length))
+                    }
                     if !isEditable && showSegmentHighlighting {
                         applySegmentShading(to: mutable, baseText: currentText)
                     }
@@ -463,10 +478,12 @@ struct FuriganaTextEditor: UIViewRepresentable {
             }
         }
 
+
         // MARK: Tap Handling
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard let tv = gesture.view as? UITextView else { return }
             let rawPoint = gesture.location(in: tv)
+
             let point = CGPoint(x: rawPoint.x - tv.textContainerInset.left,
                                 y: rawPoint.y - tv.textContainerInset.top)
 
@@ -533,7 +550,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
             let surface = seg.surface
             let readingFromAttr = textView.textStorage.attribute(.rubyReading, at: ns.location, effectiveRange: nil) as? String
-            var reading = (readingFromAttr?.isEmpty == false) ? readingFromAttr! : SegmentReadingAttacher.reading(for: surface, tokenizer: TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic())))
+            var reading = (readingFromAttr?.isEmpty == false) ? readingFromAttr! : SegmentReadingAttacher.reading(for: surface, tokenizer: try? Tokenizer(dictionary: IPADic()))
             if surface.isKatakanaWord {
                 if reading.isEmpty {
                     reading = surface
@@ -544,7 +561,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
 
             let token = ParsedToken(surface: surface, reading: reading, meaning: nil, range: ns)
 
-            interactionLogger.info("Resolved tap to segment: index=\(line), line=\(line), surface='\(surface, privacy: .public)', reading='\(reading, privacy: .public)'")
+            interactionLogger.info("FuriganaTextEditor: Resolved tap to segment, index=\(line), line=\(line), surface='\(surface, privacy: .public)', reading='\(reading, privacy: .public)'")
 
             highlightedRange = ns
 
@@ -584,7 +601,7 @@ struct FuriganaTextEditor: UIViewRepresentable {
             let segs: [Segment]
             switch engine {
             case .dictionaryTrie:
-                if let trie = JMdictTrieCache.shared {
+                if let trie = TrieCache.shared {
                     segs = DictionarySegmenter.segment(text: text, trie: trie)
                 } else {
                     segs = AppleSegmenter.segment(text: text)

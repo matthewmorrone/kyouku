@@ -17,7 +17,7 @@ struct PasteView: View {
     private static let furiganaSymbolOn = "furigana.on"
     private static let furiganaSymbolOff = "furigana.off"
 
-    @EnvironmentObject var store: WordStore
+    @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notes: NotesStore
     @EnvironmentObject var router: AppRouter
 
@@ -52,6 +52,12 @@ struct PasteView: View {
     @AppStorage("readingFuriganaGap") private var furiganaGap: Double = 2
 
     @State private var readingOverride: ReadingOverride? = nil
+
+    @State private var splitContext: SplitContext? = nil
+    @State private var splitLeftText: String = ""
+    @State private var splitRightText: String = ""
+    @State private var splitError: String? = nil
+    @FocusState private var splitLeftFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -180,9 +186,31 @@ struct PasteView: View {
                         lookupError: $lookupError,
                         selectedEntryIndex: $selectedEntryIndex,
                         fallbackTranslation: $fallbackTranslation,
-                        onAdd: onAddDefinition
+                        onAdd: onAddDefinition,
+                        onAddCustomEntry: addCustomEntry,
+                        boundaryActions: boundaryActionsContext()
                     )
                     .environmentObject(store)
+                }
+                .sheet(item: $splitContext, onDismiss: { splitError = nil }) { context in
+                    TokenSplitEditor(
+                        originalSurface: context.token.surface,
+                        leftText: $splitLeftText,
+                        rightText: $splitRightText,
+                        errorText: $splitError,
+                        canApply: { left, right in
+                            let L = left.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let R = right.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !L.isEmpty, !R.isEmpty else { return false }
+                            return L + R == context.token.surface
+                        },
+                        onApply: { applySplit(for: context) },
+                        onCancel: { cancelSplitFlow() },
+                        showArrows: true,
+                        instructionText: "Use the arrows (or edit either field directly) to decide where the split should land."
+                    )
+                    .presentationDetents([.medium])
+                    .presentationDragIndicator(.visible)
                 }
                 .navigationDestination(isPresented: $goExtract) {
                     ExtractWordsView(text: inputText)
@@ -207,7 +235,7 @@ struct PasteView: View {
                         let rebuilt = await TokenizerBoundaryManager.rebuildSharedTrie()
                         await MainActor.run {
                             if let rebuilt {
-                                JMdictTrieCache.shared = rebuilt
+                                TrieCache.shared = rebuilt
                             }
                             boundaryVersion &+= 1
                         }
@@ -416,15 +444,44 @@ struct PasteView: View {
         }
     }
 
+    private func addCustomEntry(_ draft: DefinitionSheetContent.CustomEntryDraft) {
+        let surface = draft.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reading = draft.reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        let meaning = draft.meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard surface.isEmpty == false, meaning.isEmpty == false else { return }
+
+        // 1) Update furigana in the paste editor by applying a reading override for the selected token's range.
+        if let token = selectedToken, let range = token.range, !reading.isEmpty {
+            let override = ReadingOverride(range: range, reading: reading)
+            // Update local state so EditorContainer passes it into FuriganaTextEditor immediately
+            readingOverride = override
+            boundaryVersion &+= 1
+            // Also broadcast so any other listeners can react
+            NotificationCenter.default.post(name: .applyReadingOverride, object: override)
+        }
+
+        // 2) Update the definition card to reflect the customized values in-place, not as a separate new card.
+        if let token = selectedToken {
+            // Preserve the original range (if any) so boundary actions continue to work
+            let updated = ParsedToken(surface: surface, reading: reading, meaning: meaning, range: token.range)
+            selectedToken = updated
+            // Keep the sheet open and show the updated values
+            showingDefinition = true
+        }
+
+        // 3) Persist the customized entry to the word store as usual
+        store.add(surface: surface, reading: reading, meaning: meaning, sourceNoteID: currentNote?.id)
+    }
+
     private func onAppearHandler() {
-        if JMdictTrieCache.shared == nil {
+        if TrieCache.shared == nil {
             // Render UI immediately; build trie lazily in background
             isTrieReady = true
             Task {
-                let trie = await JMdictTrieProvider.shared.getTrie() ?? CustomTrieProvider.makeTrie()
+                let trie = await TrieProvider.shared.getTrie() ?? CustomTrieProvider.makeTrie()
                 if let trie {
                     await MainActor.run {
-                        JMdictTrieCache.shared = trie
+                        TrieCache.shared = trie
                     }
                 }
             }
@@ -666,6 +723,200 @@ struct PasteView: View {
         }
     }
 
+    private func boundaryActionsContext() -> DefinitionSheetContent.BoundaryActionContext? {
+        guard let token = selectedToken else { return nil }
+        return DefinitionSheetContent.BoundaryActionContext(
+            canCombineLeft: canCombine(token: token, direction: .left),
+            canCombineRight: canCombine(token: token, direction: .right),
+            canSplit: canSplit(token: token),
+            combineLeft: { combine(token: token, direction: .left) },
+            combineRight: { combine(token: token, direction: .right) },
+            beginSplit: { beginSplitFlow(for: token) },
+            customStatus: customBoundaryStatus(for: token)
+        )
+    }
+
+    private func customBoundaryStatus(for token: ParsedToken) -> DefinitionSheetContent.CustomStatus? {
+        let surface = token.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard surface.isEmpty == false else { return nil }
+        guard let metadata = CustomTokenizerLexicon.boundaryMetadata(for: surface) else { return nil }
+        let undo = { undoCustomBoundary(for: surface) }
+        switch metadata.kind {
+        case .merged:
+            return DefinitionSheetContent.CustomStatus(
+                kind: .merged,
+                description: "Merged word",
+                iconName: "link.badge.plus",
+                undo: undo
+            )
+        case .splitChild:
+            let descriptor: String
+            if let parentSurface = metadata.parentSurface, parentSurface.isEmpty == false {
+                descriptor = "Split from \(parentSurface)"
+            } else {
+                descriptor = "Split token"
+            }
+            return DefinitionSheetContent.CustomStatus(
+                kind: .split,
+                description: descriptor,
+                iconName: "scissors",
+                undo: undo
+            )
+        }
+    }
+
+    private func undoCustomBoundary(for surface: String) {
+        let trimmed = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+        guard let metadata = CustomTokenizerLexicon.boundaryMetadata(for: trimmed) else { return }
+        switch metadata.kind {
+        case .merged:
+            _ = CustomTokenizerLexicon.remove(word: trimmed)
+            CustomTokenizerLexicon.clearBoundaryMetadata(for: [trimmed])
+        case .splitChild:
+            let parts = metadata.components
+            for part in parts {
+                _ = CustomTokenizerLexicon.remove(word: part)
+            }
+            CustomTokenizerLexicon.clearBoundaryMetadata(for: parts)
+        }
+        TokenizerBoundaryManager.refreshSharedTrieInBackground()
+        boundaryVersion &+= 1
+        showingDefinition = false
+    }
+
+    private func canCombine(token: ParsedToken, direction: MergeDirection) -> Bool {
+        guard token.range != nil else { return false }
+        let segments = currentSegmentsForInput()
+        guard let idx = segmentIndex(for: token, in: segments) else { return false }
+        switch direction {
+        case .left: return idx > 0
+        case .right: return idx + 1 < segments.count
+        }
+    }
+
+    private func combine(token: ParsedToken, direction: MergeDirection) {
+        guard let _ = token.range else { return }
+        let segments = currentSegmentsForInput()
+        guard let idx = segmentIndex(for: token, in: segments) else { return }
+        let neighborIndex: Int
+        switch direction {
+        case .left:
+            neighborIndex = idx - 1
+        case .right:
+            neighborIndex = idx + 1
+        }
+        guard neighborIndex >= 0 && neighborIndex < segments.count else { return }
+        let leftSegment = direction == .left ? segments[neighborIndex] : segments[idx]
+        let rightSegment = direction == .left ? segments[idx] : segments[neighborIndex]
+        guard leftSegment.range.upperBound == rightSegment.range.lowerBound else { return }
+        let combinedRange = leftSegment.range.lowerBound..<rightSegment.range.upperBound
+        let combinedSurface = String(inputText[combinedRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard combinedSurface.isEmpty == false else { return }
+        _ = CustomTokenizerLexicon.add(word: combinedSurface)
+        CustomTokenizerLexicon.markMergeResult(word: combinedSurface, components: [leftSegment.surface, rightSegment.surface])
+        TokenizerBoundaryManager.refreshSharedTrieInBackground()
+        boundaryVersion &+= 1
+        showingDefinition = false
+    }
+
+    private func canSplit(token: ParsedToken) -> Bool {
+        token.surface.count >= 2
+    }
+
+    private func beginSplitFlow(for token: ParsedToken) {
+        guard canSplit(token: token) else { return }
+        splitLeftText = token.surface
+        splitRightText = ""
+        splitError = nil
+        splitContext = SplitContext(token: token)
+        showingDefinition = false
+    }
+
+    private func moveCharacterToLeft() {
+        guard splitContext != nil else { return }
+        guard let first = splitRightText.first else { return }
+        splitRightText.removeFirst()
+        splitLeftText.append(first)
+        splitError = nil
+    }
+
+    private func moveCharacterToRight() {
+        guard splitContext != nil else { return }
+        guard let last = splitLeftText.popLast() else { return }
+        splitRightText = String(last) + splitRightText
+        splitError = nil
+    }
+
+    private func canApplySplit(for context: SplitContext) -> Bool {
+        guard splitContext != nil else { return false }
+        let trimmedLeft = splitLeftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedRight = splitRightText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedLeft.isEmpty == false, trimmedRight.isEmpty == false else { return false }
+        return trimmedLeft + trimmedRight == context.token.surface
+    }
+
+    private func applySplit(for context: SplitContext) {
+        guard canApplySplit(for: context) else {
+            splitError = "Choose a boundary that keeps both sides non-empty."
+            return
+        }
+        let left = splitLeftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = splitRightText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard left + right == context.token.surface else {
+            splitError = "The pieces must reconstruct the original token."
+            return
+        }
+        _ = CustomTokenizerLexicon.remove(word: context.token.surface)
+        if left.count > 0 { _ = CustomTokenizerLexicon.add(word: left) }
+        if right.count > 0 { _ = CustomTokenizerLexicon.add(word: right) }
+        CustomTokenizerLexicon.markSplitChildren(parentSurface: context.token.surface, parts: [left, right])
+        TokenizerBoundaryManager.refreshSharedTrieInBackground()
+        boundaryVersion &+= 1
+        splitContext = nil
+        splitLeftText = ""
+        splitRightText = ""
+        splitError = nil
+        showingDefinition = false
+    }
+
+    private func cancelSplitFlow() {
+        splitContext = nil
+        splitLeftText = ""
+        splitRightText = ""
+        splitError = nil
+    }
+
+    private func currentSegmentsForInput() -> [Segment] {
+        let engine = SegmentationEngine.current()
+        switch engine {
+        case .dictionaryTrie:
+            if let trie = TrieCache.shared {
+                return DictionarySegmenter.segment(text: inputText, trie: trie)
+            } else {
+                return AppleSegmenter.segment(text: inputText)
+            }
+        case .appleTokenizer:
+            return AppleSegmenter.segment(text: inputText)
+        }
+    }
+
+    private func segmentIndex(for token: ParsedToken, in segments: [Segment]) -> Int? {
+        guard let range = token.range else { return nil }
+        for (idx, seg) in segments.enumerated() {
+            let ns = NSRange(seg.range, in: inputText)
+            if ns == range {
+                return idx
+            }
+        }
+        return nil
+    }
+
+    private enum MergeDirection {
+        case left
+        case right
+    }
+
     private struct EditorContainer: View {
         @Binding var text: String
         var showFurigana: Bool
@@ -736,6 +987,11 @@ struct PasteView: View {
             .clipped()
         }
     }
+}
+
+private struct SplitContext: Identifiable {
+    let id = UUID()
+    let token: ParsedToken
 }
 
 private struct ControlCell<Content: View>: View {

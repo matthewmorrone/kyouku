@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct NoteDetailView: View {
-    @EnvironmentObject var store: WordStore
+    @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notesStore: NotesStore
     let note: Note
 
@@ -215,7 +215,7 @@ struct NoteDetailView: View {
                     segVM?.text = initialText
                     segVM?.recomputeSegments()
                 }
-            } else if let trie = JMdictTrieCache.shared {
+            } else if let trie = TrieCache.shared {
                 if segVM == nil {
                     segVM = SegmentedTextViewModel(text: initialText, trie: trie)
                 } else {
@@ -225,10 +225,10 @@ struct NoteDetailView: View {
                 }
             } else {
                 Task {
-                    let trie = await JMdictTrieProvider.shared.getTrie() ?? CustomTrieProvider.makeTrie()
+                    let trie = await TrieProvider.shared.getTrie() ?? CustomTrieProvider.makeTrie()
                     if let trie {
                         await MainActor.run {
-                            JMdictTrieCache.shared = trie
+                            TrieCache.shared = trie
                             if segVM == nil {
                                 segVM = SegmentedTextViewModel(text: initialText, trie: trie)
                             } else {

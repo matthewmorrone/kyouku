@@ -1,10 +1,12 @@
-import Foundation
+//
+//  Trie.swift
+//  kyouku
+//
+//  Created by Matthew Morrone on 12/21/25.
+//
 
-public struct TrieToken: Hashable {
-    public let text: String
-    public let range: Range<String.Index>
-    public let isWord: Bool
-}
+
+import Foundation
 
 public final class Trie {
     public final class Node {

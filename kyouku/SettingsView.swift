@@ -10,7 +10,7 @@ import Combine
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
-    @EnvironmentObject private var store: WordStore
+    @EnvironmentObject private var store: WordsStore
     @EnvironmentObject private var notesStore: NotesStore
 
     @AppStorage("readingTextSize") private var textSize: Double = 17

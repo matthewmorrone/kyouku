@@ -1,7 +1,7 @@
 import Foundation
 
-actor JMdictTrieProvider {
-    static let shared = JMdictTrieProvider()
+actor TrieProvider {
+    static let shared = TrieProvider()
 
     private var cached: Trie?
     private var isBuilding = false

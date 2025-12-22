@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct FlashcardsView: View {
-    @EnvironmentObject var store: WordStore
+    @EnvironmentObject var store: WordsStore
 
     @State private var session: [Word] = []
     @State private var sessionSource: [Word] = []

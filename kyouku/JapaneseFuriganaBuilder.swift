@@ -176,7 +176,7 @@ enum JapaneseFuriganaBuilder {
 
         if let fixedSegments = segments {
             // Use caller-provided segments to keep boundaries stable; MeCab only for readings
-            if let mecab = TokenizerFactory.make() ?? tokenizer() {
+            if let mecab = tokenizer() {
                 let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: fixedSegments, tokenizer: mecab)
                 for item in enriched {
                     if !item.segment.surface.containsKanji { continue }
@@ -190,8 +190,8 @@ enum JapaneseFuriganaBuilder {
             }
         } else {
             let engine = SegmentationEngine.current()
-            if engine == .dictionaryTrie, let trie = JMdictTrieCache.shared, !forceMeCabOnly {
-                let mecab = TokenizerFactory.make() ?? tokenizer()
+            if engine == .dictionaryTrie, let trie = TrieCache.shared, !forceMeCabOnly {
+                let mecab = tokenizer()
                 if let mecab {
                     let segments = DictionarySegmenter.segment(text: text, trie: trie)
                     let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: segments, tokenizer: mecab)
@@ -204,7 +204,7 @@ enum JapaneseFuriganaBuilder {
                     }
                 }
             } else if engine == .appleTokenizer, !forceMeCabOnly {
-                let mecab = TokenizerFactory.make() ?? tokenizer()
+                let mecab = tokenizer()
                 if let mecab {
                     let appleSegments = AppleSegmenter.segment(text: text)
                     let enriched = SegmentReadingAttacher.attachReadings(text: text, segments: appleSegments, tokenizer: mecab)
@@ -218,7 +218,7 @@ enum JapaneseFuriganaBuilder {
                 }
             } else {
                 // Fallback: no trie yet — use MeCab-only tokenization to attach ruby per annotation
-                if let mecab = TokenizerFactory.make() ?? tokenizer() {
+                if let mecab = tokenizer() {
                     let anns = mecab.tokenize(text: text)
                     for a in anns {
                         let surface = String(text[a.range])
@@ -289,7 +289,7 @@ enum JapaneseFuriganaBuilder {
     }
 
     private static func fillMissingRubyTargets(_ targets: inout [(NSRange, String)], text: String) {
-        guard let mecab = TokenizerFactory.make() ?? tokenizer() else { return }
+        guard let mecab = tokenizer() else { return }
 
         var covered = IndexSet()
         for (range, _) in targets {

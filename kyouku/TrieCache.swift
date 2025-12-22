@@ -1,5 +1,5 @@
 import Foundation
 
-enum JMdictTrieCache {
+enum TrieCache {
     static var shared: Trie? = nil
 }

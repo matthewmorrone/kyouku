@@ -85,11 +85,11 @@ final class WordsImportViewModel: ObservableObject {
         case .pipe:
             delimiterToUse = "|"
         }
-        let items = WordImporter.parseItems(fromString: text, delimiter: delimiterToUse)
+        let items = WordsImport.parseItems(fromString: text, delimiter: delimiterToUse)
         updatePreviewItems(from: items)
     }
     
-    func updatePreviewItems(from importerItems: [WordImporter.ImportItem]) {
+    func updatePreviewItems(from importerItems: [WordsImport.ImportItem]) {
         previewItems = importerItems.map { item in
             WordsImportPreviewItem(
                 id: item.id,
@@ -107,8 +107,8 @@ final class WordsImportViewModel: ObservableObject {
     
     @MainActor
     func fillMissingForPreviewItems() async {
-        var items = previewItems.map { preview -> WordImporter.ImportItem in
-            WordImporter.ImportItem(
+        var items = previewItems.map { preview -> WordsImport.ImportItem in
+            WordsImport.ImportItem(
                 lineNumber: preview.lineNumber,
                 providedSurface: preview.providedSurface,
                 providedReading: preview.providedReading,
@@ -119,20 +119,20 @@ final class WordsImportViewModel: ObservableObject {
                 computedMeaning: preview.computedMeaning
             )
         }
-        await WordImporter.fillMissing(items: &items, preferKanaOnly: preferKanaOnly)
+        await WordsImport.fillMissing(items: &items, preferKanaOnly: preferKanaOnly)
         updatePreviewItems(from: items)
     }
     
     func finalizePreviewItems() -> [(surface: String, reading: String, meaning: String, note: String?)] {
-        let prepared = WordImporter.finalize(items: toImporterItems(previewItems), preferKanaOnly: preferKanaOnly)
+        let prepared = WordsImport.finalize(items: toImporterItems(previewItems), preferKanaOnly: preferKanaOnly)
         return prepared.map { ($0.surface, $0.reading, $0.meaning, $0.note) }
     }
     
     // MARK: - Private helpers
     
-    private func toImporterItems(_ previewItems: [WordsImportPreviewItem]) -> [WordImporter.ImportItem] {
+    private func toImporterItems(_ previewItems: [WordsImportPreviewItem]) -> [WordsImport.ImportItem] {
         previewItems.map { preview in
-            WordImporter.ImportItem(
+            WordsImport.ImportItem(
                 lineNumber: preview.lineNumber,
                 providedSurface: preview.providedSurface,
                 providedReading: preview.providedReading,

@@ -38,7 +38,7 @@ It allows users to paste Japanese text, automatically parse it, save notes, insp
 - Word list has delete support.
 
 ### 2.5 Dictionary Integration (SQLite JMdict)
-- Bundled `jmdict.sqlite3` database.
+- Bundled `dictionary.sqlite3` database.
 - Lookup performed by lemma/reading/surface.
 - Returns headword, reading, glosses.
 - Used in Note Detail and Words views.

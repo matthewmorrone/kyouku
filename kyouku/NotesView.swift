@@ -10,7 +10,7 @@ import SwiftUI
 struct NotesView: View {
     @EnvironmentObject var notesStore: NotesStore
     @EnvironmentObject var router: AppRouter
-    @EnvironmentObject var store: WordStore
+    @EnvironmentObject var store: WordsStore
     @State private var pendingDeleteOffsets: IndexSet? = nil
     @State private var showDeleteAlert: Bool = false
     @State private var pendingDeleteHasAssociatedWords: Bool = false
@@ -26,9 +26,6 @@ struct NotesView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("No notes yet")
                                 .font(.headline)
-                            Text("Workflow: paste text → save note → pick words → study.")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 8)
                     }

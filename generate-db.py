@@ -13,6 +13,8 @@ import sqlite3
 JSON_PATH = "jmdict-eng-3.6.1.json"
 DB_PATH = "dictionary.sqlite3"
 SURFACE_TOKEN_MAX_LEN = 10
+FNV_OFFSET_BASIS_64 = 14695981039346656037
+FNV_PRIME_64 = 1099511628211
 
 # -----------------------------
 # PRECHECKS
@@ -81,6 +83,7 @@ CREATE TABLE senses (
 CREATE TABLE glosses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sense_id INTEGER NOT NULL REFERENCES senses(id) ON DELETE CASCADE,
+    entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
     order_index INTEGER NOT NULL,
     lang TEXT NOT NULL,
     text TEXT NOT NULL
@@ -100,17 +103,17 @@ CREATE VIRTUAL TABLE glosses_fts USING fts5(
 );
 
 CREATE TABLE surface_index (
-    token TEXT NOT NULL,
+    token_hash INTEGER NOT NULL,
     entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
     source TEXT NOT NULL CHECK(source IN ('kanji', 'reading')),
-    PRIMARY KEY (token, entry_id, source)
+    PRIMARY KEY (token_hash, entry_id, source)
 );
 
 CREATE INDEX idx_kanji_text ON kanji(text);
 CREATE INDEX idx_readings_text ON readings(text);
 CREATE INDEX idx_glosses_text ON glosses(text);
 CREATE INDEX idx_english_index_token ON english_index(token);
-CREATE INDEX idx_surface_index_token ON surface_index(token);
+CREATE INDEX idx_surface_index_hash ON surface_index(token_hash);
 """
 )
 
@@ -163,11 +166,22 @@ def surface_tokens(text, max_len=SURFACE_TOKEN_MAX_LEN):
             tokens.add(segment)
     return tokens
 
+def surface_token_hash(value: str) -> int:
+    h = FNV_OFFSET_BASIS_64
+    for ch in value:
+        h ^= ord(ch)
+        h = (h * FNV_PRIME_64) & 0xFFFFFFFFFFFFFFFF
+    # Convert to signed 64-bit range for SQLite storage
+    if h >= (1 << 63):
+        h -= 1 << 64
+    return h
+
 def insert_surface_tokens(entry_id, text, source):
     for token in surface_tokens(text):
+        hashed = surface_token_hash(token)
         cur.execute(
-            "INSERT OR IGNORE INTO surface_index (token, entry_id, source) VALUES (?, ?, ?)",
-            (token, entry_id, source),
+            "INSERT OR IGNORE INTO surface_index (token_hash, entry_id, source) VALUES (?, ?, ?)",
+            (hashed, entry_id, source),
         )
 
 # -----------------------------
@@ -208,7 +222,8 @@ for i, w in enumerate(words, 1):
             "INSERT INTO kanji (entry_id, text, is_common, tags) VALUES (?, ?, ?, ?)",
             (entry_id, text, 1 if k.get("common") else 0, join_or_none(tags)),
         )
-        insert_surface_tokens(entry_id, text, "kanji")
+        if is_common:
+            insert_surface_tokens(entry_id, text, "kanji")
 
     # Insert readings
     for k in kana_list:
@@ -220,7 +235,8 @@ for i, w in enumerate(words, 1):
             "INSERT INTO readings (entry_id, text, is_common, tags) VALUES (?, ?, ?, ?)",
             (entry_id, text, 1 if k.get("common") else 0, join_or_none(tags)),
         )
-        insert_surface_tokens(entry_id, text, "reading")
+        if is_common:
+            insert_surface_tokens(entry_id, text, "reading")
 
     # Insert senses + glosses
     for s_idx, s in enumerate(sense_list):
@@ -241,8 +257,8 @@ for i, w in enumerate(words, 1):
                 continue
             lang = g.get("lang") or "eng"
             cur.execute(
-                "INSERT INTO glosses (sense_id, order_index, lang, text) VALUES (?, ?, ?, ?)",
-                (sense_id, g_idx, lang, text),
+                "INSERT INTO glosses (sense_id, entry_id, order_index, lang, text) VALUES (?, ?, ?, ?, ?)",
+                (sense_id, entry_id, g_idx, lang, text),
             )
             gloss_id = cur.lastrowid
             cur.execute(
@@ -267,6 +283,8 @@ for i, w in enumerate(words, 1):
 # FINALIZE
 # -----------------------------
 conn.commit()
+print("Running VACUUM (this may take a while)...")
+conn.execute("VACUUM;")
 cur.close()
 conn.close()
 

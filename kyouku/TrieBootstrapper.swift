@@ -12,9 +12,9 @@ enum TrieBootstrapper {
         guard !didStart else { return }
         didStart = true
         Task {
-            let trie = await JMdictTrieProvider.shared.getTrie() ?? CustomTrieProvider.makeTrie()
+            let trie = await TrieProvider.shared.getTrie() ?? CustomTrieProvider.makeTrie()
             await MainActor.run {
-                JMdictTrieCache.shared = trie
+                TrieCache.shared = trie
             }
         }
     }

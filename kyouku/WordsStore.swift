@@ -9,7 +9,7 @@ import Foundation
 import SwiftUI
 import Combine
 
-final class WordStore: ObservableObject {
+final class WordsStore: ObservableObject {
     @Published private(set) var words: [Word] = []
     
     private let fileName = "words.json"

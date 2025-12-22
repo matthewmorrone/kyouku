@@ -4,9 +4,9 @@ enum TokenizerBoundaryManager {
     /// Rebuilds the JMdict trie (including custom boundaries) and updates the shared cache.
     @discardableResult
     static func rebuildSharedTrie() async -> Trie? {
-        let rebuilt = await JMdictTrieProvider.shared.rebuildNow()
+        let rebuilt = await TrieProvider.shared.rebuildNow()
         await MainActor.run {
-            JMdictTrieCache.shared = rebuilt
+            TrieCache.shared = rebuilt
         }
         return rebuilt
     }

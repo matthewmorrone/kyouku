@@ -4,7 +4,7 @@ struct ImportPasteSheetView: View {
     @Binding var importRawText: String
     @Binding var isImportingWords: Bool
     @Binding var delimiterSelection: WordsDelimiterChoice
-    var onPreview: ([WordImporter.ImportItem]) -> Void
+    var onPreview: ([WordsImport.ImportItem]) -> Void
     var onClose: () -> Void
 
     var body: some View {
@@ -43,8 +43,8 @@ struct ImportPasteSheetView: View {
                         let text = importRawText
                         let delimiter = delimiterSelection.character
                         let items = (delimiter == nil)
-                            ? WordImporter.parseItems(fromString: text)
-                            : WordImporter.parseItems(fromString: text, delimiter: delimiter)
+                            ? WordsImport.parseItems(fromString: text)
+                            : WordsImport.parseItems(fromString: text, delimiter: delimiter)
                         onPreview(items)
                         onClose()
                     } label: {

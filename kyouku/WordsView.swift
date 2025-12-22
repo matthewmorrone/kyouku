@@ -13,20 +13,9 @@ import UIKit
 fileprivate let wordsLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Words")
 
 /// Preference key used to collect the frames of word rows by their UUID.
-private struct WordRowFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [UUID: CGRect] = [:]
-
-    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
-        // Merge dictionaries, preferring the most recent value for duplicate keys
-        let new = nextValue()
-        for (k, v) in new {
-            value[k] = v
-        }
-    }
-}
 
 struct WordsView: View {
-    @EnvironmentObject var store: WordStore
+    @EnvironmentObject var store: WordsStore
     @State private var selectedWordIDs: Set<UUID> = []
     @State private var isSelecting: Bool = false
     @State private var searchText: String = ""

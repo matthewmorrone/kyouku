@@ -16,28 +16,16 @@ struct DictionaryEntry: Identifiable, Hashable {
     let isCommon: Bool
 }
 
-enum DictionarySQLiteError: Error, CustomStringConvertible {
-    case resourceNotFound
-    case openFailed(String)
-    case prepareFailed(String)
 
-    var description: String {
-        switch self {
-        case .resourceNotFound:
-            return "jmdict.sqlite3 not found in app bundle."
-        case .openFailed(let msg):
-            return "Failed to open SQLite DB: \(msg)"
-        case .prepareFailed(let msg):
-            return "Failed to prepare SQLite statement: \(msg)"
-        }
-    }
-}
 
 actor DictionarySQLiteStore {
     static let shared = DictionarySQLiteStore()
 
     private var db: OpaquePointer?
     private let surfaceTokenMaxLength = 10
+    private var hasGlossesFTS = false
+    private var hasSurfaceIndex = false
+    private var surfaceIndexUsesHash = false
 
     private init() {
         self.db = nil
@@ -53,32 +41,32 @@ actor DictionarySQLiteStore {
         }
 
         let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
+        guard !trimmed.isEmpty else {
             return []
         }
 
-        // 1) Exact match on kanji/readings
-        var results = try selectEntries(matching: trimmed, limit: limit)
+        let normalized = normalizeFullWidthASCII(trimmed)
+
+        // 1) Exact match on kanji/readings + simple conjugation fallbacks
+        var results = try queryExactMatches(for: normalized, limit: limit)
         if !results.isEmpty { return results }
 
         // 2) If input looks like Latin (romaji), try converting to kana and match readings
-        let latinSet = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '-").inverted
-        if trimmed.rangeOfCharacter(from: latinSet) == nil {
-            let kanaCandidates = latinToKanaCandidates(for: trimmed)
+        let allowedLatin = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '-")
+        if normalized.rangeOfCharacter(from: allowedLatin.inverted) == nil {
+            let kanaCandidates = latinToKanaCandidates(for: normalized)
             for cand in kanaCandidates where !cand.isEmpty {
-                results = try selectEntries(matching: cand, limit: limit)
+                results = try queryExactMatches(for: cand, limit: limit)
                 if !results.isEmpty { return results }
             }
         }
 
         // 2b) Surface substring match via indexed tokens if no hits yet
-        if results.isEmpty {
-            results = try selectEntriesBySurfaceToken(matching: trimmed, limit: limit)
-            if !results.isEmpty { return results }
-        }
+        results = try selectEntriesBySurfaceToken(matching: normalized, limit: limit)
+        if !results.isEmpty { return results }
 
         // 3) English gloss search via FTS
-        results = try selectEntriesByGloss(matching: trimmed, limit: limit)
+        results = try selectEntriesByGloss(matching: normalized, limit: limit)
         return results
     }
 
@@ -89,6 +77,14 @@ actor DictionarySQLiteStore {
         // We keep the work inside the actor; since callers are often on @MainActor,
         // the `await` prevents blocking UI.
         try lookupSync(term: term, limit: limit)
+    }
+
+    private func queryExactMatches(for term: String, limit: Int) throws -> [DictionaryEntry] {
+        for candidate in exactMatchCandidates(for: term) {
+            let rows = try selectEntries(matching: candidate, limit: limit)
+            if !rows.isEmpty { return rows }
+        }
+        return []
     }
 
     func listAllSurfaceForms() async throws -> [String] {
@@ -120,7 +116,7 @@ actor DictionarySQLiteStore {
             return
         }
 
-        guard let url = Bundle.main.url(forResource: "jmdict", withExtension: "sqlite3") else {
+        guard let url = Bundle.main.url(forResource: "dictionary", withExtension: "sqlite3") else {
             throw DictionarySQLiteError.resourceNotFound
         }
 
@@ -134,6 +130,7 @@ actor DictionarySQLiteStore {
         }
 
         self.db = handle
+        refreshOptionalIndexes()
     }
 
     private func selectEntries(matching term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -191,6 +188,7 @@ actor DictionarySQLiteStore {
     }
 
     private func selectEntriesByGloss(matching term: String, limit: Int) throws -> [DictionaryEntry] {
+        guard hasGlossesFTS else { return [] }
         guard let db else { return [] }
         guard let ftsQuery = buildFTSQuery(from: term) else { return [] }
         let sql = """
@@ -247,11 +245,46 @@ actor DictionarySQLiteStore {
     }
 
     private func selectEntriesBySurfaceToken(matching term: String, limit: Int) throws -> [DictionaryEntry] {
+        guard hasSurfaceIndex else { return [] }
         guard let db else { return [] }
-        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-        guard trimmed.count <= surfaceTokenMaxLength else { return [] }
-        let sql = """
+        let sanitized = sanitizeSurfaceToken(term)
+        guard !sanitized.isEmpty else { return [] }
+        guard sanitized.count <= surfaceTokenMaxLength else { return [] }
+        let sql: String
+        if surfaceIndexUsesHash {
+            sql = """
+        WITH matched AS (
+            SELECT entry_id
+            FROM surface_index
+            WHERE token_hash = ?1
+            GROUP BY entry_id
+            LIMIT ?2
+        )
+        SELECT e.id,
+               COALESCE((SELECT k.text
+                         FROM kanji k
+                         WHERE k.entry_id = e.id
+                         ORDER BY k.is_common DESC, k.id ASC
+                         LIMIT 1), '') AS kanji_text,
+               COALESCE((SELECT r.text
+                         FROM readings r
+                         WHERE r.entry_id = e.id
+                         ORDER BY r.is_common DESC, r.id ASC
+                         LIMIT 1), '') AS reading_text,
+               COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
+                         FROM senses s
+                         JOIN glosses g ON g.sense_id = s.id
+                         WHERE s.entry_id = e.id), '') AS gloss_text,
+               CASE
+                 WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
+                   OR EXISTS (SELECT 1 FROM readings r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
+               THEN 1 ELSE 0 END AS is_common_flag
+        FROM entries e
+        JOIN matched m ON m.entry_id = e.id
+        LIMIT ?2;
+        """
+        } else {
+            sql = """
         WITH matched AS (
             SELECT entry_id
             FROM surface_index
@@ -282,6 +315,7 @@ actor DictionarySQLiteStore {
         JOIN matched m ON m.entry_id = e.id
         LIMIT ?2;
         """
+        }
 
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
@@ -289,7 +323,12 @@ actor DictionarySQLiteStore {
         }
         defer { sqlite3_finalize(stmt) }
 
-        sqlite3_bind_text(stmt, 1, trimmed, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        if surfaceIndexUsesHash {
+            let hash = surfaceTokenHash(sanitized)
+            sqlite3_bind_int64(stmt, 1, hash)
+        } else {
+            sqlite3_bind_text(stmt, 1, sanitized, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
         var rows: [DictionaryEntry] = []
@@ -332,6 +371,60 @@ actor DictionarySQLiteStore {
         guard !tokens.isEmpty else { return nil }
         let prefixed = tokens.map { "\($0)*" }
         return prefixed.joined(separator: " AND ")
+    }
+
+    private func surfaceTokenHash(_ text: String) -> Int64 {
+        let fnvOffset: UInt64 = 0xcbf29ce484222325
+        let fnvPrime: UInt64 = 0x100000001b3
+        var hash = fnvOffset
+        for scalar in text.unicodeScalars {
+            hash ^= UInt64(scalar.value)
+            hash &*= fnvPrime
+        }
+        return Int64(bitPattern: hash)
+    }
+
+    private func refreshOptionalIndexes() {
+        guard let db else {
+            hasGlossesFTS = false
+            hasSurfaceIndex = false
+            return
+        }
+        hasGlossesFTS = tableExists("glosses_fts", in: db)
+        hasSurfaceIndex = tableExists("surface_index", in: db)
+        if hasSurfaceIndex {
+            surfaceIndexUsesHash = tableHasColumn("surface_index", column: "token_hash", in: db)
+        } else {
+            surfaceIndexUsesHash = false
+        }
+    }
+
+    private func tableExists(_ name: String, in db: OpaquePointer) -> Bool {
+        let sql = "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?1 LIMIT 1;"
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, name, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func tableHasColumn(_ table: String, column: String, in db: OpaquePointer) -> Bool {
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA table_info(\(table));", -1, &stmt, nil) != SQLITE_OK {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let namePtr = sqlite3_column_text(stmt, 1) {
+                let name = String(cString: namePtr)
+                if name == column {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private func romanToHiragana(_ input: String) -> String {
@@ -458,6 +551,134 @@ actor DictionarySQLiteStore {
         let kata = hiraganaToKatakana(hira)
         if !kata.isEmpty { result.insert(kata) }
         return Array(result)
+    }
+
+    private func exactMatchCandidates(for term: String) -> [String] {
+        var ordered: [String] = []
+        var seen = Set<String>()
+        func append(_ value: String) {
+            if seen.insert(value).inserted {
+                ordered.append(value)
+            }
+        }
+        append(term)
+        for variant in normalizedKanaVariants(for: term) {
+            append(variant)
+        }
+        return ordered
+    }
+
+    private func normalizedKanaVariants(for term: String) -> [String] {
+        let hiragana = katakanaToHiragana(term)
+        guard containsOnlyKana(hiragana) else { return [] }
+
+        var bases = Set<String>()
+        let adjectiveSuffixes: [(String, String)] = [
+            ("くなかったです", "い"),
+            ("くなかった", "い"),
+            ("くないです", "い"),
+            ("くない", "い"),
+            ("かったです", "い"),
+            ("かった", "い")
+        ]
+        for (suffix, replacement) in adjectiveSuffixes {
+            if hiragana.hasSuffix(suffix), hiragana.count > suffix.count {
+                let base = String(hiragana.dropLast(suffix.count)) + replacement
+                bases.insert(base)
+            }
+        }
+
+        let verbTeForms = ["している", "してます", "していた", "してる"]
+        for suffix in verbTeForms {
+            if hiragana.hasSuffix(suffix), hiragana.count > suffix.count {
+                let base = String(hiragana.dropLast(suffix.count)) + "する"
+                bases.insert(base)
+            }
+        }
+
+        let baseSnapshot = bases
+        for base in baseSnapshot where base.hasSuffix("する") {
+            let noun = String(base.dropLast(2))
+            if noun.isEmpty == false {
+                bases.insert(noun)
+            }
+        }
+
+        guard bases.isEmpty == false else { return [] }
+
+        var variants: [String] = []
+        var seen = Set<String>()
+        for base in bases {
+            if seen.insert(base).inserted { variants.append(base) }
+            let kata = hiraganaToKatakana(base)
+            if seen.insert(kata).inserted { variants.append(kata) }
+        }
+        return variants
+    }
+
+    private func containsOnlyKana(_ text: String) -> Bool {
+        guard text.isEmpty == false else { return false }
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x3040...0x309F, // Hiragana
+                 0x30A0...0x30FF, // Katakana
+                 0xFF66...0xFF9F, // Half-width katakana
+                 0x30FC,          // Long vowel mark
+                 0x3005:          // Iteration mark
+                continue
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    private func katakanaToHiragana(_ s: String) -> String {
+        let m = NSMutableString(string: s)
+        CFStringTransform(m, nil, kCFStringTransformHiraganaKatakana, true)
+        return String(m)
+    }
+
+    private func normalizeFullWidthASCII(_ text: String) -> String {
+        var scalars: [UnicodeScalar] = []
+        scalars.reserveCapacity(text.count)
+        var changed = false
+        for scalar in text.unicodeScalars {
+            if (0xFF01...0xFF5E).contains(scalar.value),
+               let converted = UnicodeScalar(scalar.value - 0xFEE0) {
+                scalars.append(converted)
+                changed = true
+            } else {
+                scalars.append(scalar)
+            }
+        }
+        if !changed { return text }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
+    private func sanitizeSurfaceToken(_ term: String) -> String {
+        let allowedRanges: [ClosedRange<UInt32>] = [
+            0x0030...0x0039, // ASCII digits
+            0x0041...0x005A, // ASCII upper
+            0x0061...0x007A, // ASCII lower
+            0x3040...0x309F, // Hiragana
+            0x30A0...0x30FF, // Katakana
+            0x3400...0x4DBF, // CJK Ext A
+            0x4E00...0x9FFF, // CJK Unified
+            0xFF66...0xFF9F  // Half-width katakana
+        ]
+        var scalars: [UnicodeScalar] = []
+        for scalar in term.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) { continue }
+            if scalar == "ー" || scalar == "々" {
+                scalars.append(scalar)
+                continue
+            }
+            if allowedRanges.contains(where: { $0.contains(scalar.value) }) {
+                scalars.append(scalar)
+            }
+        }
+        return String(String.UnicodeScalarView(scalars))
     }
 
     func close() {

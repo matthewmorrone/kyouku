@@ -7,76 +7,20 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		E30C34DC2EE8BE1B008118E4 /* FlashcardsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34DB2EE8BE1B008118E4 /* FlashcardsView.swift */; };
-		E30C34DE2EE8BF28008118E4 /* ReviewPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34DD2EE8BF28008118E4 /* ReviewPersistence.swift */; };
-		E30C34E02EE8EB37008118E4 /* AppRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34DF2EE8EB37008118E4 /* AppRouter.swift */; };
-		E30C34E22EE91171008118E4 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34E12EE91171008118E4 /* AppGroup.swift */; };
-		E30C34E42EE91175008118E4 /* SharedWordsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34E32EE91175008118E4 /* SharedWordsStore.swift */; };
-		E30C34E62EE9117E008118E4 /* KyoukuWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = E30C34E52EE9117E008118E4 /* KyoukuWidget.swift */; };
 		E392E5502EE816450069963A /* CharacterFilter in Frameworks */ = {isa = PBXBuildFile; productRef = E392E54F2EE816450069963A /* CharacterFilter */; };
 		E392E5522EE816450069963A /* IPADic in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5512EE816450069963A /* IPADic */; };
 		E392E5542EE816450069963A /* Mecab-Swift in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5532EE816450069963A /* Mecab-Swift */; };
 		E392E5562EE816450069963A /* StringTools in Frameworks */ = {isa = PBXBuildFile; productRef = E392E5552EE816450069963A /* StringTools */; };
-		E3C5BDBB2EEB022800CD4F47 /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E3C5BDB12EEB022800CD4F47 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
-/* Begin PBXContainerItemProxy section */
-		E3C5BDB92EEB022800CD4F47 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = E392E5222EE804A50069963A /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = E3C5BDB02EEB022800CD4F47;
-			remoteInfo = ShareExtension;
-		};
-/* End PBXContainerItemProxy section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		E3C5BDC02EEB022800CD4F47 /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				E3C5BDBB2EEB022800CD4F47 /* ShareExtension.appex in Embed Foundation Extensions */,
-			);
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
-
 /* Begin PBXFileReference section */
-		E30C34DB2EE8BE1B008118E4 /* FlashcardsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashcardsView.swift; sourceTree = "<group>"; };
-		E30C34DD2EE8BF28008118E4 /* ReviewPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPersistence.swift; sourceTree = "<group>"; };
-		E30C34DF2EE8EB37008118E4 /* AppRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRouter.swift; sourceTree = "<group>"; };
-		E30C34E12EE91171008118E4 /* AppGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroup.swift; sourceTree = "<group>"; };
-		E30C34E32EE91175008118E4 /* SharedWordsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedWordsStore.swift; sourceTree = "<group>"; };
-		E30C34E52EE9117E008118E4 /* KyoukuWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KyoukuWidget.swift; sourceTree = "<group>"; };
 		E392E52A2EE804A50069963A /* kyouku.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = kyouku.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		E3C5BDB12EEB022800CD4F47 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		E3C5BDBC2EEB022800CD4F47 /* Exceptions for "ShareExtension" folder in "ShareExtension" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = E3C5BDB02EEB022800CD4F47 /* ShareExtension */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		E392E52C2EE804A50069963A /* kyouku */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = kyouku;
-			sourceTree = "<group>";
-		};
-		E3C5BDB22EEB022800CD4F47 /* ShareExtension */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				E3C5BDBC2EEB022800CD4F47 /* Exceptions for "ShareExtension" folder in "ShareExtension" target */,
-			);
-			path = ShareExtension;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -93,13 +37,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		E3C5BDAE2EEB022800CD4F47 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -107,14 +44,7 @@
 			isa = PBXGroup;
 			children = (
 				E392E52C2EE804A50069963A /* kyouku */,
-				E3C5BDB22EEB022800CD4F47 /* ShareExtension */,
 				E392E52B2EE804A50069963A /* Products */,
-				E30C34DB2EE8BE1B008118E4 /* FlashcardsView.swift */,
-				E30C34DD2EE8BF28008118E4 /* ReviewPersistence.swift */,
-				E30C34DF2EE8EB37008118E4 /* AppRouter.swift */,
-				E30C34E12EE91171008118E4 /* AppGroup.swift */,
-				E30C34E32EE91175008118E4 /* SharedWordsStore.swift */,
-				E30C34E52EE9117E008118E4 /* KyoukuWidget.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -122,7 +52,6 @@
 			isa = PBXGroup;
 			children = (
 				E392E52A2EE804A50069963A /* kyouku.app */,
-				E3C5BDB12EEB022800CD4F47 /* ShareExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -137,12 +66,10 @@
 				E392E5262EE804A50069963A /* Sources */,
 				E392E5272EE804A50069963A /* Frameworks */,
 				E392E5282EE804A50069963A /* Resources */,
-				E3C5BDC02EEB022800CD4F47 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				E3C5BDBA2EEB022800CD4F47 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				E392E52C2EE804A50069963A /* kyouku */,
@@ -158,28 +85,6 @@
 			productReference = E392E52A2EE804A50069963A /* kyouku.app */;
 			productType = "com.apple.product-type.application";
 		};
-		E3C5BDB02EEB022800CD4F47 /* ShareExtension */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = E3C5BDBD2EEB022800CD4F47 /* Build configuration list for PBXNativeTarget "ShareExtension" */;
-			buildPhases = (
-				E3C5BDAD2EEB022800CD4F47 /* Sources */,
-				E3C5BDAE2EEB022800CD4F47 /* Frameworks */,
-				E3C5BDAF2EEB022800CD4F47 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				E3C5BDB22EEB022800CD4F47 /* ShareExtension */,
-			);
-			name = ShareExtension;
-			packageProductDependencies = (
-			);
-			productName = ShareExtension;
-			productReference = E3C5BDB12EEB022800CD4F47 /* ShareExtension.appex */;
-			productType = "com.apple.product-type.app-extension";
-		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -191,9 +96,6 @@
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
 					E392E5292EE804A50069963A = {
-						CreatedOnToolsVersion = 26.1.1;
-					};
-					E3C5BDB02EEB022800CD4F47 = {
 						CreatedOnToolsVersion = 26.1.1;
 					};
 				};
@@ -216,20 +118,12 @@
 			projectRoot = "";
 			targets = (
 				E392E5292EE804A50069963A /* kyouku */,
-				E3C5BDB02EEB022800CD4F47 /* ShareExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		E392E5282EE804A50069963A /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		E3C5BDAF2EEB022800CD4F47 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -243,31 +137,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E30C34E22EE91171008118E4 /* AppGroup.swift in Sources */,
-				E30C34E62EE9117E008118E4 /* KyoukuWidget.swift in Sources */,
-				E30C34E02EE8EB37008118E4 /* AppRouter.swift in Sources */,
-				E30C34DE2EE8BF28008118E4 /* ReviewPersistence.swift in Sources */,
-				E30C34DC2EE8BE1B008118E4 /* FlashcardsView.swift in Sources */,
-				E30C34E42EE91175008118E4 /* SharedWordsStore.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		E3C5BDAD2EEB022800CD4F47 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXTargetDependency section */
-		E3C5BDBA2EEB022800CD4F47 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = E3C5BDB02EEB022800CD4F47 /* ShareExtension */;
-			targetProxy = E3C5BDB92EEB022800CD4F47 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		E392E5332EE804A70069963A /* Debug */ = {
@@ -402,6 +275,10 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = PZ69YU2D7L;
 				ENABLE_PREVIEWS = YES;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"generate-db.py",
+					"jmdict-eng-3.6.1.json",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -434,6 +311,10 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = PZ69YU2D7L;
 				ENABLE_PREVIEWS = YES;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"generate-db.py",
+					"jmdict-eng-3.6.1.json",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -450,62 +331,6 @@
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
-		};
-		E3C5BDBE2EEB022800CD4F47 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PZ69YU2D7L;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = ShareExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = ShareExtension;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = matthewmorrone.kyouku.ShareExtension;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		E3C5BDBF2EEB022800CD4F47 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PZ69YU2D7L;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = ShareExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = ShareExtension;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = matthewmorrone.kyouku.ShareExtension;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
@@ -530,15 +355,6 @@
 			buildConfigurations = (
 				E392E5362EE804A70069963A /* Debug */,
 				E392E5372EE804A70069963A /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		E3C5BDBD2EEB022800CD4F47 /* Build configuration list for PBXNativeTarget "ShareExtension" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				E3C5BDBE2EEB022800CD4F47 /* Debug */,
-				E3C5BDBF2EEB022800CD4F47 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

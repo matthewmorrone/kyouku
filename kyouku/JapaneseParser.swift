@@ -11,7 +11,7 @@ import IPADic
 enum JapaneseParser {
 
     static func parse(text: String) -> [ParsedToken] {
-        let tokenizer = TokenizerFactory.make() ?? (try? Tokenizer(dictionary: IPADic()))
+        let tokenizer = try? Tokenizer(dictionary: IPADic())
         let engine = SegmentationEngine.current()
 
         func tokens(from segments: [Segment]) -> [ParsedToken] {
@@ -21,7 +21,7 @@ enum JapaneseParser {
         }
 
         if engine == .dictionaryTrie {
-            if let trie = JMdictTrieCache.shared {
+            if let trie = TrieCache.shared {
                 let segments = DictionarySegmenter.segment(text: text, trie: trie)
                 let parsed = tokens(from: segments)
                 if !parsed.isEmpty {

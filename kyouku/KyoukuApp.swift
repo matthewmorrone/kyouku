@@ -10,7 +10,7 @@ import SwiftUI
 @main
 struct KyoukuApp: App {
     @StateObject var notes = NotesStore()
-    @StateObject var store = WordStore()
+    @StateObject var store = WordsStore()
     @StateObject var router = AppRouter()
 
     var body: some Scene {

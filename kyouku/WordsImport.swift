@@ -9,7 +9,7 @@
 
 import Foundation
 
-public struct WordImporter {
+public struct WordsImport {
     public init() {}
 
     // MARK: - Types
@@ -65,7 +65,7 @@ public struct WordImporter {
 
     // Existing simple file import (kept for compatibility)
     public func importWords(from url: URL) throws -> [String] {
-        let content = try String(contentsOf: url)
+        let content = try String(contentsOf: url, encoding: .utf8)
         let words = content.components(separatedBy: .newlines)
         return words.filter { !$0.isEmpty }
     }
@@ -158,7 +158,7 @@ public struct WordImporter {
                     if let r = providedReading, !r.isEmpty { candidates.append(r) }
                     if let s = item.computedSurface?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty { candidates.append(s) }
                     if let r = item.computedReading?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty { candidates.append(r) }
-                    if let pm = providedMeaning, !pm.isEmpty, (containsKanji(pm) || isKana(pm)) { candidates.append(pm) }
+                    if let pm = providedMeaning, !pm.isEmpty, (Self.containsKanji(pm) || Self.isKana(pm)) { candidates.append(pm) }
 
                     var seen = Set<String>()
                     candidates = candidates.filter { seen.insert($0).inserted }
@@ -184,7 +184,7 @@ public struct WordImporter {
                         } else if !preferKanaOnly {
                             // If insert-kanji is enabled, and current surface lacks kanji, prefer the dictionary kanji form for preview
                             let providedSurfaceHasKanji = containsKanji(providedSurface ?? "")
-                            let computedSurfaceHasKanji = containsKanji((item.computedSurface ?? ""))
+                            let computedSurfaceHasKanji = containsKanji(item.computedSurface ?? "")
                             if !providedSurfaceHasKanji && !computedSurfaceHasKanji && !entry.kanji.isEmpty {
                                 item.computedSurface = entry.kanji
                             }
@@ -243,14 +243,14 @@ public struct WordImporter {
     }
 
     // MARK: - Helpers
-    private static func containsKanji(_ s: String) -> Bool {
+    private nonisolated static func containsKanji(_ s: String) -> Bool {
         for scalar in s.unicodeScalars {
             if scalar.value >= 0x4E00 && scalar.value <= 0x9FFF { return true }
         }
         return false
     }
 
-    private static func isKana(_ s: String) -> Bool {
+    private nonisolated static func isKana(_ s: String) -> Bool {
         guard !s.isEmpty else { return false }
         for scalar in s.unicodeScalars {
             let v = scalar.value
@@ -266,12 +266,12 @@ public struct WordImporter {
         return true
     }
 
-    private static func firstGloss(_ gloss: String) -> String {
+    private nonisolated static func firstGloss(_ gloss: String) -> String {
         let parts = gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
         return parts.first.map(String.init) ?? gloss
     }
 
-    private static func autoDelimiter(forFirstLine line: String) -> Character? {
+    private nonisolated static func autoDelimiter(forFirstLine line: String) -> Character? {
         let candidates: [Character] = [",", ";", "\t", "|"]
         var best: (ch: Character, count: Int)? = nil
         for c in candidates {
@@ -283,7 +283,7 @@ public struct WordImporter {
         return best?.ch
     }
 
-    private static func splitCSVLine(_ line: String, delimiter: Character) -> [String] {
+    private nonisolated static func splitCSVLine(_ line: String, delimiter: Character) -> [String] {
         var fields: [String] = []
         var current = ""
         var inQuotes = false
@@ -315,7 +315,7 @@ public struct WordImporter {
         return fields
     }
 
-    private static func trimmed(_ s: String?) -> String? {
+    private nonisolated static func trimmed(_ s: String?) -> String? {
         guard var str = s?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
         guard !str.isEmpty else { return nil }
         // Remove surrounding matching quotes
@@ -329,3 +329,4 @@ public struct WordImporter {
         return final.isEmpty ? nil : final
     }
 }
+

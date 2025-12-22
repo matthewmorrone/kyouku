@@ -11,8 +11,10 @@ struct DefinitionSheetContent: View {
     @Binding var selectedEntryIndex: Int?
     @Binding var fallbackTranslation: String?
     var onAdd: (ParsedToken, [DictionaryEntry], Int?, String?) -> Void
+    var onAddCustomEntry: (CustomEntryDraft) -> Void
+    var boundaryActions: BoundaryActionContext? = nil
 
-    @EnvironmentObject var store: WordStore
+    @EnvironmentObject var store: WordsStore
 
     var body: some View {
         Group {
@@ -25,7 +27,9 @@ struct DefinitionSheetContent: View {
                     lookupError: $lookupError,
                     selectedEntryIndex: $selectedEntryIndex,
                     fallbackTranslation: $fallbackTranslation,
-                    onAdd: onAdd
+                    onAdd: onAdd,
+                    onAddCustomEntry: onAddCustomEntry,
+                    boundaryActions: boundaryActions
                 )
                 .padding()
                 .presentationDetents([.fraction(0.33)])
@@ -45,6 +49,13 @@ struct DefinitionSheetContent: View {
         @Binding var selectedEntryIndex: Int?
         @Binding var fallbackTranslation: String?
         var onAdd: (ParsedToken, [DictionaryEntry], Int?, String?) -> Void
+        var onAddCustomEntry: (CustomEntryDraft) -> Void
+        var boundaryActions: BoundaryActionContext?
+
+        @State private var showBoundaryTools = false
+        @State private var showingCustomEntryEditor = false
+        @State private var customEntryDraft = CustomEntryDraft()
+        @State private var customEntryError: String? = nil
 
         // MARK: - Derived values
         private var hasKanjiInToken: Bool {
@@ -76,7 +87,7 @@ struct DefinitionSheetContent: View {
 
         var body: some View {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
+                HStack(spacing: 12) {
                     Button(action: {
                         // Apply override for current token range in the editor
                         if let range = token.range {
@@ -90,6 +101,12 @@ struct DefinitionSheetContent: View {
                     }
                     .help("Use this reading for furigana")
                     .disabled(displayKana.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Button(action: beginCustomEntry) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.title3)
+                    }
+                    .help("Customize the entry before saving")
 
                     Spacer()
 
@@ -125,6 +142,10 @@ struct DefinitionSheetContent: View {
                     }
                 }
 
+                if let ctx = boundaryActions {
+                    boundaryControls(ctx)
+                }
+
                 Text(displayKanji)
                     .font(.title2).bold()
 
@@ -148,6 +169,73 @@ struct DefinitionSheetContent: View {
                     }
                 } else {
                     selectedEntryIndex = nil
+                }
+            }
+            .sheet(isPresented: $showingCustomEntryEditor) {
+                customEntrySheet()
+            }
+        }
+
+        @ViewBuilder
+        private func boundaryControls(_ ctx: BoundaryActionContext) -> some View {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Word Boundaries")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Toggle("Tools", isOn: $showBoundaryTools)
+                        .font(.caption)
+                        .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                        .accessibilityLabel("Toggle boundary tools")
+                }
+                if showBoundaryTools {
+                    HStack(alignment: .top, spacing: 16) {
+                        if let marker = ctx.customStatus {
+                            customBoundaryIndicator(marker)
+                            if marker.undo != nil {
+                                Divider()
+                                    .frame(height: 32)
+                            }
+                        }
+                        boundaryButtonsStack(ctx: ctx)
+                    }
+                }
+            }
+        }
+
+        private func boundaryButtonsStack(ctx: BoundaryActionContext) -> some View {
+            HStack(spacing: 12) {
+                boundaryButton(title: "Merge ←", systemImage: "arrowtriangle.left.fill", isEnabled: ctx.canCombineLeft, action: ctx.combineLeft)
+                boundaryButton(title: "Merge →", systemImage: "arrowtriangle.right.fill", isEnabled: ctx.canCombineRight, action: ctx.combineRight)
+                boundaryButton(title: "Split", systemImage: "scissors", isEnabled: ctx.canSplit, action: ctx.beginSplit)
+            }
+        }
+
+        private func boundaryButton(title: String, systemImage: String, isEnabled: Bool, action: @escaping () -> Void) -> some View {
+            VStack(spacing: 4) {
+                Button(action: action) {
+                    Image(systemName: systemImage)
+                        .font(.title3)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!isEnabled)
+
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(isEnabled ? .primary : .secondary)
+            }
+        }
+
+        private func customBoundaryIndicator(_ status: CustomStatus) -> some View {
+            VStack(alignment: .leading, spacing: 4) {
+                Label(status.description, systemImage: status.iconName)
+                    .font(.caption)
+                    .foregroundStyle(status.kind == CustomStatus.Kind.merged ? .orange : .blue)
+                if let undo = status.undo {
+                    Button("Undo", action: undo)
+                        .font(.caption)
+                        .buttonStyle(.bordered)
                 }
             }
         }
@@ -216,6 +304,107 @@ struct DefinitionSheetContent: View {
 
         private func primaryGloss(from entry: DictionaryEntry) -> String {
             entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
+        }
+
+        private func beginCustomEntry() {
+            customEntryDraft = CustomEntryDraft(
+                surface: displayKanji,
+                reading: displayKana.isEmpty ? (token.reading.isEmpty ? token.surface : token.reading) : displayKana,
+                meaning: entryLocal.map { primaryGloss(from: $0) } ?? (fallbackTranslation ?? "")
+            )
+            customEntryError = nil
+            showingCustomEntryEditor = true
+        }
+
+        private func customEntrySheet() -> some View {
+            NavigationStack {
+                Form {
+                    Section("Surface / Kanji") {
+                        TextField("Surface", text: $customEntryDraft.surface)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                    }
+                    Section("Reading") {
+                        TextField("Reading", text: $customEntryDraft.reading)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                    }
+                    Section("Meaning") {
+                        TextField("Meaning", text: $customEntryDraft.meaning, axis: .vertical)
+                            .lineLimit(5)
+                    }
+                    if let customEntryError {
+                        Section {
+                            Text(customEntryError)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+                .navigationTitle("Customize Entry")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showingCustomEntryEditor = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") { saveCustomEntry() }
+                            .disabled(customEntryDraft.meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+        }
+
+        private func saveCustomEntry() {
+            let trimmedSurface = customEntryDraft.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedSurface.isEmpty == false else {
+                customEntryError = "Surface cannot be empty."
+                return
+            }
+            let trimmedMeaning = customEntryDraft.meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedMeaning.isEmpty == false else {
+                customEntryError = "Meaning cannot be empty."
+                return
+            }
+            let trimmedReading = customEntryDraft.reading.trimmingCharacters(in: .whitespacesAndNewlines)
+            let draft = CustomEntryDraft(surface: trimmedSurface, reading: trimmedReading, meaning: trimmedMeaning)
+            customEntryError = nil
+            onAddCustomEntry(draft)
+            showingCustomEntryEditor = false
+        }
+    }
+}
+
+extension DefinitionSheetContent {
+    struct BoundaryActionContext {
+        let canCombineLeft: Bool
+        let canCombineRight: Bool
+        let canSplit: Bool
+        let combineLeft: () -> Void
+        let combineRight: () -> Void
+        let beginSplit: () -> Void
+        let customStatus: CustomStatus?
+    }
+
+    struct CustomStatus {
+        enum Kind {
+            case merged
+            case split
+        }
+        let kind: Kind
+        let description: String
+        let iconName: String
+        let undo: (() -> Void)?
+    }
+
+    struct CustomEntryDraft {
+        var surface: String
+        var reading: String
+        var meaning: String
+
+        init(surface: String = "", reading: String = "", meaning: String = "") {
+            self.surface = surface
+            self.reading = reading
+            self.meaning = meaning
         }
     }
 }

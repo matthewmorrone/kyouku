@@ -1,10 +1,12 @@
 import SwiftUI
 import OSLog
+import Mecab_Swift
+import IPADic
 
 fileprivate let extractLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "App", category: "Extract")
 
 struct ExtractWordsView: View {
-    @EnvironmentObject var store: WordStore
+    @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notes: NotesStore
 
     let text: String
@@ -32,7 +34,7 @@ struct ExtractWordsView: View {
     @State private var splitLeftText: String = ""
     @State private var splitRightText: String = ""
     @State private var splitError: String? = nil
-    @FocusState private var splitLeftFocused: Bool
+    // Removed @FocusState private var splitLeftFocused: Bool
 
     var body: some View {
         VStack(spacing: 8) {
@@ -183,7 +185,7 @@ struct ExtractWordsView: View {
             }
             .safeAreaPadding(.top, 8)
             .onAppear {
-                extractLogger.info("Dictionary popup: word='\(displayKanji, privacy: .public)', kana='\(displayKana, privacy: .public)'")
+                extractLogger.info("ExtractWordsView: Dictionary popup, word='\(displayKanji, privacy: .public)', kana='\(displayKana, privacy: .public)'")
             }
             .onChange(of: dictResults) { _, _ in
                 let ordered = orderedEntries(for: token, entries: dictResults)
@@ -202,85 +204,31 @@ struct ExtractWordsView: View {
                     return token.surface
                 }()
                 let currentKana: String = ordered.first?.reading ?? token.reading
-                extractLogger.info("Dictionary popup updated: word='\(currentKanji, privacy: .public)', kana='\(currentKana, privacy: .public)'")
+                extractLogger.info("ExtractWordsView: Dictionary popup, updated: word='\(currentKanji, privacy: .public)', kana='\(currentKana, privacy: .public)'")
             }
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
             .presentationContentInteraction(.scrolls)
         }
         .sheet(item: $splitContext, onDismiss: { splitError = nil }) { context in
-            VStack(alignment: .leading, spacing: 20) {
-                Text("Split Token")
-                    .font(.title2)
-                    .bold()
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Original surface")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(context.token.surface)
-                        .font(.headline)
-                }
-
-                Text("Use the arrows (or edit either field directly) to decide where the split should land.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading) {
-                        Text("Left side")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        TextField("Left", text: $splitLeftText)
-                            .textFieldStyle(.roundedBorder)
-                            .textInputAutocapitalization(.never)
-                            .disableAutocorrection(true)
-                            .focused($splitLeftFocused)
-                    }
-
-                    VStack(spacing: 8) {
-                        Button(action: moveCharacterToLeft) {
-                            Image(systemName: "arrow.left")
-                                .font(.title2)
-                        }
-                        .disabled(splitRightText.isEmpty)
-
-                        Button(action: moveCharacterToRight) {
-                            Image(systemName: "arrow.right")
-                                .font(.title2)
-                        }
-                        .disabled(splitLeftText.isEmpty)
-                    }
-
-                    VStack(alignment: .leading) {
-                        Text("Right side")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        TextField("Right", text: $splitRightText)
-                            .textFieldStyle(.roundedBorder)
-                            .textInputAutocapitalization(.never)
-                            .disableAutocorrection(true)
-                    }
-                }
-
-                if let splitError {
-                    Text(splitError)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-
-                HStack {
-                    Button("Cancel") { cancelSplitFlow() }
-                    Spacer()
-                    Button("Apply Split") { applySplit(for: context) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!canApplySplit(for: context))
-                }
-            }
-            .padding()
+            TokenSplitEditor(
+                originalSurface: context.token.surface,
+                leftText: $splitLeftText,
+                rightText: $splitRightText,
+                errorText: $splitError,
+                canApply: { left, right in
+                    let L = left.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let R = right.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !L.isEmpty, !R.isEmpty else { return false }
+                    return L + R == context.token.surface
+                },
+                onApply: { applySplit(for: context) },
+                onCancel: { cancelSplitFlow() },
+                showArrows: true,
+                instructionText: "Use the arrows (or edit either field directly) to decide where the split should land."
+            )
             .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
-            .onAppear { splitLeftFocused = true }
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -329,7 +277,7 @@ struct ExtractWordsView: View {
         let tokens: [ParsedToken]
         @Binding var isSelecting: Bool
         @Binding var selectedTokenIDs: Set<UUID>
-        let store: WordStore
+        let store: WordsStore
         let perKanjiFurigana: Bool
         let presentDefinition: (ParsedToken) -> Void
         let onAdd: (ParsedToken) -> Void
@@ -391,6 +339,8 @@ struct ExtractWordsView: View {
             .onTapGesture {
                 if isSelecting {
                     toggleSelect(token)
+                } else {
+                    onTap()
                 }
             }
             .padding(.vertical, 6)
@@ -503,7 +453,7 @@ struct ExtractWordsView: View {
         lookupTask?.cancel()
         activeLookupTokenID = nil
 
-        extractLogger.info("Word tapped: surface='\(token.surface, privacy: .public)', reading='\(token.reading, privacy: .public)'")
+        extractLogger.info("ExtractWordsView: word tapped, surface='\(token.surface, privacy: .public)', reading='\(token.reading, privacy: .public)'")
         resetLookupState()
         selectedDefinitionIndex = 0
         didLookup = false
@@ -574,13 +524,8 @@ struct ExtractWordsView: View {
         guard idx >= 0 && idx < tokens.count else { return }
         let token = tokens[idx]
         guard token.surface.count >= 2 else { return }
-        if let first = token.surface.first {
-            splitLeftText = String(first)
-            splitRightText = String(token.surface.dropFirst())
-        } else {
-            splitLeftText = ""
-            splitRightText = token.surface
-        }
+        splitLeftText = token.surface
+        splitRightText = ""
         splitError = nil
         splitContext = SplitContext(token: token, originalIndex: idx)
     }
@@ -636,8 +581,10 @@ struct ExtractWordsView: View {
 
     private func canApplySplit(for context: SplitContext) -> Bool {
         guard splitContext != nil else { return false }
-        guard splitLeftText.isEmpty == false, splitRightText.isEmpty == false else { return false }
-        return splitLeftText + splitRightText == context.token.surface
+        let L = splitLeftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let R = splitRightText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !L.isEmpty, !R.isEmpty else { return false }
+        return L + R == context.token.surface
     }
 
     private func applySplit(for context: SplitContext) {
@@ -649,9 +596,9 @@ struct ExtractWordsView: View {
             splitError = "The token changed. Please reselect it."
             return
         }
-        let leftSurface = splitLeftText
-        let rightSurface = splitRightText
-        let tokenizer = TokenizerFactory.make()
+        let leftSurface = splitLeftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rightSurface = splitRightText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokenizer = try? Tokenizer(dictionary: IPADic())
         let leftReading = SegmentReadingAttacher.reading(for: leftSurface, tokenizer: tokenizer)
         let rightReading = SegmentReadingAttacher.reading(for: rightSurface, tokenizer: tokenizer)
         let leftToken = ParsedToken(surface: leftSurface, reading: leftReading, meaning: nil)
