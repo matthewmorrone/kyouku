@@ -20,21 +20,21 @@ final class WordsStore: ObservableObject {
 
     /// The one and only add method.
     /// Callers must provide a non-empty meaning/definition.
-    func add(surface: String, reading: String, meaning: String, note: String? = nil, sourceNoteID: UUID? = nil) {
+    func add(surface: String, kana: String, meaning: String, note: String? = nil, sourceNoteID: UUID? = nil) {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        let r = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        let k = kana.trimmingCharacters(in: .whitespacesAndNewlines)
         let m = meaning.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !s.isEmpty else { return }
         guard !m.isEmpty else { return }
 
-        if words.contains(where: { $0.surface == s && $0.reading == r }) {
+        if words.contains(where: { $0.surface == s && $0.kana == k }) {
             return
         }
 
         let word = Word(
             surface: s,
-            reading: r,
+            kana: k,
             meaning: m,
             note: note,
             sourceNoteID: sourceNoteID

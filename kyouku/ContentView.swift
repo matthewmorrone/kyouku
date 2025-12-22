@@ -26,10 +26,10 @@ struct ContentView: View {
 
             WordsView()
                 .tabItem {
-                    Label("Words", systemImage: "checklist")
+                    Label("Dictionary", systemImage: "book.fill")
                 }
-                .tag(AppTab.words)
-            
+                .tag(AppTab.dictionary)
+
             FlashcardsView()
                 .tabItem {
                     Label("Cards", systemImage: "rectangle.on.rectangle.angled")

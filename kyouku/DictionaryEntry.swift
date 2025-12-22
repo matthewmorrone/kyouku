@@ -11,7 +11,7 @@ import SQLite3
 struct DictionaryEntry: Identifiable, Hashable {
     let id: Int64
     let kanji: String
-    let reading: String
+    let kana: String
     let gloss: String
     let isCommon: Bool
 }
@@ -47,11 +47,11 @@ actor DictionarySQLiteStore {
 
         let normalized = normalizeFullWidthASCII(trimmed)
 
-        // 1) Exact match on kanji/readings + simple conjugation fallbacks
+        // 1) Exact match on kanji/kana_forms + simple conjugation fallbacks
         var results = try queryExactMatches(for: normalized, limit: limit)
         if !results.isEmpty { return results }
 
-        // 2) If input looks like Latin (romaji), try converting to kana and match readings
+        // 2) If input looks like Latin (romaji), try converting to kana and match kana_forms
         let allowedLatin = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '-")
         if normalized.rangeOfCharacter(from: allowedLatin.inverted) == nil {
             let kanaCandidates = latinToKanaCandidates(for: normalized)
@@ -93,7 +93,7 @@ actor DictionarySQLiteStore {
         let sql = """
         SELECT text FROM kanji
         UNION
-        SELECT text FROM readings;
+        SELECT text FROM kana_forms;
         """
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
@@ -143,21 +143,21 @@ actor DictionarySQLiteStore {
                          ORDER BY k.is_common DESC, k.id ASC
                          LIMIT 1), '') AS kanji_text,
                COALESCE((SELECT r.text
-                         FROM readings r
+                         FROM kana_forms r
                          WHERE r.entry_id = e.id
                          ORDER BY r.is_common DESC, r.id ASC
-                         LIMIT 1), '') AS reading_text,
+                         LIMIT 1), '') AS kana_text,
                COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
                          FROM senses s
                          JOIN glosses g ON g.sense_id = s.id
                          WHERE s.entry_id = e.id), '') AS gloss_text,
                CASE
                  WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
-                   OR EXISTS (SELECT 1 FROM readings r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
+                   OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
                THEN 1 ELSE 0 END AS is_common_flag
         FROM entries e
         WHERE EXISTS (SELECT 1 FROM kanji k2 WHERE k2.entry_id = e.id AND k2.text = ?1)
-           OR EXISTS (SELECT 1 FROM readings r2 WHERE r2.entry_id = e.id AND r2.text = ?1)
+           OR EXISTS (SELECT 1 FROM kana_forms r2 WHERE r2.entry_id = e.id AND r2.text = ?1)
         LIMIT ?2;
         """
 
@@ -174,10 +174,10 @@ actor DictionarySQLiteStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let reading = String(cString: sqlite3_column_text(stmt, 2))
+            let kana = String(cString: sqlite3_column_text(stmt, 2))
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(DictionaryEntry(id: id, kanji: kanji, reading: reading, gloss: gloss, isCommon: isCommon))
+            rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))
         }
 
         if containsKanjiCharacters(term) {
@@ -206,17 +206,17 @@ actor DictionarySQLiteStore {
                          ORDER BY k.is_common DESC, k.id ASC
                          LIMIT 1), '') AS kanji_text,
                COALESCE((SELECT r.text
-                         FROM readings r
+                         FROM kana_forms r
                          WHERE r.entry_id = e.id
                          ORDER BY r.is_common DESC, r.id ASC
-                         LIMIT 1), '') AS reading_text,
+                         LIMIT 1), '') AS kana_text,
                COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
                          FROM senses s
                          JOIN glosses g ON g.sense_id = s.id
                          WHERE s.entry_id = e.id), '') AS gloss_text,
                CASE
                  WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
-                   OR EXISTS (SELECT 1 FROM readings r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
+                   OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
                THEN 1 ELSE 0 END AS is_common_flag
         FROM entries e
         JOIN matched m ON m.entry_id = e.id
@@ -236,10 +236,10 @@ actor DictionarySQLiteStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let reading = String(cString: sqlite3_column_text(stmt, 2))
+            let kana = String(cString: sqlite3_column_text(stmt, 2))
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(DictionaryEntry(id: id, kanji: kanji, reading: reading, gloss: gloss, isCommon: isCommon))
+            rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))
         }
         return rows
     }
@@ -267,17 +267,17 @@ actor DictionarySQLiteStore {
                          ORDER BY k.is_common DESC, k.id ASC
                          LIMIT 1), '') AS kanji_text,
                COALESCE((SELECT r.text
-                         FROM readings r
+                         FROM kana_forms r
                          WHERE r.entry_id = e.id
                          ORDER BY r.is_common DESC, r.id ASC
-                         LIMIT 1), '') AS reading_text,
+                         LIMIT 1), '') AS kana_text,
                COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
                          FROM senses s
                          JOIN glosses g ON g.sense_id = s.id
                          WHERE s.entry_id = e.id), '') AS gloss_text,
                CASE
                  WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
-                   OR EXISTS (SELECT 1 FROM readings r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
+                   OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
                THEN 1 ELSE 0 END AS is_common_flag
         FROM entries e
         JOIN matched m ON m.entry_id = e.id
@@ -299,17 +299,17 @@ actor DictionarySQLiteStore {
                          ORDER BY k.is_common DESC, k.id ASC
                          LIMIT 1), '') AS kanji_text,
                COALESCE((SELECT r.text
-                         FROM readings r
+                         FROM kana_forms r
                          WHERE r.entry_id = e.id
                          ORDER BY r.is_common DESC, r.id ASC
-                         LIMIT 1), '') AS reading_text,
+                         LIMIT 1), '') AS kana_text,
                COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
                          FROM senses s
                          JOIN glosses g ON g.sense_id = s.id
                          WHERE s.entry_id = e.id), '') AS gloss_text,
                CASE
                  WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
-                   OR EXISTS (SELECT 1 FROM readings r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
+                   OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
                THEN 1 ELSE 0 END AS is_common_flag
         FROM entries e
         JOIN matched m ON m.entry_id = e.id
@@ -335,10 +335,10 @@ actor DictionarySQLiteStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let reading = String(cString: sqlite3_column_text(stmt, 2))
+            let kana = String(cString: sqlite3_column_text(stmt, 2))
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(DictionaryEntry(id: id, kanji: kanji, reading: reading, gloss: gloss, isCommon: isCommon))
+            rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))
         }
         return rows
     }

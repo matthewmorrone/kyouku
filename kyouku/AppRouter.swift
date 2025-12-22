@@ -4,8 +4,8 @@ import Combine
 enum AppTab: Hashable {
     case paste
     case notes
+    case dictionary
     case cards
-    case words
     case settings
 }
 

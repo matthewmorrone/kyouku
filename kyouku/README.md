@@ -1,81 +1,44 @@
-# Kyouku — Functional Specification & Architecture Document
+# Kyouku — Functional Overview & Architecture
 
-## 1. Purpose
+## Purpose
 
-Kyouku is an iOS application for Japanese reading and vocabulary acquisition.  
-It allows users to paste Japanese text, automatically parse it, save notes, inspect tokens with optional furigana, select vocabulary for long-term study, and reference definitions from a bundled JMdict database.
+Kyouku is an iOS app for light-weight Japanese study. It lets users paste arbitrary text, keep quick notes, perform manual dictionary lookups, and run spaced repetition style drills on saved vocabulary. The experience is intentionally simple: no automatic parsing, no inline annotation toggles, and no background text processors to babysit.
 
-## 2. Core Features
+## User-Facing Tabs
 
-### 2.1 Text Input & Parsing
-- Paste button inserts clipboard text.
-- Text automatically tokenizes using MeCab (IPADic).
-- Tokens expose:
-  - surface  
-  - reading  
-  - lemma  
-  - part of speech  
+### Paste
+- Single text editor driven by `PasteView` with optional font sizing via `AppStorage`.
+- One-tap clipboard import and a button that sends the current text to `NotesStore` as a new note.
 
-### 2.2 Notes System
-- Notes consist of:
-  - ID  
-  - Title (defaults to first line)  
-  - Full multiline text (newlines preserved)  
-  - Token list  
-  - Creation date  
-- Notes list view shows all saved notes.
-- Selecting a note opens a full note detail page.
+### Notes
+- `NotesView` lists every saved note (title = first line, subtitle = timestamp) and supports deletion.
+- Notes persist through `NotesStore`, which serializes `Note` structs to `AppDataBackup` for iCloud-friendly storage.
 
-### 2.3 Token Display
-- Tokens rendered with a reusable component.
-- Furigana shown via custom RubyText.
-- Global furigana toggle.
-- Per-token furigana tap toggle.
+### Dictionary
+- Powered by `DictionaryLookupViewModel` + `DictionarySQLiteStore` actor hitting the bundled `dictionary.sqlite3`.
+- Users type any surface form, see canonical headwords, kana spellings, and glosses, then save them to `WordsStore`.
 
-### 2.4 Vocabulary List
-- Words extracted from note tokens.
-- Words include lemma, reading, pos, creation date, and sourceNote reference.
-- Word list has delete support.
+### Cards
+- `FlashcardsView` cycles through the words saved in `WordsStore`, tracks correct/incorrect taps, and records aggregates with `ReviewPersistence`.
 
-### 2.5 Dictionary Integration (SQLite JMdict)
-- Bundled `dictionary.sqlite3` database.
-- Lookup performed by lemma/reading/surface.
-- Returns headword, reading, glosses.
-- Used in Note Detail and Words views.
+## Data & Persistence
 
-## 3. Architecture
+- `NotesStore` — JSON-backed list of `Note` models.
+- `WordsStore` — JSON-backed list of `Word` models (`surface`, `kana`, `meaning`, `createdAt`).
+- `ReviewPersistence` — stores streaks/counters for the flashcard session summary.
+- `DictionarySQLiteStore` — swift actor guaranteeing serialized access to the JMdict-derived `dictionary.sqlite3`, which contains `entries`, `senses`, `kana_forms`, and lookup indexes.
 
-### 3.1 Models
-- `ParsedToken`
-- `Note`
-- `Word`
-- `DictionaryEntry`
+## Architecture Notes
 
-### 3.2 Stores
-- `NotesStore`
-- `WordStore`
+- All tabs share a single `AppRouter` enum and are presented via `ContentView`.
+- Environment data flows through `@StateObject` stores placed at the root of each tab.
+- No background parsing services or automation loops remain; the user performs every dictionary lookup manually.
 
-### 3.3 Views
-- `PasteView`
-- `NotesView`
-- `NoteDetailView`
-- `WordsView`
-- `TokenChip`
-- `RubyText`
+## Typical Workflow
 
-### 3.4 Parser
-- `JapaneseParser` wrapping MeCab tokenizer.
-
-### 3.5 Dictionary Engine
-- SQLite-based queries.
-
-## 4. Workflow
-
-1. User pastes text.  
-2. Automatic parsing occurs.  
-3. User saves note.  
-4. Notes are browsed & opened.  
-5. Tokens can show dictionary info.  
-6. User extracts words from tokens.  
-7. Vocabulary list grows.  
+1. Paste or type Japanese text in the Paste tab.
+2. Tap "New Note" to archive the text.
+3. Jump to Dictionary, search for interesting vocabulary, and store entries.
+4. Use the Cards tab to quiz against the saved word list.
+5. Repeat, optionally trimming saved notes/words as you go.
 

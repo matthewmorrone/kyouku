@@ -127,11 +127,11 @@ struct FlashcardsView: View {
                     switch direction {
                     case .kanjiToKana:
                         Text(word.surface).font(.title2).bold()
-                        if !word.reading.isEmpty { Text(word.reading).font(.title3).foregroundStyle(.secondary) }
+                        if !word.kana.isEmpty { Text(word.kana).font(.title3).foregroundStyle(.secondary) }
                         if !word.meaning.isEmpty { Text(word.meaning).font(.body).multilineTextAlignment(.center).padding(.top, 6) }
                     case .kanaToEnglish:
                         if !word.meaning.isEmpty { Text(word.meaning).font(.title3).bold() }
-                        if !word.reading.isEmpty { Text(word.reading).font(.title2) }
+                        if !word.kana.isEmpty { Text(word.kana).font(.title2) }
                         if !word.surface.isEmpty { Text(word.surface).font(.body).foregroundStyle(.secondary) }
                     }
                 } else {
@@ -139,7 +139,7 @@ struct FlashcardsView: View {
                     case .kanjiToKana:
                         Text(word.surface).font(.largeTitle.weight(.bold))
                     case .kanaToEnglish:
-                        if !word.reading.isEmpty { Text(word.reading).font(.largeTitle.weight(.bold)) }
+                        if !word.kana.isEmpty { Text(word.kana).font(.largeTitle.weight(.bold)) }
                         else { Text(word.surface).font(.largeTitle.weight(.bold)) }
                     }
                 }

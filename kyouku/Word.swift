@@ -10,7 +10,7 @@ import Foundation
 struct Word: Identifiable, Codable, Hashable {
     let id: UUID
     var surface: String
-    var reading: String
+    var kana: String
     var meaning: String
     var note: String?
     var sourceNoteID: UUID? = nil
@@ -19,7 +19,7 @@ struct Word: Identifiable, Codable, Hashable {
     init(
         id: UUID = UUID(),
         surface: String,
-        reading: String,
+        kana: String,
         meaning: String,
         note: String? = nil,
         sourceNoteID: UUID? = nil,
@@ -27,7 +27,7 @@ struct Word: Identifiable, Codable, Hashable {
     ) {
         self.id = id
         self.surface = surface
-        self.reading = reading
+        self.kana = kana
         self.meaning = meaning
         self.note = note
         self.sourceNoteID = sourceNoteID
