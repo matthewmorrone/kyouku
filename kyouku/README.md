@@ -42,3 +42,20 @@ Kyouku is an iOS app for light-weight Japanese study. It lets users paste arbitr
 4. Use the Cards tab to quiz against the saved word list.
 5. Repeat, optionally trimming saved notes/words as you go.
 
+## To Do
+- Noticeable delay for furigana to appear when first loading the app
+- Noticeable delay when loading a note
+- Extreme left and top furigana are cut off in the paste area
+- 瞬き shows with まばた above 瞬
+- にじしょく for 虹色: jisho disagrees
+- いだ for 抱
+- わたしま for 私待: correct, but 私 isn't properly centered
+
+## Recently Fixed
+- 巡り会う now shows めぐりあ over both kanji
+- 生き方 displays いきかた across the full word
+- 一度 renders with the correct kanji span
+- 思い出す places おもいだ over the entire verb
+- お願い renders even when starting with kana
+- 夜ふけ shows よふけ across both characters
+- 出逢 displays であ across the compound

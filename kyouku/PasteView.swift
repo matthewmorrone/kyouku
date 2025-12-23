@@ -83,6 +83,7 @@ struct PasteView: View {
                                 Color.clear.frame(width: 28, height: 28)
                                 Image(showFurigana ? "furigana.on" : "furigana.off")
                                     .symbolRenderingMode(.monochrome)
+                                    .tint(.accentColor)
                                     .font(.system(size: 22))
                                     .foregroundStyle(.primary)
                             }
@@ -147,7 +148,7 @@ struct PasteView: View {
                 if enabled {
                     triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on")
                 } else {
-                    furiganaAttributedText = nil
+                    // Preserve existing furiganaAttributedText to keep layout height stable when hiding
                     furiganaTaskHandle?.cancel()
                 }
             }
@@ -394,47 +395,67 @@ private struct EditorContainer: View {
     var showFurigana: Bool
     var lineSpacing: Double
 
-    private let placeholder = "Paste or type Japanese text"
+    private let contentPadding = EdgeInsets(top: 18, leading: 18, bottom: 16, trailing: 18)
+    private let editorTextInsets = UIEdgeInsets(top: 8, left: 5, bottom: 8, right: 5)
+    private var editorTextPadding: EdgeInsets {
+        EdgeInsets(
+            top: editorTextInsets.top,
+            leading: editorTextInsets.left,
+            bottom: editorTextInsets.bottom,
+            trailing: editorTextInsets.right
+        )
+    }
 
+    private let placeholder = "Paste or type Japanese text"
     var body: some View {
         ZStack(alignment: .topLeading) {
             Group {
                 if isEditing == false {
                     ScrollView {
-                        Group {
+                        VStack(alignment: .leading, spacing: 0) {
                             if text.isEmpty {
                                 Text(placeholder)
                                     .foregroundColor(.secondary)
+                                    .padding(editorTextPadding)
+                            } else if showFurigana {
+                                RubyText(
+                                    attributed: furiganaText ?? NSAttributedString(string: text),
+                                    fontSize: CGFloat(textSize),
+                                    lineHeightMultiple: 1.0,
+                                    extraGap: CGFloat(max(0, lineSpacing)),
+                                    textInsets: editorTextInsets
+                                )
                             } else {
-                                if showFurigana {
+                                ZStack(alignment: .topLeading) {
                                     RubyText(
                                         attributed: furiganaText ?? NSAttributedString(string: text),
                                         fontSize: CGFloat(textSize),
                                         lineHeightMultiple: 1.0,
-                                        extraGap: CGFloat(max(0, lineSpacing))
+                                        extraGap: CGFloat(max(0, lineSpacing)),
+                                        textInsets: editorTextInsets
                                     )
-                                } else {
+                                    .hidden()
+
                                     Text(text)
                                         .foregroundColor(.primary)
                                         .lineSpacing(CGFloat(max(0, lineSpacing)))
+                                        .padding(editorTextPadding)
                                 }
                             }
                         }
                         .font(.system(size: textSize))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .multilineTextAlignment(.leading)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 16)
                     }
+                    .padding(contentPadding)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     TextEditor(text: $text)
                         .font(.system(size: textSize))
                         .scrollContentBackground(.hidden)
                         .background(Color.clear)
                         .foregroundColor(.primary)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 16)
-
+                        .padding(contentPadding)
                 }
             }
 
@@ -442,11 +463,11 @@ private struct EditorContainer: View {
                 Text(placeholder)
                     .font(.system(size: textSize))
                     .foregroundColor(.secondary)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 20)
+                    .padding(editorTextPadding)
+                    .padding(contentPadding)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
         .cornerRadius(12)

@@ -14,45 +14,65 @@ struct SpanReadingAttacher {
 
     private static let cache = ReadingAttachmentCache(maxEntries: 32)
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SpanReadingAttacher")
+    private static let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SpanReadingAttacher")
 
     func attachReadings(text: String, spans: [TextSpan]) async -> [AnnotatedSpan] {
         guard text.isEmpty == false, spans.isEmpty == false else { return spans.map { AnnotatedSpan(span: $0, readingKana: nil) } }
 
         let start = CFAbsoluteTimeGetCurrent()
+        let overallInterval = Self.signposter.beginInterval("AttachReadings Overall", "len=\(text.count) spans=\(spans.count)")
 
         let key = ReadingAttachmentCacheKey(textHash: Self.hash(text), spanSignature: Self.signature(for: spans))
         if let cached = await Self.cache.value(for: key) {
             let duration = Self.elapsedMilliseconds(since: start)
             Self.logger.debug("[SpanReadingAttacher] Cache hit for \(spans.count, privacy: .public) spans in \(duration, privacy: .public) ms.")
+            Self.signposter.endInterval("AttachReadings Overall", overallInterval)
             return cached
         }
 
-        guard let tokenizer = Self.tokenizer() else {
+        let tokStart = CFAbsoluteTimeGetCurrent()
+        let tokInterval = Self.signposter.beginInterval("Tokenizer Acquire")
+        let tokenizerOpt = Self.tokenizer()
+        Self.signposter.endInterval("Tokenizer Acquire", tokInterval)
+        let tokMs = (CFAbsoluteTimeGetCurrent() - tokStart) * 1000
+        if tokenizerOpt == nil {
+            Self.logger.error("[SpanReadingAttacher] Tokenizer acquisition failed in \(String(format: "%.3f", tokMs)) ms")
+        } else {
+            Self.logger.info("[SpanReadingAttacher] Tokenizer acquired in \(String(format: "%.3f", tokMs)) ms")
+        }
+        guard let tokenizer = tokenizerOpt else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
             await Self.cache.store(passthrough, for: key)
             let duration = Self.elapsedMilliseconds(since: start)
-            Self.logger.error("[SpanReadingAttacher] Failed to acquire tokenizer. Returning passthrough spans in \(duration, privacy: .public) ms.")
+//            Self.logger.error("[SpanReadingAttacher] Failed to acquire tokenizer. Returning passthrough spans in \(duration, privacy: .public) ms.")
+            Self.signposter.endInterval("AttachReadings Overall", overallInterval)
             return passthrough
         }
 
+        let tokenizeStart = CFAbsoluteTimeGetCurrent()
+        let tokenizeInterval = Self.signposter.beginInterval("MeCab Tokenize", "len=\(text.count)")
         let annotations = tokenizer.tokenize(text: text).compactMap { annotation -> MeCabAnnotation? in
             let nsRange = NSRange(annotation.range, in: text)
             guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
             let surface = String(text[annotation.range])
             return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface)
         }
+        Self.signposter.endInterval("MeCab Tokenize", tokenizeInterval)
+        let tokenizeMs = (CFAbsoluteTimeGetCurrent() - tokenizeStart) * 1000
+        Self.logger.info("[SpanReadingAttacher] MeCab tokenization produced \(annotations.count) annotations in \(String(format: "%.3f", tokenizeMs)) ms")
 
         var annotated: [AnnotatedSpan] = []
         annotated.reserveCapacity(spans.count)
 
         for span in spans {
-            let reading = readingForSpan(span, annotations: annotations)
+            let reading = readingForSpan(span, annotations: annotations, tokenizer: tokenizer)
             annotated.append(AnnotatedSpan(span: span, readingKana: reading))
         }
 
         await Self.cache.store(annotated, for: key)
         let duration = Self.elapsedMilliseconds(since: start)
         Self.logger.info("[SpanReadingAttacher] Attached readings for \(spans.count, privacy: .public) spans in \(duration, privacy: .public) ms.")
+        Self.signposter.endInterval("AttachReadings Overall", overallInterval)
         return annotated
     }
 
@@ -62,7 +82,7 @@ struct SpanReadingAttacher {
         return sharedTokenizer
     }
 
-    private func readingForSpan(_ span: TextSpan, annotations: [MeCabAnnotation]) -> String? {
+    private func readingForSpan(_ span: TextSpan, annotations: [MeCabAnnotation], tokenizer: Tokenizer) -> String? {
         guard span.range.length > 0, containsKanji(span.surface) else { return nil }
         var builder = ""
         let spanEnd = span.range.location + span.range.length
@@ -77,7 +97,7 @@ struct SpanReadingAttacher {
             if intersection.length == annotation.range.length {
                 let chunk = annotation.reading.isEmpty ? annotation.surface : annotation.reading
                 builder.append(chunk)
-                Self.logger.debug("[SpanReadingAttacher] Matched token surface=\(annotation.surface, privacy: .public) reading=\(chunk, privacy: .public) for span=\(span.surface, privacy: .public).")
+//                Self.logger.debug("[SpanReadingAttacher] Matched token surface=\(annotation.surface, privacy: .public) reading=\(chunk, privacy: .public) for span=\(span.surface, privacy: .public).")
             } else if coveringToken == nil, NSLocationInRange(span.range.location, annotation.range), NSMaxRange(span.range) <= NSMaxRange(annotation.range) {
                 coveringToken = annotation
             }
@@ -89,12 +109,35 @@ struct SpanReadingAttacher {
             return normalized.isEmpty ? nil : normalized
         }
 
-        guard let token = coveringToken else { return nil }
-        let tokenReadingKatakana = Self.toKatakana(token.reading.isEmpty ? token.surface : token.reading)
-        guard let stripped = Self.kanjiReadingFromToken(tokenSurface: token.surface, tokenReadingKatakana: tokenReadingKatakana) else { return nil }
-        let normalizedFallback = Self.toHiragana(stripped)
-        Self.logger.debug("[SpanReadingAttacher] Fallback token surface=\(token.surface, privacy: .public) strippedReading=\(normalizedFallback, privacy: .public) for span=\(span.surface, privacy: .public).")
-        return normalizedFallback.isEmpty ? nil : normalizedFallback
+        if let token = coveringToken {
+            let tokenReadingKatakana = Self.toKatakana(token.reading.isEmpty ? token.surface : token.reading)
+            guard let stripped = Self.kanjiReadingFromToken(tokenSurface: token.surface, tokenReadingKatakana: tokenReadingKatakana) else { return nil }
+            let normalizedFallback = Self.toHiragana(stripped)
+//            Self.logger.debug("[SpanReadingAttacher] Fallback token surface=\(token.surface, privacy: .public) strippedReading=\(normalizedFallback, privacy: .public) for span=\(span.surface, privacy: .public).")
+            return normalizedFallback.isEmpty ? nil : normalizedFallback
+        }
+
+        guard let retokenized = readingByRetokenizingSurface(span.surface, tokenizer: tokenizer) else { return nil }
+        let trimmedRetokenized = Self.trimDictionaryOkurigana(surface: span.surface, reading: retokenized)
+        let normalizedRetokenized = Self.toHiragana(trimmedRetokenized)
+        return normalizedRetokenized.isEmpty ? nil : normalizedRetokenized
+    }
+
+    private func readingByRetokenizingSurface(_ surface: String, tokenizer: Tokenizer) -> String? {
+        guard surface.isEmpty == false else { return nil }
+        let tokens = tokenizer.tokenize(text: surface)
+        guard tokens.isEmpty == false else { return nil }
+        var builder = ""
+        for token in tokens {
+            let chunk: String
+            if token.reading.isEmpty {
+                chunk = String(surface[token.range])
+            } else {
+                chunk = token.reading
+            }
+            builder.append(chunk)
+        }
+        return builder.isEmpty ? nil : builder
     }
 
     static func kanjiReadingFromToken(tokenSurface: String, tokenReadingKatakana: String) -> String? {
@@ -200,7 +243,7 @@ private struct MeCabAnnotation {
     let surface: String
 }
 
-private struct ReadingAttachmentCacheKey: Hashable {
+private struct ReadingAttachmentCacheKey: Hashable, Sendable {
     let textHash: Int
     let spanSignature: Int
 }
