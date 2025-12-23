@@ -4,10 +4,10 @@
 //
 //  Created by Matthew Morrone on 12/7/25.
 //
-
 import SwiftUI
 import UIKit
 import Foundation
+import OSLog
 
 struct PasteView: View {
     @EnvironmentObject var notes: NotesStore
@@ -17,8 +17,17 @@ struct PasteView: View {
     @State private var currentNote: Note? = nil
     @State private var hasInitialized: Bool = false
     @State private var isEditing: Bool = false
-    
-    @AppStorage("editorTextSize") private var textSize: Double = 17
+    @State private var furiganaAttributedText: NSAttributedString? = nil
+    @State private var furiganaRefreshToken: Int = 0
+    @State private var furiganaTaskHandle: Task<Void, Never>? = nil
+    @State private var suppressNextEditingRefresh: Bool = false
+
+    @AppStorage("readingTextSize") private var readingTextSize: Double = 17
+    @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
+    @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
+    @AppStorage("readingShowFurigana") private var showFurigana: Bool = true
+
+    private static let furiganaLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "FuriganaPipeline")
 
     var body: some View {
         NavigationStack {
@@ -31,9 +40,16 @@ struct PasteView: View {
                     .disabled(isEditing)
                 }
 
-                EditorContainer(text: $inputText, textSize: textSize, isEditing: isEditing)
-                    .padding(.vertical, 16)
-                    .padding(.horizontal, 16)
+                EditorContainer(
+                    text: $inputText,
+                    furiganaText: furiganaAttributedText,
+                    textSize: readingTextSize,
+                    isEditing: isEditing,
+                    showFurigana: showFurigana,
+                    lineSpacing: readingLineSpacing
+                )
+                .padding(.vertical, 16)
+                .padding(.horizontal, 16)
 
                 HStack(alignment: .center, spacing: 0) {
                     ControlCell {
@@ -58,6 +74,26 @@ struct PasteView: View {
                     }
 
                     ControlCell {
+                        Button {
+                            showFurigana.toggle()
+                            // Immediately schedule a recompute when enabling
+                            if showFurigana { triggerFuriganaRefreshIfNeeded(reason: "manual toggle button") }
+                        } label: {
+                            ZStack {
+                                Color.clear.frame(width: 28, height: 28)
+                                Image(showFurigana ? "furigana.on" : "furigana.off")
+                                    .symbolRenderingMode(.monochrome)
+                                    .font(.system(size: 22))
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+                        .tint(.accentColor)
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
+                        .disabled(isEditing)
+                    }
+
+                    ControlCell {
                         Toggle(isOn: $isEditing) {
                             if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
                                 Image(systemName: "character.cursor.ibeam.ja")
@@ -75,16 +111,48 @@ struct PasteView: View {
                 .controlSize(.small)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 24) }
             .navigationTitle(currentNote?.title ?? "Paste")
             .navigationBarTitleDisplayMode(.inline)
-            .onAppear(perform: onAppearHandler)
+            .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 24) }
+            .onAppear {
+                onAppearHandler()
+            }
             .onDisappear {
                 NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+                furiganaTaskHandle?.cancel()
             }
             .onChange(of: inputText) { _, newValue in
                 syncNoteForInputChange(newValue)
                 PasteBufferStore.save(newValue)
+                if newValue.isEmpty {
+                    furiganaAttributedText = nil
+                    furiganaTaskHandle?.cancel()
+                }
+                triggerFuriganaRefreshIfNeeded(reason: "input changed")
+            }
+            .onChange(of: isEditing) { _, editing in
+                if editing {
+                    furiganaAttributedText = nil
+                    furiganaTaskHandle?.cancel()
+                } else {
+                    if suppressNextEditingRefresh {
+                        suppressNextEditingRefresh = false
+                        Self.logFurigana("Skipping refresh: editing toggle was programmatic.")
+                        return
+                    }
+                    triggerFuriganaRefreshIfNeeded(reason: "editing toggled off")
+                }
+            }
+            .onChange(of: showFurigana) { _, enabled in
+                if enabled {
+                    triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on")
+                } else {
+                    furiganaAttributedText = nil
+                    furiganaTaskHandle?.cancel()
+                }
+            }
+            .onChange(of: readingFuriganaSize) { _, _ in
+                triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed")
             }
         }
     }
@@ -133,7 +201,7 @@ struct PasteView: View {
 
     public func newNote() {
         hideKeyboard()
-        isEditing = true
+        setEditing(true)
 
         inputText = ""
         notes.addNote(title: nil, text: "")
@@ -148,19 +216,20 @@ struct PasteView: View {
         }
 
         PasteBufferStore.save("")
+        furiganaAttributedText = nil
     }
 
     private func onAppearHandler() {
         if let note = router.noteToOpen {
             currentNote = note
             inputText = note.text
-            isEditing = false
+            setEditing(false, suppressRefresh: true)
             router.noteToOpen = nil
         }
         if !hasInitialized {
             if inputText.isEmpty {
                 // Default to edit mode when starting with empty paste area
-                isEditing = true
+                setEditing(true)
             }
             hasInitialized = true
         }
@@ -168,7 +237,7 @@ struct PasteView: View {
             let persisted = PasteBufferStore.load()
             if !persisted.isEmpty {
                 inputText = persisted
-                isEditing = false
+                setEditing(false, suppressRefresh: true)
             }
         }
     }
@@ -193,6 +262,119 @@ struct PasteView: View {
     private func hideKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
+
+    private func setEditing(_ editing: Bool, suppressRefresh: Bool = false) {
+        if suppressRefresh && editing == false {
+            suppressNextEditingRefresh = true
+        }
+        isEditing = editing
+    }
+
+    private func triggerFuriganaRefreshIfNeeded(reason: String = "state change") {
+        guard showFurigana else {
+            Self.logFurigana("Skipping refresh (\(reason)): furigana toggle is off.")
+            return
+        }
+        guard isEditing == false else {
+            Self.logFurigana("Skipping refresh (\(reason)): editor is in edit mode.")
+            return
+        }
+        guard inputText.isEmpty == false else {
+            Self.logFurigana("Skipping refresh (\(reason)): paste text is empty.")
+            return
+        }
+        furiganaRefreshToken &+= 1
+        Self.logFurigana("Queued refresh token \(furiganaRefreshToken) for text length \(inputText.count). Reason: \(reason)")
+        startFuriganaTask(token: furiganaRefreshToken)
+    }
+
+    private func startFuriganaTask(token: Int) {
+        guard let taskBody = makeFuriganaTask(token: token) else { return }
+        furiganaTaskHandle?.cancel()
+        furiganaTaskHandle = Task {
+            await taskBody()
+        }
+    }
+
+    private func makeFuriganaTask(token: Int) -> (() async -> Void)? {
+        guard showFurigana else {
+            Self.logFurigana("No furigana task created because toggle is off.")
+            return nil
+        }
+        guard inputText.isEmpty == false else {
+            Self.logFurigana("No furigana task created because text is empty.")
+            return nil
+        }
+        // Capture current values by value to avoid capturing self
+        let currentText = inputText
+        let currentShowFurigana = showFurigana
+        let currentIsEditing = isEditing
+        let currentTextSize = readingTextSize
+        let currentFuriganaSize = readingFuriganaSize
+        Self.logFurigana("Creating furigana task token \(token) for text length \(currentText.count). ShowF: \(currentShowFurigana), isEditing: \(currentIsEditing)")
+        return {
+            await PasteView.recomputeFurigana(
+                text: currentText,
+                showFurigana: currentShowFurigana,
+                isEditing: currentIsEditing,
+                textSize: currentTextSize,
+                furiganaSize: currentFuriganaSize
+            ) { newAttributed in
+                // Only update if state still matches to avoid stale updates
+                if inputText == currentText && showFurigana == currentShowFurigana && isEditing == currentIsEditing {
+                    furiganaAttributedText = newAttributed
+                }
+            }
+        }
+    }
+
+    private static func recomputeFurigana(
+        text: String,
+        showFurigana: Bool,
+        isEditing: Bool,
+        textSize: Double,
+        furiganaSize: Double,
+        update: @escaping (NSAttributedString?) -> Void
+    ) async {
+        guard showFurigana else {
+            logFurigana("Aborting recompute: furigana toggle is off.")
+            await MainActor.run { update(nil) }
+            return
+        }
+        guard isEditing == false else {
+            logFurigana("Aborting recompute: editor is in edit mode.")
+            await MainActor.run { update(nil) }
+            return
+        }
+        guard text.isEmpty == false else {
+            logFurigana("Aborting recompute: paste text is empty.")
+            await MainActor.run { update(nil) }
+            return
+        }
+
+        logFurigana("Starting furigana recompute for text length \(text.count).")
+        // Debounce to avoid hammering the dictionary during rapid edits/toggles
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        if Task.isCancelled { return }
+
+        do {
+            let attributed = try await FuriganaAttributedTextBuilder.build(
+                text: text,
+                textSize: textSize,
+                furiganaSize: furiganaSize,
+                context: "PasteView"
+            )
+            logFurigana("Furigana rebuild succeeded with attributed length \(attributed.length).")
+            await MainActor.run { update(attributed) }
+        } catch {
+            logFurigana("Furigana rebuild failed: \(String(describing: error)).")
+            await MainActor.run { update(nil) }
+        }
+    }
+
+    private static func logFurigana(_ message: String) {
+        furiganaLogger.info("\(message, privacy: .public)")
+    }
 }
 
 private struct ControlCell<Content: View>: View {
@@ -206,8 +388,11 @@ private struct ControlCell<Content: View>: View {
 
 private struct EditorContainer: View {
     @Binding var text: String
+    var furiganaText: NSAttributedString?
     var textSize: Double
     var isEditing: Bool
+    var showFurigana: Bool
+    var lineSpacing: Double
 
     private let placeholder = "Paste or type Japanese text"
 
@@ -216,13 +401,30 @@ private struct EditorContainer: View {
             Group {
                 if isEditing == false {
                     ScrollView {
-                        Text(text.isEmpty ? placeholder : text)
-                            .font(.system(size: textSize))
-                            .foregroundColor(text.isEmpty ? .secondary : .primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .multilineTextAlignment(.leading)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 8)
+                        Group {
+                            if text.isEmpty {
+                                Text(placeholder)
+                                    .foregroundColor(.secondary)
+                            } else {
+                                if showFurigana {
+                                    RubyText(
+                                        attributed: furiganaText ?? NSAttributedString(string: text),
+                                        fontSize: CGFloat(textSize),
+                                        lineHeightMultiple: 1.0,
+                                        extraGap: CGFloat(max(0, lineSpacing))
+                                    )
+                                } else {
+                                    Text(text)
+                                        .foregroundColor(.primary)
+                                        .lineSpacing(CGFloat(max(0, lineSpacing)))
+                                }
+                            }
+                        }
+                        .font(.system(size: textSize))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 16)
                     }
                 } else {
                     TextEditor(text: $text)
@@ -230,6 +432,8 @@ private struct EditorContainer: View {
                         .scrollContentBackground(.hidden)
                         .background(Color.clear)
                         .foregroundColor(.primary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 16)
 
                 }
             }
@@ -238,6 +442,8 @@ private struct EditorContainer: View {
                 Text(placeholder)
                     .font(.system(size: textSize))
                     .foregroundColor(.secondary)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 20)
             }
         }
         .padding(12)

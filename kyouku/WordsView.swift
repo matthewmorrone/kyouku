@@ -65,8 +65,8 @@ struct WordsView: View {
                     HStack(alignment: .firstTextBaseline) {
                         Text(displaySurface(for: entry))
                             .font(.headline)
-                        if entry.kana.isEmpty == false && entry.kana != entry.kanji {
-                            Text(entry.kana)
+                        if let kana = entry.kana, kana.isEmpty == false, kana != entry.kanji {
+                            Text(kana)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -98,8 +98,8 @@ struct WordsView: View {
                 VStack(alignment: .leading) {
                     Text(word.surface)
                         .font(.headline)
-                    if word.kana.isEmpty == false && word.kana != word.surface {
-                        Text(word.kana)
+                    if let kana = word.kana, kana.isEmpty == false, kana != word.surface {
+                        Text(kana)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -136,7 +136,13 @@ struct WordsView: View {
     }
 
     private func displaySurface(for entry: DictionaryEntry) -> String {
-        entry.kanji.isEmpty ? entry.kana : entry.kanji
+        if entry.kanji.isEmpty {
+            if let kana = entry.kana, kana.isEmpty == false {
+                return kana
+            }
+            return trimmedSearchText
+        }
+        return entry.kanji
     }
 
     private func firstGloss(for entry: DictionaryEntry) -> String {

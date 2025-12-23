@@ -19,22 +19,34 @@ final class WordsStore: ObservableObject {
     }
 
     /// The one and only add method.
+    ///
+    /// - Parameters:
+    ///   - surface: The written form captured from a dictionary lookup.
+    ///   - kana: The authoritative dictionary kana reading. Pass `nil` when the
+    ///     dictionary does not supply one; do not pass heuristics from pasted text.
+    ///   - meaning: Required localized gloss.
     /// Callers must provide a non-empty meaning/definition.
-    func add(surface: String, kana: String, meaning: String, note: String? = nil, sourceNoteID: UUID? = nil) {
+    func add(surface: String, kana: String?, meaning: String, note: String? = nil, sourceNoteID: UUID? = nil) {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        let k = kana.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedKana = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedKana: String?
+        if let tk = trimmedKana, tk.isEmpty == false {
+            normalizedKana = tk
+        } else {
+            normalizedKana = nil
+        }
         let m = meaning.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !s.isEmpty else { return }
         guard !m.isEmpty else { return }
 
-        if words.contains(where: { $0.surface == s && $0.kana == k }) {
+        if words.contains(where: { $0.surface == s && $0.kana == normalizedKana }) {
             return
         }
 
         let word = Word(
             surface: s,
-            kana: k,
+            kana: normalizedKana,
             meaning: m,
             note: note,
             sourceNoteID: sourceNoteID

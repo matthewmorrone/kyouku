@@ -8,10 +8,15 @@
 import Foundation
 import SQLite3
 
+/// Dictionary lookup result.
+///
+/// - Note: `kana` is the authoritative kana reading supplied by the dictionary
+///   database. It reflects the canonical reading of the lexical entry but may
+///   differ from how a word appears in running user text.
 struct DictionaryEntry: Identifiable, Hashable {
     let id: Int64
     let kanji: String
-    let kana: String
+    let kana: String?
     let gloss: String
     let isCommon: Bool
 }
@@ -174,7 +179,8 @@ actor DictionarySQLiteStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let kana = String(cString: sqlite3_column_text(stmt, 2))
+            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
+            let kana = kanaText.isEmpty ? nil : kanaText
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
             rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))
@@ -236,7 +242,8 @@ actor DictionarySQLiteStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let kana = String(cString: sqlite3_column_text(stmt, 2))
+            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
+            let kana = kanaText.isEmpty ? nil : kanaText
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
             rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))
@@ -335,7 +342,8 @@ actor DictionarySQLiteStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let kana = String(cString: sqlite3_column_text(stmt, 2))
+            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
+            let kana = kanaText.isEmpty ? nil : kanaText
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
             rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))

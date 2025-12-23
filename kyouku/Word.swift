@@ -7,10 +7,18 @@
 
 import Foundation
 
+/// A vocabulary item saved from a dictionary lookup.
+///
+/// - Note: `kana` stores the dictionary-provided kana reading for the entry.
+///   It may be `nil` when the dictionary offers no kana, and it is never
+///   populated from pasted text or heuristic furigana. When a user confirms a
+///   correction, that override is stored separately via `ReadingOverride` and
+///   does not mutate this model.
 struct Word: Identifiable, Codable, Hashable {
     let id: UUID
     var surface: String
-    var kana: String
+    /// Authoritative dictionary kana reading (if provided), never inferred from user text.
+    var kana: String?
     var meaning: String
     var note: String?
     var sourceNoteID: UUID? = nil
@@ -19,7 +27,7 @@ struct Word: Identifiable, Codable, Hashable {
     init(
         id: UUID = UUID(),
         surface: String,
-        kana: String,
+        kana: String? = nil,
         meaning: String,
         note: String? = nil,
         sourceNoteID: UUID? = nil,

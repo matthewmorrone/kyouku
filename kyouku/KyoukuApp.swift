@@ -12,6 +12,7 @@ struct KyoukuApp: App {
     @StateObject var notes = NotesStore()
     @StateObject var store = WordsStore()
     @StateObject var router = AppRouter()
+    @StateObject var readingOverrides = ReadingOverridesStore()
 
     var body: some Scene {
         WindowGroup {
@@ -19,6 +20,7 @@ struct KyoukuApp: App {
                 .environmentObject(notes)
                 .environmentObject(store)
                 .environmentObject(router)
+                .environmentObject(readingOverrides)
                 .onOpenURL { url in
                     // Expect kyouku://inbox to route to Paste tab; PasteView will ingest on appear/activation
                     if url.scheme == "kyouku" && url.host == "inbox" {

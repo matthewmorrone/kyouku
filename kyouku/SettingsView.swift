@@ -4,15 +4,29 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject private var wordsStore: WordsStore
     @EnvironmentObject private var notesStore: NotesStore
+    @EnvironmentObject private var readingOverrides: ReadingOverridesStore
+
+    @AppStorage("readingTextSize") private var readingTextSize: Double = 17
+    @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
+    @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
 
     @State private var exportURL: URL? = nil
     @State private var isImporting: Bool = false
     @State private var importError: String? = nil
     @State private var importSummary: String? = nil
 
+    @State private var previewAttributedText = NSAttributedString(string: SettingsView.previewSampleTextValue)
+
+    private static let previewPlainLine = "かなだけのぎょうです。"
+    private static let previewFuriganaLine = "京都で日本語を勉強しています。"
+    private static let previewSampleTextValue = "\(previewPlainLine)\n\(previewFuriganaLine)"
+
+    private var previewSampleText: String { Self.previewSampleTextValue }
+
     var body: some View {
         NavigationStack {
             Form {
+                textAppearanceSection
                 Section("Backup & Restore") {
                     Button("Export…") {
                         exportAll()
@@ -48,6 +62,47 @@ struct SettingsView: View {
             } message: {
                 Text(importSummary ?? "")
             }
+            .task {
+                await rebuildPreviewAttributedText()
+            }
+        }
+    }
+
+    private var textAppearanceSection: some View {
+        Section("Reading Appearance") {
+            RubyText(
+                attributed: previewAttributedText,
+                fontSize: CGFloat(readingTextSize),
+                lineHeightMultiple: 1.0,
+                extraGap: CGFloat(readingLineSpacing)
+            )
+            .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+            .padding(.vertical, 8)
+
+            HStack {
+                Text("Text Size")
+                Spacer()
+                Text("\(Int(readingTextSize))")
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: $readingTextSize, in: 1...30, step: 1)
+
+            HStack {
+                Text("Furigana Size")
+                Spacer()
+                Text("\(Int(readingFuriganaSize))")
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: $readingFuriganaSize, in: 1...30, step: 1)
+
+            HStack {
+                Text("Line Spacing")
+                Spacer()
+                Text("\(Int(readingLineSpacing))")
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: $readingLineSpacing, in: 1...30, step: 1)
+
         }
     }
 
@@ -79,8 +134,9 @@ struct SettingsView: View {
                 let backup = try AppDataBackup.importData(from: url)
                 wordsStore.replaceAll(with: backup.words)
                 notesStore.replaceAll(with: backup.notes)
+                readingOverrides.replaceAll(with: backup.readingOverrides)
                 NotificationCenter.default.post(name: .didImportNotesBackup, object: backup.notes)
-                importSummary = "Imported \(backup.words.count) words and \(backup.notes.count) notes."
+                importSummary = "Imported \(backup.words.count) words, \(backup.notes.count) notes, and \(backup.readingOverrides.count) reading overrides."
             } catch {
                 importError = error.localizedDescription
             }
@@ -93,9 +149,28 @@ struct SettingsView: View {
         do {
             let words = wordsStore.allWords()
             let notes = notesStore.allNotes()
-            exportURL = try AppDataBackup.exportData(words: words, notes: notes)
+            let overrides = readingOverrides.allOverrides()
+            exportURL = try AppDataBackup.exportData(words: words, notes: notes, readingOverrides: overrides)
         } catch {
             importError = error.localizedDescription
+        }
+    }
+
+    private func rebuildPreviewAttributedText() async {
+        do {
+            let attributed = try await FuriganaAttributedTextBuilder.build(
+                text: previewSampleText,
+                textSize: readingTextSize,
+                furiganaSize: readingFuriganaSize,
+                context: "SettingsPreview"
+            )
+            await MainActor.run {
+                previewAttributedText = attributed
+            }
+        } catch {
+            await MainActor.run {
+                previewAttributedText = NSAttributedString(string: previewSampleText)
+            }
         }
     }
 }
