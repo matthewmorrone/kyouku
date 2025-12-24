@@ -80,6 +80,35 @@ final class LexiconTrie {
         return lastMatchEnd
     }
 
+    /// Returns true when the substring `[index, endExclusive)` exists as a prefix inside the lexicon.
+    func hasPrefix(in text: NSString, from index: Int, through endExclusive: Int) -> Bool {
+        instrumentation.recordCursor()
+        let length = text.length
+        guard index < length else { return false }
+        guard endExclusive <= length else { return false }
+        instrumentation.recordTraversal()
+        var node = root
+        var cursor = index
+        var steps = 0
+        let loopStart = CFAbsoluteTimeGetCurrent()
+        while cursor < endExclusive && steps < maxWordLength {
+            let unit = text.character(at: cursor)
+            instrumentation.recordCharAccess()
+            instrumentation.recordLookup()
+            guard let next = node.children[unit] else {
+                instrumentation.recordSteps(steps)
+                instrumentation.recordTrieTime(CFAbsoluteTimeGetCurrent() - loopStart)
+                return false
+            }
+            node = next
+            cursor += 1
+            steps += 1
+        }
+        instrumentation.recordSteps(steps)
+        instrumentation.recordTrieTime(CFAbsoluteTimeGetCurrent() - loopStart)
+        return cursor == endExclusive
+    }
+
     func beginProfiling() {
         instrumentation.begin()
     }

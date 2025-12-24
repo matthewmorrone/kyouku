@@ -125,6 +125,8 @@ actor SegmentationService {
         let loopInterval = signposter.beginInterval("SegmentRangesLoop", "len=\(length)")
 
         var cursor = 0
+        var pendingNonKanjiStart: Int? = nil
+        var pendingNonKanjiKind: ScriptKind? = nil
         while cursor < length {
             trieLookups += 1
             let lookupStart = CFAbsoluteTimeGetCurrent()
@@ -135,26 +137,95 @@ actor SegmentationService {
             }
             if let end = matchEnd {
                 trieLookupTime += CFAbsoluteTimeGetCurrent() - lookupStart
-                let len = end - cursor
+                if let pending = pendingNonKanjiStart, pending < cursor {
+                    let pendingRange = NSRange(location: pending, length: cursor - pending)
+                    ranges.append(pendingRange)
+                    pendingNonKanjiStart = nil
+                    pendingNonKanjiKind = nil
+                }
+                let extendedEnd = await extendMatchEnd(
+                    trie: trie,
+                    swiftText: swiftText,
+                    text: text,
+                    startIndex: current,
+                    initialEnd: end,
+                    totalLength: length
+                )
+                let len = extendedEnd - cursor
                 sumMatchLen += len
                 if len > maxMatchLen { maxMatchLen = len }
                 let range = NSRange(location: cursor, length: len)
                 ranges.append(range)
                 matchesFound += 1
-                cursor = end
+                cursor = extendedEnd
                 continue
             }
             trieLookupTime += CFAbsoluteTimeGetCurrent() - lookupStart
 
             let unit = text.character(at: cursor)
-            if isKanji(unit) {
+            guard let scalar = UnicodeScalar(unit) else {
+                cursor += 1
+                continue
+            }
+
+            if Self.isKanji(unit) {
+                if let pending = pendingNonKanjiStart, pending < cursor {
+                    let pendingRange = NSRange(location: pending, length: cursor - pending)
+                    ranges.append(pendingRange)
+                    pendingNonKanjiStart = nil
+                    pendingNonKanjiKind = nil
+                }
                 kanjiCount += 1
                 singletonKanji += 1
                 ranges.append(NSRange(location: cursor, length: 1))
             } else {
                 nonKanjiCount += 1
+                if Self.isWhitespaceOrNewline(scalar) || Self.isPunctuation(scalar) {
+                    if let pending = pendingNonKanjiStart, pending < cursor {
+                        let pendingRange = NSRange(location: pending, length: cursor - pending)
+                        ranges.append(pendingRange)
+                        pendingNonKanjiStart = nil
+                        pendingNonKanjiKind = nil
+                    }
+                    ranges.append(NSRange(location: cursor, length: 1))
+                    cursor += 1
+                    continue
+                }
+
+                if Self.isStandaloneParticle(at: cursor, scalar: scalar, text: text, totalLength: length) {
+                    if let pending = pendingNonKanjiStart, pending < cursor {
+                        let pendingRange = NSRange(location: pending, length: cursor - pending)
+                        ranges.append(pendingRange)
+                        pendingNonKanjiStart = nil
+                        pendingNonKanjiKind = nil
+                    }
+                    ranges.append(NSRange(location: cursor, length: 1))
+                    cursor += 1
+                    continue
+                }
+
+                let kind = Self.scriptKind(for: scalar)
+                if let currentKind = pendingNonKanjiKind, currentKind != kind, let pending = pendingNonKanjiStart, pending < cursor {
+                    let pendingRange = NSRange(location: pending, length: cursor - pending)
+                    ranges.append(pendingRange)
+                    pendingNonKanjiStart = nil
+                    pendingNonKanjiKind = nil
+                }
+                if pendingNonKanjiStart == nil {
+                    pendingNonKanjiStart = cursor
+                    pendingNonKanjiKind = kind
+                }
+                cursor += 1
+                continue
             }
             cursor += 1
+        }
+
+        if let pending = pendingNonKanjiStart, pending < length {
+            let pendingRange = NSRange(location: pending, length: length - pending)
+            ranges.append(pendingRange)
+            pendingNonKanjiStart = nil
+            pendingNonKanjiKind = nil
         }
 
         logger.debug("segmentRanges: finished scan with \(ranges.count) ranges. Performing metrics…")
@@ -172,8 +243,242 @@ actor SegmentationService {
         return ranges
     }
 
-    private func isKanji(_ unit: unichar) -> Bool {
+    private func extendMatchEnd(
+        trie: LexiconTrie,
+        swiftText: String,
+        text: NSString,
+        startIndex: Int,
+        initialEnd: Int,
+        totalLength: Int
+    ) async -> Int {
+        var end = initialEnd
+        var consumedKana = 0
+        while end < totalLength {
+            let unit = text.character(at: end)
+            guard let scalar = UnicodeScalar(unit) else { break }
+            if Self.isWhitespaceOrNewline(scalar) || Self.isPunctuation(scalar) { break }
+            if Self.particleScalars.contains(scalar) { break }
+            if Self.isExtensionStopSequence(in: swiftText, start: end) { break }
+            if Self.isHiragana(unit) {
+                if consumedKana > 0 && Self.okuriganaStopSet.contains(scalar) {
+                    break
+                }
+                // Do not swallow the next dictionary word
+                let nextMatchEnd: Int? = await MainActor.run {
+                    let ns = swiftText as NSString
+                    return trie.longestMatchEnd(in: ns, from: end)
+                }
+                if nextMatchEnd != nil { break }
+
+                let candidateEnd = end + 1
+                let hasLexiconPrefix: Bool = await MainActor.run {
+                    let ns = swiftText as NSString
+                    return trie.hasPrefix(in: ns, from: startIndex, through: candidateEnd)
+                }
+                if hasLexiconPrefix {
+                    consumedKana += 1
+                    end = candidateEnd
+                    continue
+                }
+
+                if let fallbackLength = Self.okuriganaFallbackLength(in: swiftText, start: end) {
+                    consumedKana += fallbackLength
+                    end += fallbackLength
+                    continue
+                }
+
+                break
+            }
+            break
+        }
+        return end
+    }
+
+    private static func isKanji(_ unit: unichar) -> Bool {
         (0x4E00...0x9FFF).contains(Int(unit))
+    }
+
+    private static func isHiragana(_ unit: unichar) -> Bool {
+        (0x3040...0x309F).contains(Int(unit))
+    }
+
+    private static func isKatakana(_ unit: unichar) -> Bool {
+        if (0x30A0...0x30FF).contains(Int(unit)) { return true }
+        if unit == 0x30FC || unit == 0xFF70 { return true } // prolonged sound marks
+        return false
+    }
+
+    private static func isWhitespaceOrNewline(_ scalar: UnicodeScalar) -> Bool {
+        CharacterSet.whitespacesAndNewlines.contains(scalar)
+    }
+
+    private static func isPunctuation(_ scalar: UnicodeScalar) -> Bool {
+        if CharacterSet.punctuationCharacters.contains(scalar) { return true }
+        return punctuationExtras.contains(scalar)
+    }
+
+    private static func scriptKind(for scalar: UnicodeScalar) -> ScriptKind {
+        if (0x3040...0x309F).contains(Int(scalar.value)) { return .hiragana }
+        if (0x30A0...0x30FF).contains(Int(scalar.value)) || scalar.value == 0x30FC || scalar.value == 0xFF70 {
+            return .katakana
+        }
+        if (0x0030...0x0039).contains(Int(scalar.value)) { return .numeric }
+        if (0x0041...0x005A).contains(Int(scalar.value)) || (0x0061...0x007A).contains(Int(scalar.value)) {
+            return .latin
+        }
+        return .other
+    }
+
+    private static func isStandaloneParticle(at index: Int, scalar: UnicodeScalar, text: NSString, totalLength: Int) -> Bool {
+        guard particleScalars.contains(scalar) else { return false }
+        // Require previous or next boundary markers to reduce false positives
+        let prevChar = (index - 1) >= 0 ? text.character(at: index - 1) : 0
+        let nextChar = (index + 1) < totalLength ? text.character(at: index + 1) : 0
+        if prevChar == 0, nextChar != 0, isHiragana(nextChar) {
+            // avoid splitting words that begin with kana such as "もの" or "のに"
+            return false
+        }
+        if scalar == "な" {
+            if prevChar == 0 { return false }
+            if isHiragana(prevChar) { return false }
+        }
+        let prevIsBoundary = prevChar == 0 || isBoundaryChar(prevChar)
+        let nextIsBoundary = nextChar == 0 || isBoundaryChar(nextChar)
+        if prevIsBoundary || nextIsBoundary { return true }
+        if prevChar != 0 && isKanji(prevChar) { return true }
+        if nextChar != 0 && isKanji(nextChar) { return true }
+        if let prevScalar = UnicodeScalar(prevChar), scriptKind(for: prevScalar) != .hiragana {
+            return true
+        }
+        if let nextScalar = UnicodeScalar(nextChar), scriptKind(for: nextScalar) != .hiragana {
+            return true
+        }
+        return false
+    }
+
+    private static func isBoundaryChar(_ unit: unichar) -> Bool {
+        if unit == 0 { return true }
+        if isHiragana(unit) == false && isKatakana(unit) == false && (0x4E00...0x9FFF).contains(Int(unit)) == false {
+            return true
+        }
+        if let scalar = UnicodeScalar(unit) {
+            return isWhitespaceOrNewline(scalar) || isPunctuation(scalar)
+        }
+        return false
+    }
+
+    private static let particleScalars: Set<UnicodeScalar> = {
+        let particles = "はがをにでへものねよもな"
+        return Set(particles.unicodeScalars)
+    }()
+
+    private static func isExtensionStopSequence(in text: String, start: Int) -> Bool {
+        guard start < text.utf16.count else { return false }
+        for sequence in extensionStopSequences {
+            if text.hasPrefix(sequence, fromUTF16Offset: start) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func okuriganaFallbackLength(in text: String, start: Int) -> Int? {
+        guard start < text.utf16.count else { return nil }
+        for sequence in okuriganaFallbackSequences {
+            if text.hasPrefix(sequence, fromUTF16Offset: start) {
+                return sequence.utf16.count
+            }
+        }
+        return nil
+    }
+
+    private static let extensionStopSequences: [String] = [
+        "なら",
+        "ならば",
+        "ので",
+        "のに",
+        "のは",
+        "のを",
+        "のでしょう",
+        "のです"
+    ]
+
+    private static let okuriganaFallbackSequences: [String] = {
+        let sequences = [
+            "させられた",
+            "させられる",
+            "させられ",
+            "させない",
+            "させた",
+            "させて",
+            "させる",
+            "られない",
+            "られた",
+            "られて",
+            "られる",
+            "かれない",
+            "かれた",
+            "かれて",
+            "かれる",
+            "かれ",
+            "されない",
+            "された",
+            "されて",
+            "される",
+            "いたい",
+            "たかった",
+            "たくて",
+            "たく",
+            "たい",
+            "った",
+            "って",
+            "て",
+            "た",
+            "れなかった",
+            "れない",
+            "れた",
+            "れて",
+            "れる",
+            "なくて",
+            "なく",
+            "なかった",
+            "ない"
+        ]
+        return sequences.sorted { $0.utf16.count > $1.utf16.count }
+    }()
+
+    private static let okuriganaStopSet: Set<UnicodeScalar> = {
+        let markers = "はがをにでへともやかものねよぞわな"
+        return Set(markers.unicodeScalars)
+    }()
+
+    private static let punctuationExtras: Set<UnicodeScalar> = {
+        let chars = "、。！？：；（）［］｛｝「」『』・…―〜。・"
+        return Set(chars.unicodeScalars)
+    }()
+}
+
+private enum ScriptKind {
+    case hiragana
+    case katakana
+    case latin
+    case numeric
+    case other
+}
+
+private extension String {
+    func hasPrefix(_ prefix: String, fromUTF16Offset offset: Int) -> Bool {
+        guard offset >= 0 else { return false }
+        // Ensure the UTF-16 offset is within the string bounds
+        let utf16Count = self.utf16.count
+        guard offset <= utf16Count else { return false }
+
+        // Create a String.Index from the UTF-16 offset (non-optional in modern Swift)
+        let startIndex = String.Index(utf16Offset: offset, in: self)
+        let limit = self.endIndex
+        // Advance by the prefix's character count, limited by the end index
+        guard let endIndex = self.index(startIndex, offsetBy: prefix.count, limitedBy: limit) else { return false }
+        return self[startIndex..<endIndex] == prefix
     }
 }
 

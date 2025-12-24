@@ -73,9 +73,12 @@ struct RubyText: UIViewRepresentable {
         mutable.addAttribute(.foregroundColor, value: UIColor.label, range: fullRange)
         mutable.addAttribute(.font, value: baseFont, range: fullRange)
 
+        if tokenOverlays.isEmpty == false {
+            RubyText.applyTokenColors(tokenOverlays, to: mutable)
+        }
+
         let processed = RubyText.applyAnnotationVisibility(annotationVisibility, to: mutable)
         uiView.attributedText = processed
-        uiView.tokenOverlays = tokenOverlays
         
         // Help the view expand vertically rather than compress
         uiView.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -153,34 +156,22 @@ struct RubyText: UIViewRepresentable {
         }
         return attributedString
     }
+
+    private static func applyTokenColors(
+        _ overlays: [TokenOverlay],
+        to attributedString: NSMutableAttributedString
+    ) {
+        guard attributedString.length > 0 else { return }
+        let length = attributedString.length
+        for overlay in overlays {
+            guard overlay.range.location != NSNotFound, overlay.range.length > 0 else { continue }
+            guard NSMaxRange(overlay.range) <= length else { continue }
+            attributedString.addAttribute(.foregroundColor, value: overlay.color, range: overlay.range)
+        }
+    }
 }
 
 final class TokenOverlayTextView: UITextView {
-    var tokenOverlays: [RubyText.TokenOverlay] = [] {
-        didSet {
-            guard oldValue != tokenOverlays else { return }
-            overlaysDirty = true
-            setNeedsLayout()
-        }
-    }
-
-    private var overlayLayers: [CAShapeLayer] = []
-    private var overlaysDirty = true
-
-    override var attributedText: NSAttributedString! {
-        didSet {
-            overlaysDirty = true
-            setNeedsLayout()
-        }
-    }
-
-    override var textContainerInset: UIEdgeInsets {
-        didSet {
-            overlaysDirty = true
-            setNeedsLayout()
-        }
-    }
-
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
         sharedInit()
@@ -202,68 +193,6 @@ final class TokenOverlayTextView: UITextView {
         layer.masksToBounds = false
         showsVerticalScrollIndicator = false
         showsHorizontalScrollIndicator = false
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        guard overlaysDirty else { return }
-        overlaysDirty = false
-        rebuildOverlayLayers()
-    }
-
-    private func rebuildOverlayLayers() {
-        overlayLayers.forEach { $0.removeFromSuperlayer() }
-        overlayLayers.removeAll()
-        guard tokenOverlays.isEmpty == false else { return }
-        let textLength = textStorage.length
-        guard textLength > 0 else { return }
-
-        layoutManager.ensureLayout(for: textContainer)
-
-        var groupedPaths: [String: UIBezierPath] = [:]
-        var groupedColors: [String: UIColor] = [:]
-
-        for overlay in tokenOverlays {
-            guard overlay.range.location != NSNotFound, overlay.range.length > 0 else { continue }
-            guard NSMaxRange(overlay.range) <= textLength else { continue }
-            let glyphRange = layoutManager.glyphRange(forCharacterRange: overlay.range, actualCharacterRange: nil)
-            layoutManager.enumerateEnclosingRects(
-                forGlyphRange: glyphRange,
-                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                in: textContainer
-            ) { rect, _ in
-                var adjusted = rect
-                adjusted.origin.x += self.textContainerInset.left
-                adjusted.origin.y += self.textContainerInset.top
-                adjusted = adjusted.insetBy(dx: -1.0, dy: -1.0)
-                let key = String(describing: overlay.color.cgColor)
-                let path: UIBezierPath
-                if let existing = groupedPaths[key] {
-                    path = existing
-                } else {
-                    let newPath = UIBezierPath()
-                    groupedPaths[key] = newPath
-                    groupedColors[key] = overlay.color
-                    path = newPath
-                }
-                path.append(UIBezierPath(roundedRect: adjusted, cornerRadius: 4))
-            }
-        }
-
-        for (key, path) in groupedPaths {
-            guard let color = groupedColors[key] else { continue }
-            let layer = CAShapeLayer()
-            layer.path = path.cgPath
-            layer.strokeColor = color.cgColor
-            layer.fillColor = UIColor.clear.cgColor
-            layer.lineWidth = 1
-            layer.zPosition = 1
-            layer.lineJoin = .round
-            layer.lineCap = .round
-            layer.frame = bounds
-            self.layer.addSublayer(layer)
-            overlayLayers.append(layer)
-        }
     }
 }
 

@@ -167,6 +167,11 @@ struct PasteView: View {
                     furiganaTaskHandle?.cancel()
                 }
             }
+            .onChange(of: alternateTokenColors) { _, enabled in
+                if enabled {
+                    triggerFuriganaRefreshIfNeeded(reason: "alternate token colors toggled on", recomputeSpans: false)
+                }
+            }
             .onChange(of: readingFuriganaSize) { _, _ in
                 triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
             }
@@ -288,8 +293,8 @@ struct PasteView: View {
     }
 
     private func triggerFuriganaRefreshIfNeeded(reason: String = "state change", recomputeSpans: Bool = true) {
-        guard showFurigana else {
-            Self.logFurigana("Skipping refresh (\(reason)): furigana toggle is off.")
+        guard showFurigana || alternateTokenColors else {
+            Self.logFurigana("Skipping refresh (\(reason)): no consumers need annotated spans.")
             return
         }
         guard isEditing == false else {
@@ -314,8 +319,8 @@ struct PasteView: View {
     }
 
     private func makeFuriganaTask(token: Int, recomputeSpans: Bool) -> (() async -> Void)? {
-        guard showFurigana else {
-            Self.logFurigana("No furigana task created because toggle is off.")
+        guard showFurigana || alternateTokenColors else {
+            Self.logFurigana("No furigana task created because no consumer requires spans.")
             return nil
         }
         guard inputText.isEmpty == false else {
@@ -325,6 +330,7 @@ struct PasteView: View {
         // Capture current values by value to avoid capturing self
         let currentText = inputText
         let currentShowFurigana = showFurigana
+        let currentAlternateTokenColors = alternateTokenColors
         let currentIsEditing = isEditing
         let currentTextSize = readingTextSize
         let currentFuriganaSize = readingFuriganaSize
@@ -334,6 +340,7 @@ struct PasteView: View {
             await PasteView.recomputeFurigana(
                 text: currentText,
                 showFurigana: currentShowFurigana,
+                needsTokenHighlights: currentAlternateTokenColors,
                 isEditing: currentIsEditing,
                 textSize: currentTextSize,
                 furiganaSize: currentFuriganaSize,
@@ -352,6 +359,7 @@ struct PasteView: View {
     private static func recomputeFurigana(
         text: String,
         showFurigana: Bool,
+        needsTokenHighlights: Bool,
         isEditing: Bool,
         textSize: Double,
         furiganaSize: Double,
@@ -359,8 +367,8 @@ struct PasteView: View {
         existingSpans: [AnnotatedSpan]?,
         update: @escaping ([AnnotatedSpan]?, NSAttributedString?) -> Void
     ) async {
-        guard showFurigana else {
-            logFurigana("Aborting recompute: furigana toggle is off.")
+        guard showFurigana || needsTokenHighlights else {
+            logFurigana("Aborting recompute: no consumers require annotated spans.")
             await MainActor.run { update(existingSpans, nil) }
             return
         }
@@ -454,6 +462,7 @@ private struct EditorContainer: View {
                 }
             }
         }
+        .padding(0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
         .cornerRadius(12)
@@ -462,11 +471,17 @@ private struct EditorContainer: View {
     private var editorContent: some View {
         TextEditor(text: $text)
             .font(.system(size: textSize))
+            .lineSpacing(lineSpacing)
             .scrollContentBackground(.hidden)
             .background(Color.clear)
             .foregroundColor(.primary)
-            .padding(.all, 0)
-            .border(.white)
+            .padding(editorInsets)
+    }
+
+    private var editorInsets: EdgeInsets {
+        let rubyHeadroom = max(0.0, textSize * 0.6 + lineSpacing)
+        let topInset = max(8.0, rubyHeadroom)
+        return EdgeInsets(top: CGFloat(topInset), leading: 11, bottom: 12, trailing: 12)
     }
 
     private func displayShell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -502,16 +517,40 @@ private struct EditorContainer: View {
         let palette: [UIColor] = [UIColor.systemBlue, UIColor.systemPink]
         guard palette.isEmpty == false else { return [] }
         let maxLength = furiganaText?.length ?? (text as NSString).length
+        let coverageRanges = Self.coverageRanges(from: spans, textLength: maxLength)
         var overlays: [RubyText.TokenOverlay] = []
-        overlays.reserveCapacity(spans.count)
-        for (index, span) in spans.enumerated() {
-            let range = span.span.range
-            guard range.location != NSNotFound, range.length > 0 else { continue }
-            guard NSMaxRange(range) <= maxLength else { continue }
+        overlays.reserveCapacity(coverageRanges.count)
+        for (index, range) in coverageRanges.enumerated() {
             let color = palette[index % palette.count]
             overlays.append(RubyText.TokenOverlay(range: range, color: color))
         }
         return overlays
+    }
+
+    private static func coverageRanges(from spans: [AnnotatedSpan], textLength: Int) -> [NSRange] {
+        guard textLength > 0 else { return [] }
+        let bounds = NSRange(location: 0, length: textLength)
+        let sorted = spans
+            .map { $0.span.range }
+            .filter { $0.location != NSNotFound && $0.length > 0 }
+            .map { NSIntersectionRange($0, bounds) }
+            .filter { $0.length > 0 }
+            .sorted { $0.location < $1.location }
+
+        var ranges: [NSRange] = []
+        ranges.reserveCapacity(sorted.count + 4)
+        var cursor = 0
+        for range in sorted {
+            if range.location > cursor {
+                ranges.append(NSRange(location: cursor, length: range.location - cursor))
+            }
+            ranges.append(range)
+            cursor = max(cursor, NSMaxRange(range))
+        }
+        if cursor < textLength {
+            ranges.append(NSRange(location: cursor, length: textLength - cursor))
+        }
+        return ranges
     }
 }
 

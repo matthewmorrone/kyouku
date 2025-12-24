@@ -110,7 +110,7 @@ enum FuriganaAttributedTextBuilder {
         let rubyFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, furiganaSize)))
         let attributes = [kCTFontAttributeName as NSAttributedString.Key: rubyFont] as CFDictionary
         return CTRubyAnnotationCreateWithAttributes(
-            .auto,
+            .center,
             .auto,
             .before,
             text as CFString,
