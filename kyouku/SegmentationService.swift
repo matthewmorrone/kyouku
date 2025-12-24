@@ -41,7 +41,7 @@ actor SegmentationService {
 
         let rangesInterval = signposter.beginInterval("SegmentRanges")
         let segmentationStart = CFAbsoluteTimeGetCurrent()
-        let ranges = segmentRanges(using: trie, text: nsText)
+        let ranges = await segmentRanges(using: trie, text: nsText)
         let segmentationMs = (CFAbsoluteTimeGetCurrent() - segmentationStart) * 1000
         logger.debug("SegmentationService: segmentRanges took \(String(format: "%.3f", segmentationMs)) ms.")
         signposter.endInterval("SegmentRanges", rangesInterval)
@@ -57,7 +57,6 @@ actor SegmentationService {
 
         store(spans, for: key)
         let overallDurationMsDouble = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-        let overallDurationMs = Int(overallDurationMsDouble.rounded())
         logger.debug("Segmented text length \(text.count) into \(spans.count) spans in \(String(format: "%.3f", overallDurationMsDouble)) ms (trie: \(String(format: "%.3f", trieLoadMs)) ms, segment: \(String(format: "%.3f", segmentationMs)) ms, map: \(String(format: "%.3f", mapMs)) ms).")
         signposter.endInterval("Segment", segInterval)
         return spans
@@ -99,7 +98,7 @@ actor SegmentationService {
         return t
     }
 
-    private func segmentRanges(using trie: LexiconTrie, text: NSString) -> [NSRange] {
+    private func segmentRanges(using trie: LexiconTrie, text: NSString) async -> [NSRange] {
         let length = text.length
         guard length > 0 else { return [] }
 
@@ -117,7 +116,11 @@ actor SegmentationService {
         var maxMatchLen = 0
         var trieLookupTime: Double = 0
 
-        trie.beginProfiling()
+        await MainActor.run {
+            trie.beginProfiling()
+        }
+        // Make a Sendable copy to avoid capturing NSString in a @Sendable closure
+        let swiftText: String = text as String
         let profilingStart = CFAbsoluteTimeGetCurrent()
         let loopInterval = signposter.beginInterval("SegmentRangesLoop", "len=\(length)")
 
@@ -125,7 +128,12 @@ actor SegmentationService {
         while cursor < length {
             trieLookups += 1
             let lookupStart = CFAbsoluteTimeGetCurrent()
-            if let end = trie.longestMatchEnd(in: text, from: cursor) {
+            let current = cursor
+            let matchEnd: Int? = await MainActor.run { [current, swiftText] in
+                let ns = swiftText as NSString
+                return trie.longestMatchEnd(in: ns, from: current)
+            }
+            if let end = matchEnd {
                 trieLookupTime += CFAbsoluteTimeGetCurrent() - lookupStart
                 let len = end - cursor
                 sumMatchLen += len
@@ -156,7 +164,9 @@ actor SegmentationService {
         let lookupMs = trieLookupTime * 1000
         let avgMatchLen = matchesFound > 0 ? Double(sumMatchLen) / Double(matchesFound) : 0
         logger.debug("segmentRanges: scanned length \(length) -> \(ranges.count) ranges in \(String(format: "%.3f", totalMs)) ms (lookups: \(trieLookups), matches: \(matchesFound), singletons: \(singletonKanji), avgMatchLen: \(String(format: "%.2f", avgMatchLen)), maxMatchLen: \(maxMatchLen), kanji: \(kanjiCount), nonKanji: \(nonKanjiCount), lookupTime: \(String(format: "%.3f", lookupMs)) ms).")
-        trie.endProfiling(totalDuration: totalDuration)
+        await MainActor.run {
+            trie.endProfiling(totalDuration: totalDuration)
+        }
         signposter.endInterval("SegmentRangesLoop", loopInterval)
 
         return ranges

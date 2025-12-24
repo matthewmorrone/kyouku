@@ -43,7 +43,7 @@ struct SpanReadingAttacher {
         guard let tokenizer = tokenizerOpt else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
             await Self.cache.store(passthrough, for: key)
-            let duration = Self.elapsedMilliseconds(since: start)
+//            let duration = Self.elapsedMilliseconds(since: start)
 //            Self.logger.error("[SpanReadingAttacher] Failed to acquire tokenizer. Returning passthrough spans in \(duration, privacy: .public) ms.")
             Self.signposter.endInterval("AttachReadings Overall", overallInterval)
             return passthrough
@@ -243,9 +243,18 @@ private struct MeCabAnnotation {
     let surface: String
 }
 
-private struct ReadingAttachmentCacheKey: Hashable, Sendable {
+private struct ReadingAttachmentCacheKey: Sendable, nonisolated Hashable {
     let textHash: Int
     let spanSignature: Int
+
+    nonisolated static func == (lhs: ReadingAttachmentCacheKey, rhs: ReadingAttachmentCacheKey) -> Bool {
+        lhs.textHash == rhs.textHash && lhs.spanSignature == rhs.spanSignature
+    }
+
+    nonisolated func hash(into hasher: inout Hasher) {
+        hasher.combine(textHash)
+        hasher.combine(spanSignature)
+    }
 }
 
 private actor ReadingAttachmentCache {
@@ -271,3 +280,4 @@ private actor ReadingAttachmentCache {
         }
     }
 }
+

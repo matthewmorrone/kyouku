@@ -16,6 +16,12 @@ struct SettingsView: View {
     @State private var importSummary: String? = nil
 
     @State private var previewAttributedText = NSAttributedString(string: SettingsView.previewSampleTextValue)
+    @State private var previewRebuildTask: Task<Void, Never>? = nil
+    @State private var previewSpans: [AnnotatedSpan]? = nil
+    @State private var previewValuesInitialized = false
+    @State private var pendingReadingTextSize: Double = 17
+    @State private var pendingReadingFuriganaSize: Double = 9
+    @State private var pendingReadingLineSpacing: Double = 4
 
     private static let previewPlainLine = "かなだけのぎょうです。"
     private static let previewFuriganaLine = "京都で日本語を勉強しています。"
@@ -62,9 +68,11 @@ struct SettingsView: View {
             } message: {
                 Text(importSummary ?? "")
             }
-            .task {
-                await rebuildPreviewAttributedText()
-            }
+            .task { await initializePreviewValuesIfNeeded() }
+            .onChange(of: readingTextSize) { _, newValue in syncPendingTextSize(to: newValue) }
+            .onChange(of: readingFuriganaSize) { _, newValue in syncPendingFuriganaSize(to: newValue) }
+            .onChange(of: readingLineSpacing) { _, newValue in syncPendingLineSpacing(to: newValue) }
+            .onDisappear { previewRebuildTask?.cancel() }
         }
     }
 
@@ -72,9 +80,9 @@ struct SettingsView: View {
         Section("Reading Appearance") {
             RubyText(
                 attributed: previewAttributedText,
-                fontSize: CGFloat(readingTextSize),
+                fontSize: CGFloat(pendingReadingTextSize),
                 lineHeightMultiple: 1.0,
-                extraGap: CGFloat(readingLineSpacing)
+                extraGap: CGFloat(pendingReadingLineSpacing)
             )
             .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
             .padding(.vertical, 8)
@@ -82,26 +90,56 @@ struct SettingsView: View {
             HStack {
                 Text("Text Size")
                 Spacer()
-                Text("\(Int(readingTextSize))")
+                Text("\(Int(pendingReadingTextSize))")
                     .foregroundStyle(.secondary)
             }
-            Slider(value: $readingTextSize, in: 1...30, step: 1)
+            Slider(
+                value: Binding(
+                    get: { pendingReadingTextSize },
+                    set: { pendingReadingTextSize = $0; schedulePreviewRebuild() }
+                ),
+                in: 1...30,
+                step: 1,
+                onEditingChanged: { editing in
+                    if editing == false { readingTextSize = pendingReadingTextSize }
+                }
+            )
 
             HStack {
                 Text("Furigana Size")
                 Spacer()
-                Text("\(Int(readingFuriganaSize))")
+                Text("\(Int(pendingReadingFuriganaSize))")
                     .foregroundStyle(.secondary)
             }
-            Slider(value: $readingFuriganaSize, in: 1...30, step: 1)
+            Slider(
+                value: Binding(
+                    get: { pendingReadingFuriganaSize },
+                    set: { pendingReadingFuriganaSize = $0; schedulePreviewRebuild() }
+                ),
+                in: 1...30,
+                step: 1,
+                onEditingChanged: { editing in
+                    if editing == false { readingFuriganaSize = pendingReadingFuriganaSize }
+                }
+            )
 
             HStack {
                 Text("Line Spacing")
                 Spacer()
-                Text("\(Int(readingLineSpacing))")
+                Text("\(Int(pendingReadingLineSpacing))")
                     .foregroundStyle(.secondary)
             }
-            Slider(value: $readingLineSpacing, in: 1...30, step: 1)
+            Slider(
+                value: Binding(
+                    get: { pendingReadingLineSpacing },
+                    set: { pendingReadingLineSpacing = $0 }
+                ),
+                in: 1...30,
+                step: 1,
+                onEditingChanged: { editing in
+                    if editing == false { readingLineSpacing = pendingReadingLineSpacing }
+                }
+            )
 
         }
     }
@@ -156,21 +194,80 @@ struct SettingsView: View {
         }
     }
 
-    private func rebuildPreviewAttributedText() async {
+    @MainActor
+    private func initializePreviewValuesIfNeeded() async {
+        guard previewValuesInitialized == false else { return }
+        previewValuesInitialized = true
+        pendingReadingTextSize = readingTextSize
+        pendingReadingFuriganaSize = readingFuriganaSize
+        pendingReadingLineSpacing = readingLineSpacing
+        _ = await ensurePreviewSpans()
+        schedulePreviewRebuild()
+    }
+
+    private func syncPendingTextSize(to newValue: Double) {
+        guard previewValuesInitialized else { return }
+        if abs(pendingReadingTextSize - newValue) > .ulpOfOne {
+            pendingReadingTextSize = newValue
+            schedulePreviewRebuild()
+        }
+    }
+
+    private func syncPendingFuriganaSize(to newValue: Double) {
+        guard previewValuesInitialized else { return }
+        if abs(pendingReadingFuriganaSize - newValue) > .ulpOfOne {
+            pendingReadingFuriganaSize = newValue
+            schedulePreviewRebuild()
+        }
+    }
+
+    private func syncPendingLineSpacing(to newValue: Double) {
+        guard previewValuesInitialized else { return }
+        if abs(pendingReadingLineSpacing - newValue) > .ulpOfOne {
+            pendingReadingLineSpacing = newValue
+        }
+    }
+
+    private func schedulePreviewRebuild() {
+        let textSize = pendingReadingTextSize
+        let furiganaSize = pendingReadingFuriganaSize
+        previewRebuildTask?.cancel()
+        previewRebuildTask = Task {
+            await rebuildPreviewAttributedText(textSize: textSize, furiganaSize: furiganaSize)
+        }
+    }
+
+    private func rebuildPreviewAttributedText(textSize: Double, furiganaSize: Double) async {
+        let spans = await ensurePreviewSpans()
+        if Task.isCancelled { return }
+        let attributed = FuriganaAttributedTextBuilder.project(
+            text: previewSampleText,
+            annotatedSpans: spans,
+            textSize: textSize,
+            furiganaSize: furiganaSize,
+            context: "SettingsPreview"
+        )
+        if Task.isCancelled { return }
+        await MainActor.run {
+            previewAttributedText = attributed
+        }
+    }
+
+    private func ensurePreviewSpans() async -> [AnnotatedSpan] {
+        if let cached = await MainActor.run(body: { () -> [AnnotatedSpan]? in previewSpans }) {
+            return cached
+        }
+
         do {
-            let attributed = try await FuriganaAttributedTextBuilder.build(
+            let spans = try await FuriganaAttributedTextBuilder.computeAnnotatedSpans(
                 text: previewSampleText,
-                textSize: readingTextSize,
-                furiganaSize: readingFuriganaSize,
                 context: "SettingsPreview"
             )
-            await MainActor.run {
-                previewAttributedText = attributed
-            }
+            await MainActor.run { previewSpans = spans }
+            return spans
         } catch {
-            await MainActor.run {
-                previewAttributedText = NSAttributedString(string: previewSampleText)
-            }
+            await MainActor.run { previewSpans = [] }
+            return []
         }
     }
 }

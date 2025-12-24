@@ -39,7 +39,12 @@ actor LexiconProvider {
             let buildStart = CFAbsoluteTimeGetCurrent()
             let buildInterval = signposter.beginInterval("Trie() Build LexiconTrie")
             // Build the trie off the main thread to avoid UI hitching
-            let trie = LexiconTrie(words: forms)
+            let trie: LexiconTrie = await withCheckedContinuation { continuation in
+                Task { @MainActor in
+                    let built = LexiconTrie(words: forms)
+                    continuation.resume(returning: built)
+                }
+            }
             signposter.endInterval("Trie() Build LexiconTrie", buildInterval)
             let buildMs = (CFAbsoluteTimeGetCurrent() - buildStart) * 1000
             self.logger.info("LexiconProvider.trie(): LexiconTrie build took \(String(format: "%.3f", buildMs)) ms")
