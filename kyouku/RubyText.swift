@@ -121,7 +121,9 @@ struct RubyText: UIViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: TokenOverlayTextView, context: Context) -> CGSize {
         let proposedWidth = proposal.width
-        let baseWidth = (proposedWidth ?? (uiView.bounds.width > 0 ? uiView.bounds.width : UIScreen.main.bounds.width))
+        let contextScreenWidth: CGFloat? = uiView.window?.windowScene?.screen.bounds.width
+        let fallbackWidth: CGFloat = (uiView.bounds.width > 0 ? uiView.bounds.width : (contextScreenWidth ?? 320))
+        let baseWidth = proposedWidth ?? fallbackWidth
         let insets = uiView.textContainerInset
         let availableWidth = max(0, baseWidth - insets.left - insets.right)
 
@@ -149,7 +151,8 @@ struct RubyText: UIViewRepresentable {
         let lineHeight = font.lineHeight
         let extraFromMultiplier = max(0, lineHeight * (multiplier - 1))
         let bottom = spacing + extraFromMultiplier
-        return UIEdgeInsets(top: 0, left: 0, bottom: bottom, right: 0)
+        // let rubyHeadroom = max(0, font.pointSize * 0.6 + spacing)
+        return UIEdgeInsets(top: -spacing, left: 0, bottom: bottom, right: 0)
     }
 
     private static let coreTextRubyAttribute = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
@@ -215,7 +218,7 @@ struct RubyText: UIViewRepresentable {
     private static func applyCustomizationHighlights(_ ranges: [NSRange], to attributedString: NSMutableAttributedString) {
         guard attributedString.length > 0 else { return }
         for range in ranges {
-            guard let clamped = clampRange(range, length: attributedString.length) else { continue }
+            guard clampRange(range, length: attributedString.length) != nil else { continue }
             // attributedString.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: clamped)
             // attributedString.addAttribute(.underlineColor, value: UIColor.systemTeal, range: clamped)
         }
@@ -273,13 +276,18 @@ final class TokenOverlayTextView: UITextView {
     }
     var selectionHighlightInsets: UIEdgeInsets = .zero {
         didSet {
-            if UIEdgeInsetsEqualToEdgeInsets(oldValue, selectionHighlightInsets) == false {
+            if oldValue != selectionHighlightInsets {
                 setNeedsLayout()
             }
         }
     }
     private static let eventLogger = DiagnosticsLogging.logger(.tokenOverlayEvents)
     private static let geometryLogger = DiagnosticsLogging.logger(.tokenOverlayGeometry)
+    private static let whitespaceSet: CharacterSet = {
+        var set = CharacterSet.whitespacesAndNewlines
+        set.formUnion(CharacterSet(charactersIn: "\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{200B}"))
+        return set
+    }()
 
     private static func logEvent(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
         eventLogger.debug("[\(file):\(line)] \(function): \(message, privacy: .public)")
@@ -347,6 +355,58 @@ final class TokenOverlayTextView: UITextView {
         return nil
     }
 
+    private func spanContaining(index: Int) -> (span: AnnotatedSpan, offset: Int)? {
+        annotatedSpans.enumerated().first { _, annotated in
+            NSLocationInRange(index, annotated.span.range)
+        }.map { (span: $0.element, offset: $0.offset) }
+    }
+
+    private func spanBefore(index: Int) -> (span: AnnotatedSpan, offset: Int)? {
+        annotatedSpans.enumerated().last { _, annotated in
+            NSMaxRange(annotated.span.range) <= index
+        }.map { (span: $0.element, offset: $0.offset) }
+    }
+
+    private func spanAfter(index: Int) -> (span: AnnotatedSpan, offset: Int)? {
+        annotatedSpans.enumerated().first { _, annotated in
+            annotated.span.range.location > index
+        }.map { (span: $0.element, offset: $0.offset) }
+    }
+
+    private func snapSpan(near index: Int) -> (span: AnnotatedSpan, offset: Int)? {
+        guard let string = textStorage.string as NSString? else { return nil }
+        var forwardCandidate: (span: AnnotatedSpan, offset: Int)?
+        if let ahead = spanAfter(index: index) {
+            let distance = max(0, min(ahead.span.span.range.location - index, string.length - index))
+            let whitespaceRange = NSRange(location: index, length: distance)
+            if whitespaceOnly(range: whitespaceRange, in: string) {
+                forwardCandidate = ahead
+            }
+        }
+        if let forwardCandidate { return forwardCandidate }
+        if let behind = spanBefore(index: index) {
+            let spanEnd = NSMaxRange(behind.span.span.range)
+            let length = max(0, min(index - spanEnd, string.length - spanEnd))
+            let whitespaceRange = NSRange(location: spanEnd, length: length)
+            if whitespaceOnly(range: whitespaceRange, in: string) {
+                return behind
+            }
+        }
+        return nil
+    }
+
+    private func whitespaceOnly(range: NSRange, in string: NSString) -> Bool {
+        guard range.length > 0 else { return true }
+        guard range.location >= 0, NSMaxRange(range) <= string.length else { return false }
+        for idx in range.location..<NSMaxRange(range) {
+            let scalar = UnicodeScalar(string.character(at: idx))
+            if scalar == nil || TokenOverlayTextView.whitespaceSet.contains(scalar!) == false {
+                return false
+            }
+        }
+        return true
+    }
+
     @objc private func handleTokenTap(_ gesture: UITapGestureRecognizer) {
         guard gesture.state == .ended else { return }
         let tapPoint = gesture.location(in: self)
@@ -355,18 +415,28 @@ final class TokenOverlayTextView: UITextView {
             Self.logEvent("Tap ignored: no glyph resolved")
             return
         }
-        if let match = annotatedSpans.enumerated().first(where: { (_, annotated) in
-            NSLocationInRange(index, annotated.span.range)
-        }) {
-            let spanRange = match.element.span.range
-            let payload = RubyText.SelectionPayload(span: match.element, index: match.offset, range: spanRange)
-            Self.logEvent("Selected span index=\(match.offset) range=\(spanRange.location)-\(NSMaxRange(spanRange))")
-            selectionDelegate?.tokenOverlayTextView(self, didSelect: payload)
-        } else {
-            selectedRange = NSRange(location: index, length: 0)
-            Self.logEvent("Cleared selection at index=\(index)")
-            selectionDelegate?.tokenOverlayTextViewDidClearSelection(self)
+        Self.logEvent("index=\(index)") // annotatedSpans=\(annotatedSpans.enumerated())
+        if let match = spanContaining(index: index) {
+            deliverSelection(match.span, offset: match.offset)
+            return
         }
+
+        if let snapped = snapSpan(near: index) {
+            Self.logEvent("Snapped selection to span index=\(snapped.offset)")
+            deliverSelection(snapped.span, offset: snapped.offset)
+            return
+        }
+
+        selectedRange = NSRange(location: index, length: 0)
+        Self.logEvent("Cleared selection at index=\(index)")
+        selectionDelegate?.tokenOverlayTextViewDidClearSelection(self)
+    }
+
+    private func deliverSelection(_ span: AnnotatedSpan, offset: Int) {
+        let spanRange = span.span.range
+        let payload = RubyText.SelectionPayload(span: span, index: offset, range: spanRange)
+        Self.logEvent("Selected span index=\(offset) range=\(spanRange.location)-\(NSMaxRange(spanRange))")
+        selectionDelegate?.tokenOverlayTextView(self, didSelect: payload)
     }
 
     private func characterIndex(at point: CGPoint) -> Int? {
@@ -419,7 +489,7 @@ final class TokenOverlayTextView: UITextView {
             let textRect = rect
             var highlightRect = rect
             let insets = self.selectionHighlightInsets
-            if UIEdgeInsetsEqualToEdgeInsets(insets, .zero) == false {
+            if insets != .zero {
                 highlightRect.origin.x += insets.left
                 highlightRect.origin.y += insets.top
                 highlightRect.size.width -= (insets.left + insets.right)
@@ -434,7 +504,7 @@ final class TokenOverlayTextView: UITextView {
 
             if loggedRectCount < 3 {
                 var textRectInLayer = textRect
-                if UIEdgeInsetsEqualToEdgeInsets(insets, .zero) == false {
+                if insets != .zero {
                     textRectInLayer.origin.x += insets.left
                     textRectInLayer.origin.y += insets.top
                     textRectInLayer.size.width -= (insets.left + insets.right)

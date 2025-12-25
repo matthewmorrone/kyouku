@@ -106,6 +106,15 @@ final class ReadingOverridesStore: ObservableObject {
         }
     }
 
+    func removeAll(for noteID: UUID) {
+        let before = overrides.count
+        overrides.removeAll { $0.noteID == noteID }
+        guard overrides.count != before else { return }
+        save()
+        Self.logger.debug("Removed all overrides for note=\(noteID) remaining=\(self.overrides.count)")
+        notifyChange()
+    }
+
     func deleteOverride(id: UUID) {
         let before = overrides.count
         overrides.removeAll { $0.id == id }

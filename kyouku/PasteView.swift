@@ -1,9 +1,3 @@
-//
-//  PasteView.swift
-//  Otokoto
-//
-//  Created by Matthew Morrone on 12/7/25.
-//
 import SwiftUI
 import UIKit
 import Foundation
@@ -11,6 +5,15 @@ import OSLog
 
 struct PasteView: View {
     @EnvironmentObject var notes: NotesStore
+    private struct TokenActionPanelFramePreferenceKey: PreferenceKey {
+        static var defaultValue: CGRect? = nil
+
+        static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+            if let next = nextValue() {
+                value = next
+            }
+        }
+    }
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var words: WordsStore
     @EnvironmentObject var readingOverrides: ReadingOverridesStore
@@ -30,6 +33,7 @@ struct PasteView: View {
     @State private var persistentSelectionRange: NSRange? = nil
     @State private var overrideSignature: Int = 0
     @State private var customizedRanges: [NSRange] = []
+    @State private var tokenPanelFrame: CGRect? = nil
 
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
@@ -49,11 +53,43 @@ struct PasteView: View {
 
     private static let furiganaLogger = DiagnosticsLogging.logger(.furigana)
     private static let selectionLogger = DiagnosticsLogging.logger(.pasteSelection)
+    private static let coordinateSpaceName = "PasteViewRootSpace"
+    private static let highlightWhitespace: CharacterSet = {
+        var set = CharacterSet.whitespacesAndNewlines
+        set.formUnion(CharacterSet(charactersIn: "\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{200B}"))
+        return set
+    }()
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
-                VStack(spacing: 0) {
+            contentView
+        }
+    }
+
+    @ViewBuilder
+    private var contentView: some View {
+        if #available(iOS 17.0, *) {
+            coreContent
+                .coordinateSpace(name: Self.coordinateSpaceName)
+                .onPreferenceChange(TokenActionPanelFramePreferenceKey.self) { frame in
+                    tokenPanelFrame = frame
+                }
+                .simultaneousGesture(
+                    SpatialTapGesture().onEnded { value in
+                        let point = value.location
+                        handleTapOutsidePanel(at: point)
+                    },
+                    including: .all
+                )
+        } else {
+            coreContent
+        }
+    }
+
+    private var coreContent: some View {
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
                     ControlCell {
                         Button(action: newNote) {
                             Image(systemName: "plus.square").font(.title2)
@@ -62,191 +98,221 @@ struct PasteView: View {
                         .disabled(isEditing)
                     }
 
-                    EditorContainer(
-                        text: $inputText,
-                        furiganaText: furiganaAttributedText,
-                        furiganaSpans: furiganaSpans,
-                        textSize: readingTextSize,
-                        isEditing: isEditing,
-                        showFurigana: showFurigana,
-                        lineSpacing: readingLineSpacing,
-                        alternateTokenColors: alternateTokenColors,
-                        selectedRangeHighlight: persistentSelectionRange,
-                        customizedRanges: customizedRanges,
-                        onTokenSelection: handleTokenSelection,
-                        onSelectionCleared: { clearSelection() }
-                    )
-                    .padding(.vertical, 16)
-                    .padding(.horizontal, 16)
+                    ControlCell {
+                        Button(action: resetAllCustomSpans) {
+                            Image(systemName: "arrow.counterclockwise").font(.title2)
+                        }
+                        .accessibilityLabel("Reset Custom Spans")
+                        .disabled(customizedRanges.isEmpty)
+                        .opacity(customizedRanges.isEmpty ? 0.4 : 1.0)
+                    }
+                }
+                .controlSize(.small)
 
-                    if tokenSelection == nil {
-                        HStack(alignment: .center, spacing: 0) {
-                            ControlCell {
-                                Button { hideKeyboard() } label: {
-                                    Image(systemName: "keyboard.chevron.compact.down").font(.title2)
-                                }
-                                .accessibilityLabel("Hide Keyboard")
+                EditorContainer(
+                    text: $inputText,
+                    furiganaText: furiganaAttributedText,
+                    furiganaSpans: furiganaSpans,
+                    textSize: readingTextSize,
+                    isEditing: isEditing,
+                    showFurigana: showFurigana,
+                    lineSpacing: readingLineSpacing,
+                    alternateTokenColors: alternateTokenColors,
+                    selectedRangeHighlight: persistentSelectionRange,
+                    customizedRanges: customizedRanges,
+                    onTokenSelection: handleTokenSelection,
+                    onSelectionCleared: { clearSelection() }
+                )
+                .padding(.vertical, 16)
+                .padding(.horizontal, 16)
+
+                if tokenSelection == nil {
+                    HStack(alignment: .center, spacing: 0) {
+                        ControlCell {
+                            Button { hideKeyboard() } label: {
+                                Image(systemName: "keyboard.chevron.compact.down").font(.title2)
                             }
+                            .accessibilityLabel("Hide Keyboard")
+                        }
 
-                            ControlCell {
-                                Button(action: pasteFromClipboard) {
-                                    Image(systemName: "doc.on.clipboard").font(.title2)
-                                }
-                                .accessibilityLabel("Paste")
+                        ControlCell {
+                            Button(action: pasteFromClipboard) {
+                                Image(systemName: "doc.on.clipboard").font(.title2)
                             }
+                            .accessibilityLabel("Paste")
+                        }
 
-                            ControlCell {
-                                Button(action: saveNote) {
-                                    Image(systemName: "square.and.arrow.down").font(.title2)
-                                }
-                                .accessibilityLabel("Save")
+                        ControlCell {
+                            Button(action: saveNote) {
+                                Image(systemName: "square.and.arrow.down").font(.title2)
                             }
+                            .accessibilityLabel("Save")
+                        }
 
-                            ControlCell {
-                                Button {
-                                    guard isEditing == false else { return }
-                                    showFurigana.toggle()
-                                    if showFurigana {
-                                        triggerFuriganaRefreshIfNeeded(reason: "manual toggle button")
-                                    }
-                                } label: {
-                                    ZStack {
-                                        Color.clear.frame(width: 28, height: 28)
-                                        Image(showFurigana ? "furigana.on" : "furigana.off")
-                                            .renderingMode(.template)
-                                            .foregroundColor(.accentColor)
-                                            .font(.system(size: 22))
-                                    }
+                        ControlCell {
+                            Button {
+                                guard isEditing == false else { return }
+                                showFurigana.toggle()
+                                if showFurigana {
+                                    triggerFuriganaRefreshIfNeeded(reason: "manual toggle button")
                                 }
-                                .tint(.accentColor)
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
-                                .opacity(isEditing ? 0.45 : 1.0)
-                                .contextMenu {
-                                    Toggle(isOn: $alternateTokenColors) {
-                                        Label("Alternate Token Colors", systemImage: "textformat.alt")
-                                    }
+                            } label: {
+                                ZStack {
+                                    Color.clear.frame(width: 28, height: 28)
+                                    Image(showFurigana ? "furigana.on" : "furigana.off")
+                                        .renderingMode(.template)
+                                        .foregroundColor(.accentColor)
+                                        .font(.system(size: 22))
                                 }
                             }
-
-                            ControlCell {
-                                Toggle(isOn: $isEditing) {
-                                    if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
-                                        Image(systemName: "character.cursor.ibeam.ja")
-                                    } else {
-                                        Image(systemName: "character.cursor.ibeam")
-                                    }
+                            .tint(.accentColor)
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
+                            .opacity(isEditing ? 0.45 : 1.0)
+                            .contextMenu {
+                                Toggle(isOn: $alternateTokenColors) {
+                                    Label("Alternate Token Colors", systemImage: "textformat.alt")
                                 }
-                                .labelsHidden()
-                                .toggleStyle(.button)
-                                .tint(.accentColor)
-                                .font(.title2)
-                                .accessibilityLabel("Edit")
                             }
                         }
-                        .controlSize(.small)
-                    }
-                }
 
-                if let selection = tokenSelection, selection.range.length > 0 {
-                    VStack(spacing: 0) {
-                        Spacer(minLength: 0)
-
-                        TokenActionPanel(
-                            selection: selection,
-                            lookup: inlineLookup,
-                            canMergePrevious: canMergeSelection(.previous),
-                            canMergeNext: canMergeSelection(.next),
-                            onDismiss: { clearSelection(resetPersistent: false) },
-                            onDefine: { entry in
-                                defineWord(using: entry)
-                            },
-                            onUseReading: { entry in
-                                applyDictionaryReading(entry)
-                            },
-                            onMergePrevious: { mergeSelection(.previous) },
-                            onMergeNext: { mergeSelection(.next) },
-                            onSplit: { offset in splitSelection(at: offset) },
-                            onReset: resetSelectionOverrides,
-                            isSelectionCustomized: selectionIsCustomized(selection)
-                        )
-                        .padding(.horizontal, 0)
-                        .padding(.bottom, 0)
-                        .ignoresSafeArea(edges: .bottom)
+                        ControlCell {
+                            Toggle(isOn: $isEditing) {
+                                if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
+                                    Image(systemName: "character.cursor.ibeam.ja")
+                                } else {
+                                    Image(systemName: "character.cursor.ibeam")
+                                }
+                            }
+                            .labelsHidden()
+                            .toggleStyle(.button)
+                            .tint(.accentColor)
+                            .font(.title2)
+                            .accessibilityLabel("Edit")
+                        }
                     }
-                    .zIndex(1)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .controlSize(.small)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle(currentNote?.title ?? "Paste")
-            .navigationBarTitleDisplayMode(.inline)
-            .safeAreaInset(edge: .bottom) {
-                if tokenSelection == nil {
-                    Color.clear.frame(height: 24)
-                }
+
+            if tokenSelection != nil {
+                legacyDismissOverlay
             }
-            .onAppear { onAppearHandler() }
-            .onDisappear {
-                NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+
+            if let selection = tokenSelection, selection.range.length > 0 {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+
+                    TokenActionPanel(
+                        selection: selection,
+                        lookup: inlineLookup,
+                        canMergePrevious: canMergeSelection(.previous),
+                        canMergeNext: canMergeSelection(.next),
+                        onDismiss: { clearSelection(resetPersistent: false) },
+                        onDefine: { entry in
+                            defineWord(using: entry)
+                        },
+                        onUseReading: { entry in
+                            applyDictionaryReading(entry)
+                        },
+                        onMergePrevious: { mergeSelection(.previous) },
+                        onMergeNext: { mergeSelection(.next) },
+                        onSplit: { offset in splitSelection(at: offset) },
+                        onReset: resetSelectionOverrides,
+                        isSelectionCustomized: selectionIsCustomized(selection)
+                    )
+                    .padding(.horizontal, 0)
+                    .padding(.bottom, 0)
+                    .ignoresSafeArea(edges: .bottom)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: TokenActionPanelFramePreferenceKey.self,
+                                    value: proxy.frame(in: .named(Self.coordinateSpaceName))
+                            )
+                        }
+                    )
+                }
+                .zIndex(1)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle(currentNote?.title ?? "Paste")
+        .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom) {
+            if tokenSelection == nil {
+                Color.clear.frame(height: 24)
+            }
+        }
+        .onAppear { onAppearHandler() }
+        .onDisappear {
+            NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+            furiganaTaskHandle?.cancel()
+        }
+        .onChange(of: inputText) { _, newValue in
+            clearSelection()
+            DispatchQueue.main.async {
+                syncNoteForInputChange(newValue)
+            }
+            PasteBufferStore.save(newValue)
+            if newValue.isEmpty {
+                furiganaAttributedText = nil
+                furiganaSpans = nil
                 furiganaTaskHandle?.cancel()
             }
-            .onChange(of: inputText) { _, newValue in
+            triggerFuriganaRefreshIfNeeded(reason: "input changed", recomputeSpans: true)
+        }
+        .onChange(of: isEditing) { _, editing in
+            if editing {
                 clearSelection()
-                DispatchQueue.main.async {
-                    syncNoteForInputChange(newValue)
+                furiganaAttributedText = nil
+                furiganaSpans = nil
+                furiganaTaskHandle?.cancel()
+            } else {
+                if suppressNextEditingRefresh {
+                    suppressNextEditingRefresh = false
+                    Self.logFurigana("Skipping refresh: editing toggle was programmatic.")
+                    return
                 }
-                PasteBufferStore.save(newValue)
-                if newValue.isEmpty {
-                    furiganaAttributedText = nil
-                    furiganaSpans = nil
-                    furiganaTaskHandle?.cancel()
-                }
-                triggerFuriganaRefreshIfNeeded(reason: "input changed", recomputeSpans: true)
+                triggerFuriganaRefreshIfNeeded(reason: "editing toggled off", recomputeSpans: true)
             }
-            .onChange(of: isEditing) { _, editing in
-                if editing {
-                    clearSelection()
-                    furiganaAttributedText = nil
-                    furiganaSpans = nil
-                    furiganaTaskHandle?.cancel()
-                } else {
-                    if suppressNextEditingRefresh {
-                        suppressNextEditingRefresh = false
-                        Self.logFurigana("Skipping refresh: editing toggle was programmatic.")
-                        return
-                    }
-                    triggerFuriganaRefreshIfNeeded(reason: "editing toggled off", recomputeSpans: true)
-                }
+        }
+        .onChange(of: showFurigana) { _, enabled in
+            if enabled {
+                triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: false)
+            } else {
+                furiganaTaskHandle?.cancel()
             }
-            .onChange(of: showFurigana) { _, enabled in
-                if enabled {
-                    triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: false)
-                } else {
-                    furiganaTaskHandle?.cancel()
-                }
+        }
+        .onChange(of: alternateTokenColors) { _, enabled in
+            if enabled {
+                triggerFuriganaRefreshIfNeeded(reason: "alternate token colors toggled on", recomputeSpans: false)
             }
-            .onChange(of: alternateTokenColors) { _, enabled in
-                if enabled {
-                    triggerFuriganaRefreshIfNeeded(reason: "alternate token colors toggled on", recomputeSpans: false)
-                }
-            }
-            .onChange(of: readingFuriganaSize) { _, _ in
-                triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
-            }
-            .onChange(of: tokenSelection?.surface ?? "") { _, newValue in
-                handleSelectionLookup(for: newValue)
-            }
-            .onChange(of: currentNote?.id) { _, _ in
-                clearSelection()
-                overrideSignature = computeOverrideSignature()
-                updateCustomizedRanges()
-            }
-            .onReceive(readingOverrides.$overrides) { _ in
-                handleOverridesExternalChange()
+        }
+        .onChange(of: readingFuriganaSize) { _, _ in
+            triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
+        }
+        .onChange(of: tokenSelection?.surface ?? "") { _, newValue in
+            handleSelectionLookup(for: newValue)
+        }
+        .onChange(of: currentNote?.id) { _, _ in
+            clearSelection()
+            overrideSignature = computeOverrideSignature()
+            updateCustomizedRanges()
+        }
+        .onReceive(readingOverrides.$overrides) { _ in
+            handleOverridesExternalChange()
+        }
+        .onChange(of: tokenSelection == nil) { _, isNil in
+            if isNil {
+                tokenPanelFrame = nil
             }
         }
     }
+}
+
+private extension PasteView {
 
     private func pasteFromClipboard() {
         if let str = UIPasteboard.general.string {
@@ -290,7 +356,7 @@ struct PasteView: View {
         }
     }
 
-    public func newNote() {
+    private func newNote() {
         hideKeyboard()
         setEditing(true)
 
@@ -368,16 +434,20 @@ struct PasteView: View {
             persistentSelectionRange = nil
         }
         tokenSelection = nil
-        inlineLookup.results = []
-        inlineLookup.errorMessage = nil
-        inlineLookup.isLoading = false
+        Task { @MainActor in
+            inlineLookup.results = []
+            inlineLookup.errorMessage = nil
+            inlineLookup.isLoading = false
+        }
     }
 
     private func handleSelectionLookup(for term: String) {
         guard term.isEmpty == false else {
-            inlineLookup.results = []
-            inlineLookup.errorMessage = nil
-            inlineLookup.isLoading = false
+            Task { @MainActor in
+                inlineLookup.results = []
+                inlineLookup.errorMessage = nil
+                inlineLookup.isLoading = false
+            }
             return
         }
         let lemmaFallbacks = tokenSelection?.annotatedSpan.lemmaCandidates ?? []
@@ -386,21 +456,75 @@ struct PasteView: View {
         }
     }
 
+    @available(iOS 17.0, *)
+    private func handleTapOutsidePanel(at location: CGPoint) {
+        guard tokenSelection != nil else { return }
+        if let frame = tokenPanelFrame, frame.contains(location) {
+            return
+        }
+        clearSelection(resetPersistent: false)
+    }
+
+    @ViewBuilder
+    private var legacyDismissOverlay: some View {
+        if #available(iOS 17.0, *) {
+            EmptyView()
+        } else {
+            Color.black.opacity(0.001)
+                .ignoresSafeArea()
+                .onTapGesture { clearSelection(resetPersistent: false) }
+                .transition(.opacity)
+                .zIndex(0.5)
+        }
+    }
+
     private func handleTokenSelection(_ payload: RubyText.SelectionPayload) {
         guard isEditing == false else { return }
         let range = payload.range
         guard range.location != NSNotFound, range.length > 0 else { return }
-        let nsText = inputText as NSString
-        guard NSMaxRange(range) <= nsText.length else { return }
-        let surface = nsText.substring(with: range)
-        Self.selectionLogger.debug("Token selected spanIndex=\(payload.index) range=\(range.location)-\(NSMaxRange(range)) surface=\(surface, privacy: .public)")
-        persistentSelectionRange = range
+        guard NSMaxRange(range) <= (inputText as NSString).length else { return }
+        guard let trimmed = trimmedSelection(from: payload) else {
+            Self.selectionLogger.debug("Token selection ignored spanIndex=\(payload.index) reason=whitespace-only")
+            return
+        }
+        Self.selectionLogger.debug("Token selected spanIndex=\(payload.index) rawRange=\(range.location)-\(NSMaxRange(range)) highlight=\(trimmed.range.location)-\(NSMaxRange(trimmed.range)) surface=\(trimmed.surface, privacy: .public)")
+        persistentSelectionRange = trimmed.range
         tokenSelection = TokenSelectionContext(
             spanIndex: payload.index,
-            range: range,
-            surface: surface,
+            range: trimmed.range,
+            surface: trimmed.surface,
             annotatedSpan: payload.span
         )
+    }
+
+    private func trimmedSelection(from payload: RubyText.SelectionPayload) -> (range: NSRange, surface: String)? {
+        let local = payload.span.span.surface as NSString
+        let localLength = local.length
+        guard localLength > 0 else { return nil }
+        var start = 0
+        var end = localLength
+        let whitespace = Self.highlightWhitespace
+        while start < end {
+            let scalarValue = local.character(at: start)
+            if let scalar = UnicodeScalar(scalarValue), whitespace.contains(scalar) {
+                start += 1
+                continue
+            }
+            break
+        }
+        while end > start {
+            let scalarValue = local.character(at: end - 1)
+            if let scalar = UnicodeScalar(scalarValue), whitespace.contains(scalar) {
+                end -= 1
+                continue
+            }
+            break
+        }
+        guard end > start else { return nil }
+        let trimmedLocalRange = NSRange(location: start, length: end - start)
+        let highlightRange = NSRange(location: payload.range.location + trimmedLocalRange.location, length: trimmedLocalRange.length)
+        let trimmedSurface = local.substring(with: trimmedLocalRange)
+        return (highlightRange, trimmedSurface)
     }
 
     private func handleOverridesExternalChange() {
@@ -498,6 +622,15 @@ struct PasteView: View {
         guard let selection = tokenSelection else { return }
         applyOverridesChange(range: selection.range, newOverrides: [], actionName: "Reset Token")
         clearSelection(resetPersistent: false)
+    }
+
+    private func resetAllCustomSpans() {
+        let noteID = activeNoteID
+        readingOverrides.removeAll(for: noteID)
+        overrideSignature = computeOverrideSignature()
+        updateCustomizedRanges()
+        clearSelection()
+        triggerFuriganaRefreshIfNeeded(reason: "reset all overrides", recomputeSpans: true)
     }
 
     private func applyOverridesChange(range: NSRange, newOverrides: [ReadingOverride], actionName: String) {

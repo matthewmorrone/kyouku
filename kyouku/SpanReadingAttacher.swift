@@ -75,7 +75,9 @@ struct SpanReadingAttacher {
 
         for span in spans {
             let attachment = attachmentForSpan(span, annotations: annotations, tokenizer: tokenizer)
-            annotated.append(AnnotatedSpan(span: span, readingKana: attachment.reading, lemmaCandidates: attachment.lemmas))
+            let override = await ReadingOverridePolicy.shared.overrideReading(for: span.surface, mecabReading: attachment.reading)
+            let finalReading = override ?? attachment.reading
+            annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas))
         }
 
         await Self.cache.store(annotated, for: key)

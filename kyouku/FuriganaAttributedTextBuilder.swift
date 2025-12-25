@@ -51,11 +51,20 @@ enum FuriganaAttributedTextBuilder {
 
         let segmentationStart = CFAbsoluteTimeGetCurrent()
         let segmented = try await SegmentationService.shared.segment(text: text)
+        var spanDump = segmented
+            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+            .joined(separator: ", ")
+        log("[\(context)] segmented spans: [\(spanDump)]")
         let adjustedSpans = applySpanOverrides(
             spans: segmented,
             overrides: overrides,
             text: text
         )
+        spanDump = adjustedSpans
+            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+            .joined(separator: ", ")
+        log("[\(context)] adjusted spans: [\(spanDump)]")
+
         let segmentationDuration = elapsedMilliseconds(since: segmentationStart)
         log("[\(context)] Segmentation spans found: \(adjustedSpans.count) in \(segmentationDuration) ms.")
 

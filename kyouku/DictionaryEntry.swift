@@ -23,6 +23,13 @@ struct DictionaryEntry: Identifiable, Hashable {
 
 
 
+struct SurfaceReadingOverride: Hashable, Sendable {
+    let surface: String
+    let reading: String
+}
+
+
+
 actor DictionarySQLiteStore {
     static let shared = DictionarySQLiteStore()
 
@@ -114,6 +121,55 @@ actor DictionarySQLiteStore {
             }
         }
         return out
+    }
+
+    func listDeterministicSurfaceReadings() async throws -> [SurfaceReadingOverride] {
+        try ensureOpen()
+        guard let db else { return [] }
+        let sql = """
+        WITH surface_pairs AS (
+            SELECT k.text AS surface, r.text AS reading
+            FROM kanji k
+            JOIN kana_forms r ON r.entry_id = k.entry_id
+            UNION ALL
+            SELECT r.text AS surface, r.text AS reading
+            FROM kana_forms r
+        ),
+        aggregated AS (
+            SELECT surface,
+                   MIN(reading) AS reading,
+                   COUNT(DISTINCT reading) AS reading_count
+            FROM surface_pairs
+            WHERE surface IS NOT NULL
+              AND reading IS NOT NULL
+              AND surface <> ''
+              AND reading <> ''
+            GROUP BY surface
+        )
+        SELECT surface, reading
+        FROM aggregated
+        WHERE reading_count = 1;
+        """
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var overrides: [SurfaceReadingOverride] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let surfacePtr = sqlite3_column_text(stmt, 0),
+                  let readingPtr = sqlite3_column_text(stmt, 1) else { continue }
+            let rawSurface = String(cString: surfacePtr)
+            let rawReading = String(cString: readingPtr)
+            let surface = rawSurface.precomposedStringWithCanonicalMapping
+            let reading = rawReading.precomposedStringWithCanonicalMapping
+            guard surface.isEmpty == false, reading.isEmpty == false else { continue }
+            overrides.append(SurfaceReadingOverride(surface: surface, reading: reading))
+        }
+
+        return overrides
     }
 
     private func ensureOpen() throws {

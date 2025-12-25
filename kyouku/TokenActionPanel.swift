@@ -40,11 +40,11 @@ struct TokenActionPanel: View {
                 .fill(.ultraThinMaterial)
         )
         .onAppear { resetSplitControls() }
-        .onChange(of: selection) { _ in
+        .onChange(of: selection) { _, _ in
             resetSplitControls()
             highlightedResultIndex = 0
         }
-        .onChange(of: lookup.results.count) { _ in
+        .onChange(of: lookup.results.count) { _, _ in
             highlightedResultIndex = 0
         }
         .contentShape(Rectangle())
@@ -429,7 +429,14 @@ struct TokenActionPanel: View {
     }
 
     private var panelHeightLimit: CGFloat {
-        min(UIScreen.main.bounds.height * 0.55, 480)
+        min(currentScreenHeight() * 0.55, 480)
+    }
+
+    private func currentScreenHeight() -> CGFloat {
+        if let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen {
+            return screen.bounds.height
+        }
+        return 480 // sensible fallback
     }
 
     private var actionRowHeight: CGFloat {

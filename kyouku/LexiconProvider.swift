@@ -11,9 +11,11 @@ actor LexiconProvider {
     private var buildTask: Task<LexiconTrie, Error>?
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "LexiconProvider")
     private let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "LexiconProvider")
+    @MainActor
+    static var furiganaLoggingEnabled: Bool { DiagnosticsLogging.isEnabled(.furigana) }
 
-    private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+    private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) async {
+        if await Self.furiganaLoggingEnabled == false { return }
         logger.info("[\(file):\(line)] \(function): \(message)")
     }
 
@@ -27,13 +29,13 @@ actor LexiconProvider {
 
         if let trie = cachedTrie {
             let ms = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-            info("LexiconProvider.trie(): returning cached trie in \(String(format: "%.3f", ms)) ms")
+            await info("LexiconProvider.trie(): returning cached trie in \(String(format: "%.3f", ms)) ms")
             signposter.endInterval("Trie() Overall", overallInterval)
             return trie
         }
 
         if let task = buildTask {
-            info("LexiconProvider.trie(): awaiting in-flight build task…")
+            await info("LexiconProvider.trie(): awaiting in-flight build task…")
             return try await task.value
         }
 
@@ -43,7 +45,7 @@ actor LexiconProvider {
             let forms = try await DictionarySQLiteStore.shared.listAllSurfaceForms()
             signposter.endInterval("Trie() SQLite listAllSurfaceForms", sqliteInterval)
             let sqliteMs = (CFAbsoluteTimeGetCurrent() - sqliteStart) * 1000
-            self.info("LexiconProvider.trie(): SQLite listAllSurfaceForms took \(String(format: "%.3f", sqliteMs)) ms; forms=\(forms.count)")
+            await self.info("LexiconProvider.trie(): SQLite listAllSurfaceForms took \(String(format: "%.3f", sqliteMs)) ms; forms=\(forms.count)")
 
             let buildStart = CFAbsoluteTimeGetCurrent()
             let buildInterval = signposter.beginInterval("Trie() Build LexiconTrie")
@@ -56,7 +58,7 @@ actor LexiconProvider {
             }
             signposter.endInterval("Trie() Build LexiconTrie", buildInterval)
             let buildMs = (CFAbsoluteTimeGetCurrent() - buildStart) * 1000
-            self.info("LexiconProvider.trie(): LexiconTrie build took \(String(format: "%.3f", buildMs)) ms")
+            await self.info("LexiconProvider.trie(): LexiconTrie build took \(String(format: "%.3f", buildMs)) ms")
             return trie
         }
         buildTask = task
@@ -66,9 +68,9 @@ actor LexiconProvider {
             cachedTrie = trie
             buildTask = nil
             let totalMs = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-            info("LexiconProvider.trie(): built and cached in \(String(format: "%.3f", totalMs)) ms")
+            await info("LexiconProvider.trie(): built and cached in \(String(format: "%.3f", totalMs)) ms")
             signposter.endInterval("Trie() Overall", overallInterval)
-            info("Lexicon trie built and cached in memory.")
+            await info("Lexicon trie built and cached in memory.")
             return trie
         } catch {
             buildTask = nil

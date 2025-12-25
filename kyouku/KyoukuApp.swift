@@ -35,6 +35,9 @@ struct KyoukuApp: App {
                         router.selectedTab = .paste
                     }
                 }
+                .task {
+                    await ReadingOverridePolicy.shared.warmUp()
+                }
         }
     }
 }

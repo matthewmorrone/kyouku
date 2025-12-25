@@ -9,14 +9,18 @@ actor SegmentationService {
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SegmentationService")
 
-    private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+    private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) async {
+        if await loggingEnabled() == false { return }
         logger.info("[\(file):\(line)] \(function): \(message, privacy: .public)")
     }
 
-    private func debug(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+    private func debug(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) async {
+        if await loggingEnabled() == false { return }
         logger.debug("[\(file):\(line)] \(function): \(message, privacy: .public)")
+    }
+
+    private func loggingEnabled() async -> Bool {
+        await MainActor.run { DiagnosticsLogging.isEnabled(.furigana) }
     }
 
     private let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SegmentationService")
@@ -33,11 +37,11 @@ actor SegmentationService {
         let segInterval = signposter.beginInterval("Segment", id: .exclusive, "len=\(text.count)")
         let key = SegmentationCacheKey(textHash: Self.hash(text), length: text.utf16.count)
         if let cached = cache[key] {
-            debug("[Segmentation] Cache hit for len=\(text.count) -> \(cached.count) spans.")
+            await debug("[Segmentation] Cache hit for len=\(text.count) -> \(cached.count) spans.")
             signposter.endInterval("Segment", segInterval)
             return cached
         } else {
-            debug("[Segmentation] Cache miss for len=\(text.count). Proceeding to segment.")
+            await debug("[Segmentation] Cache miss for len=\(text.count). Proceeding to segment.")
         }
 
         let trieInterval = signposter.beginInterval("TrieLoad")
@@ -45,7 +49,7 @@ actor SegmentationService {
         let trie = try await getTrie()
         let trieLoadMs = (CFAbsoluteTimeGetCurrent() - trieLoadStart) * 1000
         let trieSource = (trieInitTask == nil && trieCache != nil) ? "cached" : (trieInitTask != nil ? "building" : "unknown")
-        debug("SegmentationService: trie load completed (source=\(trieSource)) in \(String(format: "%.3f", trieLoadMs)) ms.")
+        await debug("SegmentationService: trie load completed (source=\(trieSource)) in \(String(format: "%.3f", trieLoadMs)) ms.")
         signposter.endInterval("TrieLoad", trieInterval)
 
         let nsText = text as NSString
@@ -54,21 +58,23 @@ actor SegmentationService {
         let segmentationStart = CFAbsoluteTimeGetCurrent()
         let ranges = await segmentRanges(using: trie, text: nsText)
         let segmentationMs = (CFAbsoluteTimeGetCurrent() - segmentationStart) * 1000
-        debug("SegmentationService: segmentRanges took \(String(format: "%.3f", segmentationMs)) ms.")
+        await debug("SegmentationService: segmentRanges took \(String(format: "%.3f", segmentationMs)) ms.")
         signposter.endInterval("SegmentRanges", rangesInterval)
 
         let mapInterval = signposter.beginInterval("MapRangesToSpans")
         let mapStart = CFAbsoluteTimeGetCurrent()
-        let spans = ranges.map { range in
-            TextSpan(range: range, surface: nsText.substring(with: range))
+        let spans = ranges.compactMap { range -> TextSpan? in
+            guard let trimmedRange = Self.trimmedRange(from: range, in: nsText) else { return nil }
+            let surface = nsText.substring(with: trimmedRange)
+            return TextSpan(range: trimmedRange, surface: surface)
         }
         let mapMs = (CFAbsoluteTimeGetCurrent() - mapStart) * 1000
-        debug("SegmentationService: mapping ranges->spans took \(String(format: "%.3f", mapMs)) ms.")
+        await debug("SegmentationService: mapping ranges->spans took \(String(format: "%.3f", mapMs)) ms.")
         signposter.endInterval("MapRangesToSpans", mapInterval)
 
         store(spans, for: key)
         let overallDurationMsDouble = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-        debug("Segmented text length \(text.count) into \(spans.count) spans in \(String(format: "%.3f", overallDurationMsDouble)) ms (trie: \(String(format: "%.3f", trieLoadMs)) ms, segment: \(String(format: "%.3f", segmentationMs)) ms, map: \(String(format: "%.3f", mapMs)) ms).")
+        await debug("Segmented text length \(text.count) into \(spans.count) spans in \(String(format: "%.3f", overallDurationMsDouble)) ms (trie: \(String(format: "%.3f", trieLoadMs)) ms, segment: \(String(format: "%.3f", segmentationMs)) ms, map: \(String(format: "%.3f", mapMs)) ms).")
         signposter.endInterval("Segment", segInterval)
         return spans
     }
@@ -89,23 +95,83 @@ actor SegmentationService {
         return hasher.finalize()
     }
 
+    private func flushPendingNonKanji(start: inout Int?, kind: inout ScriptKind?, cursor: Int, text: NSString, trie: LexiconTrie, into ranges: inout [NSRange]) async -> Bool {
+        guard let pending = start, pending < cursor else { return false }
+        let pendingRange = NSRange(location: pending, length: cursor - pending)
+        if let scriptKind = kind, await ScriptKind.equals(scriptKind, .katakana) {
+            ranges.append(contentsOf: await Self.splitKatakana(range: pendingRange, text: text, trie: trie))
+        } else {
+            ranges.append(pendingRange)
+        }
+        start = nil
+        kind = nil
+        return true
+    }
+
+    private static func splitKatakana(range: NSRange, text: NSString, trie: LexiconTrie) async -> [NSRange] {
+        var results: [NSRange] = []
+        let swiftText: String = text as String
+        let end = NSMaxRange(range)
+        var cursor = range.location
+        while cursor < end {
+            let current = cursor
+            let matchEnd: Int? = await MainActor.run { [current, swiftText] in
+                let ns = swiftText as NSString
+                return trie.longestMatchEnd(in: ns, from: current, requireKanji: false)
+            }
+            if let matchEnd, matchEnd <= end, matchEnd > cursor {
+                results.append(NSRange(location: cursor, length: matchEnd - cursor))
+                cursor = matchEnd
+                continue
+            }
+            results.append(NSRange(location: cursor, length: 1))
+            cursor += 1
+        }
+        return results
+    }
+
+    private static func trimmedRange(from range: NSRange, in text: NSString) -> NSRange? {
+        guard range.location != NSNotFound, range.length > 0 else { return nil }
+        var start = range.location
+        var end = NSMaxRange(range)
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        while start < end {
+            guard let scalar = UnicodeScalar(text.character(at: start)) else { break }
+            if whitespace.contains(scalar) {
+                start += 1
+            } else {
+                break
+            }
+        }
+        while end > start {
+            guard let scalar = UnicodeScalar(text.character(at: end - 1)) else { break }
+            if whitespace.contains(scalar) {
+                end -= 1
+            } else {
+                break
+            }
+        }
+        guard end > start else { return nil }
+        return NSRange(location: start, length: end - start)
+    }
+
     private func getTrie() async throws -> LexiconTrie {
         let start = CFAbsoluteTimeGetCurrent()
         if let t = trieCache {
-            debug("getTrie(): returning cached trie in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
+            await debug("getTrie(): returning cached trie in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
             return t
         }
         if let task = trieInitTask {
-            debug("getTrie(): awaiting existing build task…")
+            await debug("getTrie(): awaiting existing build task…")
             return try await task.value
         }
-        debug("getTrie(): creating new build task…")
+        await debug("getTrie(): creating new build task…")
         let task = Task { try await LexiconProvider.shared.trie() }
         trieInitTask = task
         let t = try await task.value
         trieCache = t
         trieInitTask = nil
-        debug("getTrie(): build task completed in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
+        await debug("getTrie(): build task completed in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
         return t
     }
 
@@ -113,7 +179,7 @@ actor SegmentationService {
         let length = text.length
         guard length > 0 else { return [] }
 
-        debug("segmentRanges: starting scan length=\(length)")
+        await debug("segmentRanges: starting scan length=\(length)")
 
         var ranges: [NSRange] = []
         ranges.reserveCapacity(max(1, length / 2))
@@ -148,11 +214,8 @@ actor SegmentationService {
             }
             if let end = matchEnd {
                 trieLookupTime += CFAbsoluteTimeGetCurrent() - lookupStart
-                if let pending = pendingNonKanjiStart, pending < cursor {
-                    let pendingRange = NSRange(location: pending, length: cursor - pending)
-                    ranges.append(pendingRange)
-                    pendingNonKanjiStart = nil
-                    pendingNonKanjiKind = nil
+                if await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges) {
+                    // start cleared inside helper
                 }
                 let extendedEnd = await extendMatchEnd(
                     trie: trie,
@@ -180,47 +243,29 @@ actor SegmentationService {
             }
 
             if Self.isKanji(unit) {
-                if let pending = pendingNonKanjiStart, pending < cursor {
-                    let pendingRange = NSRange(location: pending, length: cursor - pending)
-                    ranges.append(pendingRange)
-                    pendingNonKanjiStart = nil
-                    pendingNonKanjiKind = nil
-                }
+                _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
                 kanjiCount += 1
                 singletonKanji += 1
                 ranges.append(NSRange(location: cursor, length: 1))
             } else {
                 nonKanjiCount += 1
                 if Self.isWhitespaceOrNewline(scalar) || Self.isPunctuation(scalar) {
-                    if let pending = pendingNonKanjiStart, pending < cursor {
-                        let pendingRange = NSRange(location: pending, length: cursor - pending)
-                        ranges.append(pendingRange)
-                        pendingNonKanjiStart = nil
-                        pendingNonKanjiKind = nil
-                    }
+                    _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
                     ranges.append(NSRange(location: cursor, length: 1))
                     cursor += 1
                     continue
                 }
 
                 if Self.isStandaloneParticle(at: cursor, scalar: scalar, text: text, totalLength: length) {
-                    if let pending = pendingNonKanjiStart, pending < cursor {
-                        let pendingRange = NSRange(location: pending, length: cursor - pending)
-                        ranges.append(pendingRange)
-                        pendingNonKanjiStart = nil
-                        pendingNonKanjiKind = nil
-                    }
+                    _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
                     ranges.append(NSRange(location: cursor, length: 1))
                     cursor += 1
                     continue
                 }
 
                 let kind = Self.scriptKind(for: scalar)
-                if let currentKind = pendingNonKanjiKind, currentKind != kind, let pending = pendingNonKanjiStart, pending < cursor {
-                    let pendingRange = NSRange(location: pending, length: cursor - pending)
-                    ranges.append(pendingRange)
-                    pendingNonKanjiStart = nil
-                    pendingNonKanjiKind = nil
+                if let currentKind = pendingNonKanjiKind, await ScriptKind.equals(currentKind, kind) == false {
+                    _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
                 }
                 if pendingNonKanjiStart == nil {
                     pendingNonKanjiStart = cursor
@@ -232,20 +277,15 @@ actor SegmentationService {
             cursor += 1
         }
 
-        if let pending = pendingNonKanjiStart, pending < length {
-            let pendingRange = NSRange(location: pending, length: length - pending)
-            ranges.append(pendingRange)
-            pendingNonKanjiStart = nil
-            pendingNonKanjiKind = nil
-        }
+        _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: length, text: text, trie: trie, into: &ranges)
 
-        debug("segmentRanges: finished scan with \(ranges.count) ranges. Performing metrics…")
+        await debug("segmentRanges: finished scan with \(ranges.count) ranges. Performing metrics…")
 
         let totalDuration = CFAbsoluteTimeGetCurrent() - profilingStart
         let totalMs = totalDuration * 1000
         let lookupMs = trieLookupTime * 1000
         let avgMatchLen = matchesFound > 0 ? Double(sumMatchLen) / Double(matchesFound) : 0
-        debug("segmentRanges: scanned length \(length) -> \(ranges.count) ranges in \(String(format: "%.3f", totalMs)) ms (lookups: \(trieLookups), matches: \(matchesFound), singletons: \(singletonKanji), avgMatchLen: \(String(format: "%.2f", avgMatchLen)), maxMatchLen: \(maxMatchLen), kanji: \(kanjiCount), nonKanji: \(nonKanjiCount), lookupTime: \(String(format: "%.3f", lookupMs)) ms).")
+        await debug("segmentRanges: scanned length \(length) -> \(ranges.count) ranges in \(String(format: "%.3f", totalMs)) ms (lookups: \(trieLookups), matches: \(matchesFound), singletons: \(singletonKanji), avgMatchLen: \(String(format: "%.2f", avgMatchLen)), maxMatchLen: \(maxMatchLen), kanji: \(kanjiCount), nonKanji: \(nonKanjiCount), lookupTime: \(String(format: "%.3f", lookupMs)) ms).")
         await MainActor.run {
             trie.endProfiling(totalDuration: totalDuration)
         }
@@ -275,16 +315,19 @@ actor SegmentationService {
                     break
                 }
                 // Do not swallow the next dictionary word
-                let nextMatchEnd: Int? = await MainActor.run {
+                let currentEnd = end
+                let nextMatchEnd: Int? = await MainActor.run { [swiftText, currentEnd] in
                     let ns = swiftText as NSString
-                    return trie.longestMatchEnd(in: ns, from: end)
+                    return trie.longestMatchEnd(in: ns, from: currentEnd)
                 }
                 if nextMatchEnd != nil { break }
 
                 let candidateEnd = end + 1
-                let hasLexiconPrefix: Bool = await MainActor.run {
+                let capturedStart = startIndex
+                let capturedCandidateEnd = candidateEnd
+                let hasLexiconPrefix: Bool = await MainActor.run { [swiftText, capturedStart, capturedCandidateEnd] in
                     let ns = swiftText as NSString
-                    return trie.hasPrefix(in: ns, from: startIndex, through: candidateEnd)
+                    return trie.hasPrefix(in: ns, from: capturedStart, through: capturedCandidateEnd)
                 }
                 if hasLexiconPrefix {
                     consumedKana += 1
@@ -358,10 +401,10 @@ actor SegmentationService {
         if prevIsBoundary || nextIsBoundary { return true }
         if prevChar != 0 && isKanji(prevChar) { return true }
         if nextChar != 0 && isKanji(nextChar) { return true }
-        if let prevScalar = UnicodeScalar(prevChar), scriptKind(for: prevScalar) != .hiragana {
+        if let prevScalar = UnicodeScalar(prevChar), (0x3040...0x309F).contains(Int(prevScalar.value)) == false {
             return true
         }
-        if let nextScalar = UnicodeScalar(nextChar), scriptKind(for: nextScalar) != .hiragana {
+        if let nextScalar = UnicodeScalar(nextChar), (0x3040...0x309F).contains(Int(nextScalar.value)) == false {
             return true
         }
         return false
@@ -386,7 +429,7 @@ actor SegmentationService {
     private static func isExtensionStopSequence(in text: String, start: Int) -> Bool {
         guard start < text.utf16.count else { return false }
         for sequence in extensionStopSequences {
-            if text.hasPrefix(sequence, fromUTF16Offset: start) {
+            if stringHasPrefix(text, prefix: sequence, fromUTF16Offset: start) {
                 return true
             }
         }
@@ -396,7 +439,7 @@ actor SegmentationService {
     private static func okuriganaFallbackLength(in text: String, start: Int) -> Int? {
         guard start < text.utf16.count else { return nil }
         for sequence in okuriganaFallbackSequences {
-            if text.hasPrefix(sequence, fromUTF16Offset: start) {
+            if stringHasPrefix(text, prefix: sequence, fromUTF16Offset: start) {
                 return sequence.utf16.count
             }
         }
@@ -467,6 +510,16 @@ actor SegmentationService {
         let chars = "、。！？：；（）［］｛｝「」『』・…―〜。・"
         return Set(chars.unicodeScalars)
     }()
+
+    private static func stringHasPrefix(_ text: String, prefix: String, fromUTF16Offset offset: Int) -> Bool {
+        guard offset >= 0 else { return false }
+        let utf16Count = text.utf16.count
+        guard offset <= utf16Count else { return false }
+        let startIndex = String.Index(utf16Offset: offset, in: text)
+        let limit = text.endIndex
+        guard let endIndex = text.index(startIndex, offsetBy: prefix.count, limitedBy: limit) else { return false }
+        return text[startIndex..<endIndex] == prefix
+    }
 }
 
 private enum ScriptKind {
@@ -477,19 +530,18 @@ private enum ScriptKind {
     case other
 }
 
-private extension String {
-    func hasPrefix(_ prefix: String, fromUTF16Offset offset: Int) -> Bool {
-        guard offset >= 0 else { return false }
-        // Ensure the UTF-16 offset is within the string bounds
-        let utf16Count = self.utf16.count
-        guard offset <= utf16Count else { return false }
-
-        // Create a String.Index from the UTF-16 offset (non-optional in modern Swift)
-        let startIndex = String.Index(utf16Offset: offset, in: self)
-        let limit = self.endIndex
-        // Advance by the prefix's character count, limited by the end index
-        guard let endIndex = self.index(startIndex, offsetBy: prefix.count, limitedBy: limit) else { return false }
-        return self[startIndex..<endIndex] == prefix
+private extension ScriptKind {
+    static func equals(_ lhs: ScriptKind, _ rhs: ScriptKind) -> Bool {
+        switch (lhs, rhs) {
+        case (.hiragana, .hiragana),
+             (.katakana, .katakana),
+             (.latin, .latin),
+             (.numeric, .numeric),
+             (.other, .other):
+            return true
+        default:
+            return false
+        }
     }
 }
 

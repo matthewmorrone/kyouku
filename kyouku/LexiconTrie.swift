@@ -44,7 +44,7 @@ final class LexiconTrie {
     }
 
     /// Returns the end index of the longest lexicon match that begins at `index`.
-    func longestMatchEnd(in text: NSString, from index: Int) -> Int? {
+    func longestMatchEnd(in text: NSString, from index: Int, requireKanji: Bool = true) -> Int? {
         instrumentation.recordCursor()
         let length = text.length
         guard index < length else { return nil }
@@ -69,7 +69,7 @@ final class LexiconTrie {
             node = next
             cursor += 1
             steps += 1
-            if node.isWord, hasKanji {
+            if node.isWord, (requireKanji == false || hasKanji) {
                 lastMatchEnd = cursor
             }
         }
