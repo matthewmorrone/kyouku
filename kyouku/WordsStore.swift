@@ -101,7 +101,7 @@ final class WordsStore: ObservableObject {
             let decoded = try JSONDecoder().decode([Word].self, from: data)
             self.words = decoded
         } catch {
-            print("Failed to load words: \(error)")
+            Log("Failed to load words: \(error)")
         }
     }
     
@@ -113,7 +113,7 @@ final class WordsStore: ObservableObject {
             let data = try JSONEncoder().encode(words)
             try data.write(to: url, options: .atomic)
         } catch {
-            print("Failed to save words: \(error)")
+            Log("Failed to save words: \(error)")
         }
     }
     
@@ -133,3 +133,4 @@ final class WordsStore: ObservableObject {
 
     func allWords() -> [Word] { words }
 }
+

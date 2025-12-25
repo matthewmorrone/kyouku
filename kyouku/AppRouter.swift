@@ -12,5 +12,6 @@ enum AppTab: Hashable {
 final class AppRouter: ObservableObject {
     @Published var selectedTab: AppTab = .paste
     @Published var noteToOpen: Note? = nil
+    @Published var pasteShouldBeginEditing: Bool = false
 }
 

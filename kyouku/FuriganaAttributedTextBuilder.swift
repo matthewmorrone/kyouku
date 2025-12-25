@@ -5,20 +5,25 @@ import OSLog
 
 enum FuriganaAttributedTextBuilder {
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "FuriganaBuilder")
+    private static func log(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
+        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+        logger.info("[\(file):\(line)] \(function): \(message)")
+    }
 
     static func build(
         text: String,
         textSize: Double,
         furiganaSize: Double,
-        context: String = "general"
+        context: String = "general",
+        overrides: [ReadingOverride] = []
     ) async throws -> NSAttributedString {
         guard text.isEmpty == false else {
-            logger.info("[\(context, privacy: .public)] Skipping build because the input text is empty.")
+            log("[\(context)] Skipping build because the input text is empty.")
             return NSAttributedString(string: text)
         }
 
         let buildStart = CFAbsoluteTimeGetCurrent()
-        let annotated = try await computeAnnotatedSpans(text: text, context: context)
+        let annotated = try await computeAnnotatedSpans(text: text, context: context, overrides: overrides)
         let attributed = project(
             text: text,
             annotatedSpans: annotated,
@@ -27,35 +32,45 @@ enum FuriganaAttributedTextBuilder {
             context: context
         )
         let totalDuration = elapsedMilliseconds(since: buildStart)
-        logger.info("[\(context, privacy: .public)] Finished furigana build in \(totalDuration, privacy: .public) ms.")
+        log("[\(context)] Finished furigana build in \(totalDuration) ms.")
         return attributed
     }
 
     static func computeAnnotatedSpans(
         text: String,
-        context: String = "general"
+        context: String = "general",
+        overrides: [ReadingOverride] = []
     ) async throws -> [AnnotatedSpan] {
         guard text.isEmpty == false else {
-            logger.info("[\(context, privacy: .public)] Skipping span computation because the input text is empty.")
+            log("[\(context)] Skipping span computation because the input text is empty.")
             return []
         }
 
-        logger.info("[\(context, privacy: .public)] Starting furigana span computation for \(text.count, privacy: .public) characters.")
+        log("[\(context)] Starting furigana span computation for \(text.count) characters.")
         let start = CFAbsoluteTimeGetCurrent()
 
         let segmentationStart = CFAbsoluteTimeGetCurrent()
         let segmented = try await SegmentationService.shared.segment(text: text)
+        let adjustedSpans = applySpanOverrides(
+            spans: segmented,
+            overrides: overrides,
+            text: text
+        )
         let segmentationDuration = elapsedMilliseconds(since: segmentationStart)
-        logger.info("[\(context, privacy: .public)] Segmentation spans found: \(segmented.count, privacy: .public) in \(segmentationDuration, privacy: .public) ms.")
+        log("[\(context)] Segmentation spans found: \(adjustedSpans.count) in \(segmentationDuration) ms.")
 
         let attachmentStart = CFAbsoluteTimeGetCurrent()
-        let annotated = await SpanReadingAttacher().attachReadings(text: text, spans: segmented)
+        let annotated = await SpanReadingAttacher().attachReadings(text: text, spans: adjustedSpans)
+        let resolvedAnnotated = applyReadingOverrides(
+            annotated,
+            overrides: overrides
+        )
         let attachmentDuration = elapsedMilliseconds(since: attachmentStart)
-        logger.info("[\(context, privacy: .public)] Annotated spans ready for projection: \(annotated.count, privacy: .public) in \(attachmentDuration, privacy: .public) ms.")
+        log("[\(context)] Annotated spans ready for projection: \(resolvedAnnotated.count) in \(attachmentDuration) ms.")
 
         let totalDuration = elapsedMilliseconds(since: start)
-        logger.info("[\(context, privacy: .public)] Completed span computation in \(totalDuration, privacy: .public) ms.")
-        return annotated
+        log("[\(context)] Completed span computation in \(totalDuration) ms.")
+        return resolvedAnnotated
     }
 
     static func project(
@@ -92,8 +107,8 @@ enum FuriganaAttributedTextBuilder {
             }
         }
 
-        let projectionDuration = elapsedMilliseconds(since: projectionStart)
-        // logger.info("[\(context, privacy: .public)] Projected ruby for \(appliedCount, privacy: .public) segments in \(projectionDuration, privacy: .public) ms.")
+        _ = elapsedMilliseconds(since: projectionStart)
+        // log("[\(context)] Projected ruby for \(appliedCount) segments in (projectionDuration) ms.")
         return mutable.copy() as? NSAttributedString ?? NSAttributedString(string: text)
     }
 
@@ -116,5 +131,60 @@ enum FuriganaAttributedTextBuilder {
             text as CFString,
             attributes
         )
+    }
+}
+
+private extension FuriganaAttributedTextBuilder {
+    private static func applySpanOverrides(
+        spans: [TextSpan],
+        overrides: [ReadingOverride],
+        text: String
+    ) -> [TextSpan] {
+        guard overrides.isEmpty == false else { return spans }
+        let nsText = text as NSString
+        let boundedOverrides: [TextSpan] = overrides.compactMap { override in
+            let range = override.nsRange
+            guard range.location != NSNotFound, range.length > 0 else { return nil }
+            guard NSMaxRange(range) <= nsText.length else { return nil }
+            let surface = nsText.substring(with: range)
+            return TextSpan(range: range, surface: surface)
+        }
+        guard boundedOverrides.isEmpty == false else { return spans }
+        var filtered = spans.filter { span in
+            overrides.contains { $0.overlaps(span.range) }
+                == false
+        }
+        filtered.append(contentsOf: boundedOverrides)
+        filtered.sort { lhs, rhs in
+            if lhs.range.location == rhs.range.location {
+                return lhs.range.length < rhs.range.length
+            }
+            return lhs.range.location < rhs.range.location
+        }
+        return filtered
+    }
+
+    private static func applyReadingOverrides(
+        _ annotated: [AnnotatedSpan],
+        overrides: [ReadingOverride]
+    ) -> [AnnotatedSpan] {
+        let mapping: [OverrideKey: String] = overrides.reduce(into: [:]) { partialResult, override in
+            guard let kana = override.userKana, kana.isEmpty == false else { return }
+            let key = OverrideKey(location: override.rangeStart, length: override.rangeLength)
+            partialResult[key] = kana
+        }
+        guard mapping.isEmpty == false else { return annotated }
+        return annotated.map { span in
+            let key = OverrideKey(location: span.span.range.location, length: span.span.range.length)
+            if let kana = mapping[key] {
+                return AnnotatedSpan(span: span.span, readingKana: kana, lemmaCandidates: span.lemmaCandidates)
+            }
+            return span
+        }
+    }
+
+    private struct OverrideKey: Hashable {
+        let location: Int
+        let length: Int
     }
 }

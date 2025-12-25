@@ -8,16 +8,29 @@
 import SwiftUI
 import Combine
 import Foundation
+import OSLog
 
 class NotesStore: ObservableObject {
     @Published var notes: [Note] = []
+    private static let logger = DiagnosticsLogging.logger(.notesStore)
 
     private let saveURL: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("notes.json")
     }()
+    private weak var overridesStore: ReadingOverridesStore?
+    private var overridesObserver: AnyCancellable?
 
-    init() {
+    init(readingOverrides: ReadingOverridesStore? = nil) {
+        self.overridesStore = readingOverrides
+        if let overrides = readingOverrides {
+            overridesObserver = NotificationCenter.default
+                .publisher(for: .readingOverridesDidChange, object: overrides)
+                .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+                .sink { [weak self] _ in
+                    self?.save()
+                }
+        }
         load()
     }
 
@@ -54,28 +67,58 @@ class NotesStore: ObservableObject {
 
     func save() {
         do {
-            let data = try JSONEncoder().encode(notes)
+            let archive = NotesArchive(
+                version: 1,
+                notes: notes,
+                overrides: overridesStore?.allOverrides() ?? []
+            )
+            let data = try JSONEncoder().encode(archive)
             try data.write(to: saveURL, options: .atomic)
+            Self.logger.debug("Saved \(self.notes.count) notes and \(archive.overrides.count) overrides")
         } catch {
+            Self.logger.error("Failed to save notes: \(error.localizedDescription, privacy: .public)")
             print("Failed to save notes:", error)
         }
     }
 
     func load() {
+        var needsUpgrade = false
         do {
             let data = try Data(contentsOf: saveURL)
-            let loaded = try JSONDecoder().decode([Note].self, from: data)
-            notes = loaded
+            let decoder = JSONDecoder()
+            if let archive = try? decoder.decode(NotesArchive.self, from: data) {
+                notes = archive.notes
+                if archive.overrides.isEmpty == false {
+                    overridesStore?.replaceAll(with: archive.overrides)
+                }
+                Self.logger.debug("Loaded archive with \(archive.notes.count) notes and \(archive.overrides.count) overrides")
+            } else {
+                let loaded = try decoder.decode([Note].self, from: data)
+                notes = loaded
+                needsUpgrade = true
+                Self.logger.debug("Loaded legacy notes array count=\(loaded.count); upgrade scheduled")
+            }
         } catch {
             notes = []
+            Self.logger.error("Failed to load notes archive: \(error.localizedDescription, privacy: .public)")
+        }
+        if needsUpgrade {
+            save()
         }
     }
     
     // MARK: - Bulk Replace / Export
     func replaceAll(with newNotes: [Note]) {
         self.notes = newNotes
+        Self.logger.debug("Replaced notes array with \(newNotes.count) entries")
         save()
     }
 
     func allNotes() -> [Note] { notes }
+}
+
+private struct NotesArchive: Codable {
+    let version: Int
+    var notes: [Note]
+    var overrides: [ReadingOverride]
 }

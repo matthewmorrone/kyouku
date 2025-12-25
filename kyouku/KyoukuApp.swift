@@ -9,10 +9,18 @@ import SwiftUI
 
 @main
 struct KyoukuApp: App {
-    @StateObject var notes = NotesStore()
-    @StateObject var store = WordsStore()
-    @StateObject var router = AppRouter()
-    @StateObject var readingOverrides = ReadingOverridesStore()
+    @StateObject private var readingOverrides: ReadingOverridesStore
+    @StateObject private var notes: NotesStore
+    @StateObject private var store: WordsStore
+    @StateObject private var router: AppRouter
+
+    init() {
+        let overrides = ReadingOverridesStore()
+        _readingOverrides = StateObject(wrappedValue: overrides)
+        _notes = StateObject(wrappedValue: NotesStore(readingOverrides: overrides))
+        _store = StateObject(wrappedValue: WordsStore())
+        _router = StateObject(wrappedValue: AppRouter())
+    }
 
     var body: some Scene {
         WindowGroup {

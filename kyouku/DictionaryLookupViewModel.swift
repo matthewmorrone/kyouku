@@ -16,11 +16,23 @@ final class DictionaryLookupViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
 
-    func load(term: String) async {
-        let t = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        query = t
+    func load(term: String, fallbackTerms: [String] = []) async {
+        let primary = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        query = primary
 
-        guard !t.isEmpty else {
+        let normalizedFallbacks = fallbackTerms
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+
+        var candidates: [String] = []
+        for candidate in [primary] + normalizedFallbacks {
+            guard candidate.isEmpty == false else { continue }
+            if candidates.contains(candidate) == false {
+                candidates.append(candidate)
+            }
+        }
+
+        guard candidates.isEmpty == false else {
             results = []
             errorMessage = nil
             return
@@ -29,14 +41,24 @@ final class DictionaryLookupViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        do {
-            let rows = try await DictionarySQLiteStore.shared.lookup(term: t, limit: 50)
-            results = rows
-        } catch {
-            results = []
-            errorMessage = String(describing: error)
+        for candidate in candidates {
+            do {
+                let rows = try await DictionarySQLiteStore.shared.lookup(term: candidate, limit: 50)
+                if rows.isEmpty == false {
+                    results = rows
+                    isLoading = false
+                    errorMessage = nil
+                    return
+                }
+            } catch {
+                results = []
+                errorMessage = String(describing: error)
+                isLoading = false
+                return
+            }
         }
 
+        results = []
         isLoading = false
     }
 }

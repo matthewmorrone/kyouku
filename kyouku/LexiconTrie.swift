@@ -132,6 +132,11 @@ private final class TrieInstrumentation {
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "LexiconTrie")
 
+    private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
+        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+        logger.info("[\(file):\(line)] \(function): \(message, privacy: .public)")
+    }
+
     func begin() {
         isActive = true
         cursorCount = 0
@@ -145,7 +150,7 @@ private final class TrieInstrumentation {
     func end(totalDuration: CFTimeInterval) {
         guard isActive else { return }
         isActive = false
-        logger.info("Trie spans: cursors=\(self.cursorCount) traversals=\(self.traversalCount) steps=\(self.stepCount) childrenLookups=\(self.lookupCount) charAtCalls=\(self.charAccessCount) trieTime=\(self.trieTime * 1000)ms totalTime=\(totalDuration * 1000)ms")
+        info("Trie spans: cursors=\(self.cursorCount) traversals=\(self.traversalCount) steps=\(self.stepCount) childrenLookups=\(self.lookupCount) charAtCalls=\(self.charAccessCount) trieTime=\(self.trieTime * 1000)ms totalTime=\(totalDuration * 1000)ms")
     }
 
     func recordCursor() {
@@ -178,3 +183,4 @@ private final class TrieInstrumentation {
         trieTime += duration
     }
 }
+

@@ -8,6 +8,17 @@ actor SegmentationService {
     static let shared = SegmentationService()
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SegmentationService")
+
+    private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
+        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+        logger.info("[\(file):\(line)] \(function): \(message, privacy: .public)")
+    }
+
+    private func debug(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
+        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+        logger.debug("[\(file):\(line)] \(function): \(message, privacy: .public)")
+    }
+
     private let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SegmentationService")
     private var cache: [SegmentationCacheKey: [TextSpan]] = [:]
     private var lruKeys: [SegmentationCacheKey] = []
@@ -22,11 +33,11 @@ actor SegmentationService {
         let segInterval = signposter.beginInterval("Segment", id: .exclusive, "len=\(text.count)")
         let key = SegmentationCacheKey(textHash: Self.hash(text), length: text.utf16.count)
         if let cached = cache[key] {
-            logger.debug("[Segmentation] Cache hit for len=\(text.count) -> \(cached.count) spans.")
+            debug("[Segmentation] Cache hit for len=\(text.count) -> \(cached.count) spans.")
             signposter.endInterval("Segment", segInterval)
             return cached
         } else {
-            logger.debug("[Segmentation] Cache miss for len=\(text.count). Proceeding to segment.")
+            debug("[Segmentation] Cache miss for len=\(text.count). Proceeding to segment.")
         }
 
         let trieInterval = signposter.beginInterval("TrieLoad")
@@ -34,7 +45,7 @@ actor SegmentationService {
         let trie = try await getTrie()
         let trieLoadMs = (CFAbsoluteTimeGetCurrent() - trieLoadStart) * 1000
         let trieSource = (trieInitTask == nil && trieCache != nil) ? "cached" : (trieInitTask != nil ? "building" : "unknown")
-        logger.debug("SegmentationService: trie load completed (source=\(trieSource)) in \(String(format: "%.3f", trieLoadMs)) ms.")
+        debug("SegmentationService: trie load completed (source=\(trieSource)) in \(String(format: "%.3f", trieLoadMs)) ms.")
         signposter.endInterval("TrieLoad", trieInterval)
 
         let nsText = text as NSString
@@ -43,7 +54,7 @@ actor SegmentationService {
         let segmentationStart = CFAbsoluteTimeGetCurrent()
         let ranges = await segmentRanges(using: trie, text: nsText)
         let segmentationMs = (CFAbsoluteTimeGetCurrent() - segmentationStart) * 1000
-        logger.debug("SegmentationService: segmentRanges took \(String(format: "%.3f", segmentationMs)) ms.")
+        debug("SegmentationService: segmentRanges took \(String(format: "%.3f", segmentationMs)) ms.")
         signposter.endInterval("SegmentRanges", rangesInterval)
 
         let mapInterval = signposter.beginInterval("MapRangesToSpans")
@@ -52,12 +63,12 @@ actor SegmentationService {
             TextSpan(range: range, surface: nsText.substring(with: range))
         }
         let mapMs = (CFAbsoluteTimeGetCurrent() - mapStart) * 1000
-        logger.debug("SegmentationService: mapping ranges->spans took \(String(format: "%.3f", mapMs)) ms.")
+        debug("SegmentationService: mapping ranges->spans took \(String(format: "%.3f", mapMs)) ms.")
         signposter.endInterval("MapRangesToSpans", mapInterval)
 
         store(spans, for: key)
         let overallDurationMsDouble = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-        logger.debug("Segmented text length \(text.count) into \(spans.count) spans in \(String(format: "%.3f", overallDurationMsDouble)) ms (trie: \(String(format: "%.3f", trieLoadMs)) ms, segment: \(String(format: "%.3f", segmentationMs)) ms, map: \(String(format: "%.3f", mapMs)) ms).")
+        debug("Segmented text length \(text.count) into \(spans.count) spans in \(String(format: "%.3f", overallDurationMsDouble)) ms (trie: \(String(format: "%.3f", trieLoadMs)) ms, segment: \(String(format: "%.3f", segmentationMs)) ms, map: \(String(format: "%.3f", mapMs)) ms).")
         signposter.endInterval("Segment", segInterval)
         return spans
     }
@@ -81,20 +92,20 @@ actor SegmentationService {
     private func getTrie() async throws -> LexiconTrie {
         let start = CFAbsoluteTimeGetCurrent()
         if let t = trieCache {
-            logger.debug("getTrie(): returning cached trie in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
+            debug("getTrie(): returning cached trie in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
             return t
         }
         if let task = trieInitTask {
-            logger.debug("getTrie(): awaiting existing build task…")
+            debug("getTrie(): awaiting existing build task…")
             return try await task.value
         }
-        logger.debug("getTrie(): creating new build task…")
+        debug("getTrie(): creating new build task…")
         let task = Task { try await LexiconProvider.shared.trie() }
         trieInitTask = task
         let t = try await task.value
         trieCache = t
         trieInitTask = nil
-        logger.debug("getTrie(): build task completed in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
+        debug("getTrie(): build task completed in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
         return t
     }
 
@@ -102,7 +113,7 @@ actor SegmentationService {
         let length = text.length
         guard length > 0 else { return [] }
 
-        logger.debug("segmentRanges: starting scan length=\(length)")
+        debug("segmentRanges: starting scan length=\(length)")
 
         var ranges: [NSRange] = []
         ranges.reserveCapacity(max(1, length / 2))
@@ -228,13 +239,13 @@ actor SegmentationService {
             pendingNonKanjiKind = nil
         }
 
-        logger.debug("segmentRanges: finished scan with \(ranges.count) ranges. Performing metrics…")
+        debug("segmentRanges: finished scan with \(ranges.count) ranges. Performing metrics…")
 
         let totalDuration = CFAbsoluteTimeGetCurrent() - profilingStart
         let totalMs = totalDuration * 1000
         let lookupMs = trieLookupTime * 1000
         let avgMatchLen = matchesFound > 0 ? Double(sumMatchLen) / Double(matchesFound) : 0
-        logger.debug("segmentRanges: scanned length \(length) -> \(ranges.count) ranges in \(String(format: "%.3f", totalMs)) ms (lookups: \(trieLookups), matches: \(matchesFound), singletons: \(singletonKanji), avgMatchLen: \(String(format: "%.2f", avgMatchLen)), maxMatchLen: \(maxMatchLen), kanji: \(kanjiCount), nonKanji: \(nonKanjiCount), lookupTime: \(String(format: "%.3f", lookupMs)) ms).")
+        debug("segmentRanges: scanned length \(length) -> \(ranges.count) ranges in \(String(format: "%.3f", totalMs)) ms (lookups: \(trieLookups), matches: \(matchesFound), singletons: \(singletonKanji), avgMatchLen: \(String(format: "%.2f", avgMatchLen)), maxMatchLen: \(maxMatchLen), kanji: \(kanjiCount), nonKanji: \(nonKanjiCount), lookupTime: \(String(format: "%.3f", lookupMs)) ms).")
         await MainActor.run {
             trie.endProfiling(totalDuration: totalDuration)
         }

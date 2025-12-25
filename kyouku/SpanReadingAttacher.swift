@@ -16,6 +16,16 @@ struct SpanReadingAttacher {
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SpanReadingAttacher")
     private static let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SpanReadingAttacher")
 
+    private static func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
+        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+        logger.info("[\(file):\(line)] \(function): \(message)")
+    }
+
+    private static func debug(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
+        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+        logger.debug("[\(file):\(line)] \(function): \(message)")
+    }
+
     func attachReadings(text: String, spans: [TextSpan]) async -> [AnnotatedSpan] {
         guard text.isEmpty == false, spans.isEmpty == false else { return spans.map { AnnotatedSpan(span: $0, readingKana: nil) } }
 
@@ -25,7 +35,7 @@ struct SpanReadingAttacher {
         let key = ReadingAttachmentCacheKey(textHash: Self.hash(text), spanSignature: Self.signature(for: spans))
         if let cached = await Self.cache.value(for: key) {
             let duration = Self.elapsedMilliseconds(since: start)
-            Self.logger.debug("[SpanReadingAttacher] Cache hit for \(spans.count, privacy: .public) spans in \(duration, privacy: .public) ms.")
+            Self.debug("[SpanReadingAttacher] Cache hit for \(spans.count) spans in \(duration) ms.")
             Self.signposter.endInterval("AttachReadings Overall", overallInterval)
             return cached
         }
@@ -38,13 +48,12 @@ struct SpanReadingAttacher {
         if tokenizerOpt == nil {
             Self.logger.error("[SpanReadingAttacher] Tokenizer acquisition failed in \(String(format: "%.3f", tokMs)) ms")
         } else {
-            Self.logger.info("[SpanReadingAttacher] Tokenizer acquired in \(String(format: "%.3f", tokMs)) ms")
+            Self.info("[SpanReadingAttacher] Tokenizer acquired in \(String(format: "%.3f", tokMs)) ms")
         }
         guard let tokenizer = tokenizerOpt else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
             await Self.cache.store(passthrough, for: key)
-//            let duration = Self.elapsedMilliseconds(since: start)
-//            Self.logger.error("[SpanReadingAttacher] Failed to acquire tokenizer. Returning passthrough spans in \(duration, privacy: .public) ms.")
+//            Self.info("[SpanReadingAttacher] Failed to acquire tokenizer. Returning passthrough spans in (duration) ms.")
             Self.signposter.endInterval("AttachReadings Overall", overallInterval)
             return passthrough
         }
@@ -55,23 +64,23 @@ struct SpanReadingAttacher {
             let nsRange = NSRange(annotation.range, in: text)
             guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
             let surface = String(text[annotation.range])
-            return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface)
+            return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm)
         }
         Self.signposter.endInterval("MeCab Tokenize", tokenizeInterval)
         let tokenizeMs = (CFAbsoluteTimeGetCurrent() - tokenizeStart) * 1000
-        Self.logger.info("[SpanReadingAttacher] MeCab tokenization produced \(annotations.count) annotations in \(String(format: "%.3f", tokenizeMs)) ms")
+        Self.info("[SpanReadingAttacher] MeCab tokenization produced \(annotations.count) annotations in \(String(format: "%.3f", tokenizeMs)) ms")
 
         var annotated: [AnnotatedSpan] = []
         annotated.reserveCapacity(spans.count)
 
         for span in spans {
-            let reading = readingForSpan(span, annotations: annotations, tokenizer: tokenizer)
-            annotated.append(AnnotatedSpan(span: span, readingKana: reading))
+            let attachment = attachmentForSpan(span, annotations: annotations, tokenizer: tokenizer)
+            annotated.append(AnnotatedSpan(span: span, readingKana: attachment.reading, lemmaCandidates: attachment.lemmas))
         }
 
         await Self.cache.store(annotated, for: key)
         let duration = Self.elapsedMilliseconds(since: start)
-        Self.logger.info("[SpanReadingAttacher] Attached readings for \(spans.count, privacy: .public) spans in \(duration, privacy: .public) ms.")
+        Self.info("[SpanReadingAttacher] Attached readings for \(spans.count) spans in \(String(format: "%.3f", duration)) ms.")
         Self.signposter.endInterval("AttachReadings Overall", overallInterval)
         return annotated
     }
@@ -82,52 +91,78 @@ struct SpanReadingAttacher {
         return sharedTokenizer
     }
 
-    private func readingForSpan(_ span: TextSpan, annotations: [MeCabAnnotation], tokenizer: Tokenizer) -> String? {
-        guard span.range.length > 0, containsKanji(span.surface) else { return nil }
-        var builder = ""
+    private typealias RetokenizedResult = (reading: String, lemmas: [String])
+
+    private func attachmentForSpan(_ span: TextSpan, annotations: [MeCabAnnotation], tokenizer: Tokenizer) -> SpanAttachmentResult {
+        guard span.range.length > 0 else { return SpanAttachmentResult(reading: nil, lemmas: []) }
+
+        var lemmaCandidates: [String] = []
+        let requiresReading = containsKanji(span.surface)
+        var builder = requiresReading ? "" : nil
         let spanEnd = span.range.location + span.range.length
         var coveringToken: MeCabAnnotation?
+        var retokenizedCache: RetokenizedResult?
 
         for annotation in annotations {
             if annotation.range.location >= spanEnd { break }
-            if NSLocationInRange(annotation.range.location, span.range) == false {
-                continue
-            }
             let intersection = NSIntersectionRange(span.range, annotation.range)
+            guard intersection.length > 0 else { continue }
+            Self.appendLemmaCandidate(annotation.dictionaryForm, to: &lemmaCandidates)
+
+            guard requiresReading else { continue }
             if intersection.length == annotation.range.length {
                 let chunk = annotation.reading.isEmpty ? annotation.surface : annotation.reading
-                builder.append(chunk)
-//                Self.logger.debug("[SpanReadingAttacher] Matched token surface=\(annotation.surface, privacy: .public) reading=\(chunk, privacy: .public) for span=\(span.surface, privacy: .public).")
-            } else if coveringToken == nil, NSLocationInRange(span.range.location, annotation.range), NSMaxRange(span.range) <= NSMaxRange(annotation.range) {
+                builder?.append(chunk)
+//                Self.debug("[SpanReadingAttacher] Matched token surface=\(annotation.surface) reading=\(chunk) for span=\(span.surface).")
+            } else if coveringToken == nil,
+                      NSLocationInRange(span.range.location, annotation.range),
+                      NSMaxRange(span.range) <= NSMaxRange(annotation.range) {
                 coveringToken = annotation
             }
         }
 
-        if builder.isEmpty == false {
-            let trimmed = Self.trimDictionaryOkurigana(surface: span.surface, reading: builder)
-            let normalized = Self.toHiragana(trimmed)
-            return normalized.isEmpty ? nil : normalized
+        var readingResult: String?
+
+        if requiresReading {
+            if let built = builder, built.isEmpty == false {
+                let trimmed = Self.trimDictionaryOkurigana(surface: span.surface, reading: built)
+                let normalized = Self.toHiragana(trimmed)
+                readingResult = normalized.isEmpty ? nil : normalized
+            } else if let token = coveringToken {
+                let tokenReadingKatakana = Self.toKatakana(token.reading.isEmpty ? token.surface : token.reading)
+                if let stripped = Self.kanjiReadingFromToken(tokenSurface: token.surface, tokenReadingKatakana: tokenReadingKatakana) {
+                    let normalizedFallback = Self.toHiragana(stripped)
+//                    Self.debug("[SpanReadingAttacher] Fallback token surface=\(token.surface) strippedReading=\(normalizedFallback) for span=\(span.surface).")
+                    readingResult = normalizedFallback.isEmpty ? nil : normalizedFallback
+                }
+            } else if let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
+                let trimmed = Self.trimDictionaryOkurigana(surface: span.surface, reading: retokenized.reading)
+                let normalized = Self.toHiragana(trimmed)
+                readingResult = normalized.isEmpty ? nil : normalized
+            }
         }
 
-        if let token = coveringToken {
-            let tokenReadingKatakana = Self.toKatakana(token.reading.isEmpty ? token.surface : token.reading)
-            guard let stripped = Self.kanjiReadingFromToken(tokenSurface: token.surface, tokenReadingKatakana: tokenReadingKatakana) else { return nil }
-            let normalizedFallback = Self.toHiragana(stripped)
-//            Self.logger.debug("[SpanReadingAttacher] Fallback token surface=\(token.surface, privacy: .public) strippedReading=\(normalizedFallback, privacy: .public) for span=\(span.surface, privacy: .public).")
-            return normalizedFallback.isEmpty ? nil : normalizedFallback
+        if lemmaCandidates.isEmpty,
+           let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
+            lemmaCandidates = retokenized.lemmas
         }
 
-        guard let retokenized = readingByRetokenizingSurface(span.surface, tokenizer: tokenizer) else { return nil }
-        let trimmedRetokenized = Self.trimDictionaryOkurigana(surface: span.surface, reading: retokenized)
-        let normalizedRetokenized = Self.toHiragana(trimmedRetokenized)
-        return normalizedRetokenized.isEmpty ? nil : normalizedRetokenized
+        return SpanAttachmentResult(reading: readingResult, lemmas: lemmaCandidates)
     }
 
-    private func readingByRetokenizingSurface(_ surface: String, tokenizer: Tokenizer) -> String? {
+    private func retokenizedResult(for span: TextSpan, tokenizer: Tokenizer, cache: inout RetokenizedResult?) -> RetokenizedResult? {
+        if cache == nil {
+            cache = readingByRetokenizingSurface(span.surface, tokenizer: tokenizer)
+        }
+        return cache
+    }
+
+    private func readingByRetokenizingSurface(_ surface: String, tokenizer: Tokenizer) -> RetokenizedResult? {
         guard surface.isEmpty == false else { return nil }
         let tokens = tokenizer.tokenize(text: surface)
         guard tokens.isEmpty == false else { return nil }
         var builder = ""
+        var lemmas: [String] = []
         for token in tokens {
             let chunk: String
             if token.reading.isEmpty {
@@ -136,8 +171,9 @@ struct SpanReadingAttacher {
                 chunk = token.reading
             }
             builder.append(chunk)
+            Self.appendLemmaCandidate(token.dictionaryForm, to: &lemmas)
         }
-        return builder.isEmpty ? nil : builder
+        return builder.isEmpty ? nil : (builder, lemmas)
     }
 
     static func kanjiReadingFromToken(tokenSurface: String, tokenReadingKatakana: String) -> String? {
@@ -216,6 +252,19 @@ struct SpanReadingAttacher {
         (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
     }
 
+    private static func appendLemmaCandidate(_ candidate: String?, to list: inout [String]) {
+        guard let lemma = normalizeLemma(candidate) else { return }
+        if list.contains(lemma) == false {
+            list.append(lemma)
+        }
+    }
+
+    private static func normalizeLemma(_ candidate: String?) -> String? {
+        guard let candidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), candidate.isEmpty == false else { return nil }
+        guard candidate != "*" else { return nil }
+        return toHiragana(candidate)
+    }
+
     private static func hash(_ text: String) -> Int {
         var hasher = Hasher()
         hasher.combine(text)
@@ -241,6 +290,12 @@ private struct MeCabAnnotation {
     let range: NSRange
     let reading: String
     let surface: String
+    let dictionaryForm: String
+}
+
+private struct SpanAttachmentResult {
+    let reading: String?
+    let lemmas: [String]
 }
 
 private struct ReadingAttachmentCacheKey: Sendable, nonisolated Hashable {

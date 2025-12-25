@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import OSLog
 
 /// Describes a single user-confirmed reading override for text inside a note.
 ///
@@ -18,8 +19,8 @@ struct ReadingOverride: Identifiable, Codable, Hashable {
     let rangeStart: Int
     /// Length of the overridden segment, also measured in UTF-16 code units.
     let rangeLength: Int
-    /// User-confirmed kana for this range; never reinterpret this as dictionary-provided `kana`.
-    let userKana: String
+    /// Optional user-confirmed kana for this range. `nil` means "trust the automatic reading" while still forcing token boundaries.
+    let userKana: String?
     let createdAt: Date
 
     private enum CodingKeys: String, CodingKey {
@@ -31,13 +32,25 @@ struct ReadingOverride: Identifiable, Codable, Hashable {
         case createdAt
     }
 
-    init(id: UUID = UUID(), noteID: UUID, rangeStart: Int, rangeLength: Int, userKana: String, createdAt: Date = Date()) {
+    init(id: UUID = UUID(), noteID: UUID, rangeStart: Int, rangeLength: Int, userKana: String?, createdAt: Date = Date()) {
         self.id = id
         self.noteID = noteID
         self.rangeStart = rangeStart
         self.rangeLength = rangeLength
-        self.userKana = userKana
+        if let trimmed = userKana?.trimmingCharacters(in: .whitespacesAndNewlines), trimmed.isEmpty == false {
+            self.userKana = trimmed
+        } else {
+            self.userKana = nil
+        }
         self.createdAt = createdAt
+    }
+
+    var nsRange: NSRange {
+        NSRange(location: rangeStart, length: rangeLength)
+    }
+
+    func overlaps(_ otherRange: NSRange) -> Bool {
+        NSIntersectionRange(nsRange, otherRange).length > 0
     }
 }
 
@@ -48,6 +61,7 @@ struct ReadingOverride: Identifiable, Codable, Hashable {
 /// this store; inferred readings should be treated as provisional display aids.
 final class ReadingOverridesStore: ObservableObject {
     @Published private(set) var overrides: [ReadingOverride] = []
+    private static let logger = DiagnosticsLogging.logger(.readingOverrides)
 
     private let fileName = "reading-overrides.json"
 
@@ -59,13 +73,37 @@ final class ReadingOverridesStore: ObservableObject {
         overrides.filter { $0.noteID == noteID }
     }
 
-    func saveOverride(noteID: UUID, range: NSRange, userKana: String) {
-        let trimmed = userKana.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.isEmpty == false else { return }
-        let newOverride = ReadingOverride(noteID: noteID, rangeStart: range.location, rangeLength: range.length, userKana: trimmed)
-        overrides.removeAll { $0.noteID == noteID && $0.rangeStart == range.location && $0.rangeLength == range.length }
-        overrides.append(newOverride)
+    func overrides(for noteID: UUID, overlapping range: NSRange) -> [ReadingOverride] {
+        overrides.filter { $0.noteID == noteID && $0.overlaps(range) }
+    }
+
+    func upsert(noteID: UUID, range: NSRange, userKana: String?) {
+        let override = ReadingOverride(
+            noteID: noteID,
+            rangeStart: range.location,
+            rangeLength: range.length,
+            userKana: userKana
+        )
+        Self.logger.debug("Upsert override note=\(noteID) range=\(range.location)-\(NSMaxRange(range)) hasKana=\(userKana != nil)")
+        apply(noteID: noteID, removing: range, adding: [override])
+    }
+
+    func apply(noteID: UUID, removing range: NSRange, adding newOverrides: [ReadingOverride]) {
+        overrides.removeAll { $0.noteID == noteID && $0.overlaps(range) }
+        overrides.append(contentsOf: newOverrides)
         save()
+        Self.logger.debug("Applied overrides note=\(noteID) removeRange=\(range.location)-\(NSMaxRange(range)) inserted=\(newOverrides.count) total=\(self.overrides.count)")
+        notifyChange()
+    }
+
+    func remove(noteID: UUID, in range: NSRange) {
+        let before = overrides.count
+        overrides.removeAll { $0.noteID == noteID && $0.overlaps(range) }
+        if overrides.count != before {
+            save()
+            Self.logger.debug("Removed overrides note=\(noteID) range=\(range.location)-\(NSMaxRange(range)) remaining=\(self.overrides.count)")
+            notifyChange()
+        }
     }
 
     func deleteOverride(id: UUID) {
@@ -73,12 +111,16 @@ final class ReadingOverridesStore: ObservableObject {
         overrides.removeAll { $0.id == id }
         if overrides.count != before {
             save()
+            Self.logger.debug("Deleted override id=\(id) remaining=\(self.overrides.count)")
+            notifyChange()
         }
     }
 
     func replaceAll(with overrides: [ReadingOverride]) {
         self.overrides = overrides
         save()
+        Self.logger.debug("Replaced all overrides count=\(overrides.count)")
+        notifyChange()
     }
 
     func allOverrides() -> [ReadingOverride] {
@@ -100,7 +142,9 @@ final class ReadingOverridesStore: ObservableObject {
         do {
             let data = try Data(contentsOf: url)
             overrides = try JSONDecoder().decode([ReadingOverride].self, from: data)
+            Self.logger.debug("Loaded overrides file entries=\(self.overrides.count)")
         } catch {
+            Self.logger.error("Failed to load reading overrides: \(error.localizedDescription, privacy: .public)")
             print("Failed to load reading overrides: \(error)")
         }
     }
@@ -110,8 +154,18 @@ final class ReadingOverridesStore: ObservableObject {
         do {
             let data = try JSONEncoder().encode(overrides)
             try data.write(to: url, options: .atomic)
+            Self.logger.debug("Saved overrides count=\(self.overrides.count)")
         } catch {
+            Self.logger.error("Failed to save reading overrides: \(error.localizedDescription, privacy: .public)")
             print("Failed to save reading overrides: \(error)")
         }
     }
+
+    private func notifyChange() {
+        NotificationCenter.default.post(name: .readingOverridesDidChange, object: self)
+    }
+}
+
+extension Notification.Name {
+    static let readingOverridesDidChange = Notification.Name("ReadingOverridesDidChange")
 }

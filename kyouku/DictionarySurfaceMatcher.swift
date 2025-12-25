@@ -222,11 +222,13 @@ struct DictionarySurfaceMatcher {
 }
 
 private extension DictionarySurfaceMatcher {
-    static func log(_ message: String) {
-        logger.info("\(message, privacy: .public)")
+    static func log(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
+        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+        logger.info("[\(file):\(line)] \(function): \(message, privacy: .public)")
     }
 
-    static func debug(_ message: String) {
-        logger.debug("\(message, privacy: .public)")
+    static func debug(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
+        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
+        logger.debug("[\(file):\(line)] \(function): \(message, privacy: .public)")
     }
 }
