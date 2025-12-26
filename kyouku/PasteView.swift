@@ -52,6 +52,9 @@ struct PasteView: View {
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
     @AppStorage("readingShowFurigana") private var showFurigana: Bool = true
     @AppStorage("readingAlternateTokenColors") private var alternateTokenColors: Bool = false
+    @AppStorage("readingHighlightUnknownTokens") private var highlightUnknownTokens: Bool = false
+    @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
+    @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage("pasteViewScratchNoteID") private var scratchNoteIDRaw: String = ""
 
     private var scratchNoteID: UUID {
@@ -76,6 +79,14 @@ struct PasteView: View {
         set.formUnion(CharacterSet(charactersIn: "\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{200B}"))
         return set
     }()
+    private var alternateTokenPalette: [UIColor] {
+        [
+            UIColor(hexString: alternateTokenColorAHex) ?? .systemBlue,
+            UIColor(hexString: alternateTokenColorBHex) ?? .systemPink
+        ]
+    }
+    private var unknownTokenColor: UIColor { UIColor.systemOrange }
+    private var tokenHighlightsEnabled: Bool { alternateTokenColors || highlightUnknownTokens }
 
     var body: some View {
         NavigationStack {
@@ -169,6 +180,11 @@ struct PasteView: View {
                 triggerFuriganaRefreshIfNeeded(reason: "alternate token colors toggled on", recomputeSpans: false)
             }
         }
+        .onChange(of: highlightUnknownTokens) { _, enabled in
+            if enabled {
+                triggerFuriganaRefreshIfNeeded(reason: "unknown highlight toggled on", recomputeSpans: false)
+            }
+        }
         .onChange(of: readingFuriganaSize) { _, _ in
             triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
         }
@@ -201,6 +217,9 @@ struct PasteView: View {
                 showFurigana: showFurigana,
                 lineSpacing: readingLineSpacing,
                 alternateTokenColors: alternateTokenColors,
+                highlightUnknownTokens: highlightUnknownTokens,
+                tokenPalette: alternateTokenPalette,
+                unknownTokenColor: unknownTokenColor,
                 selectedRangeHighlight: persistentSelectionRange,
                 customizedRanges: customizedRanges,
                 onTokenSelection: handleTokenSelection,
@@ -262,6 +281,9 @@ struct PasteView: View {
                 .contextMenu {
                     Toggle(isOn: $alternateTokenColors) {
                         Label("Alternate Token Colors", systemImage: "textformat.alt")
+                    }
+                    Toggle(isOn: $highlightUnknownTokens) {
+                        Label("Highlight Unknown Words", systemImage: "questionmark.square.dashed")
                     }
                 }
             }
@@ -658,7 +680,7 @@ struct PasteView: View {
         overrideSignature = signature
         updateCustomizedRanges()
         guard inputText.isEmpty == false else { return }
-        guard showFurigana || alternateTokenColors else { return }
+        guard showFurigana || tokenHighlightsEnabled else { return }
         guard isEditing == false else { return }
         triggerFuriganaRefreshIfNeeded(reason: "reading overrides changed", recomputeSpans: true)
     }
@@ -812,7 +834,7 @@ struct PasteView: View {
     }
 
     private func triggerFuriganaRefreshIfNeeded(reason: String = "state change", recomputeSpans: Bool = true) {
-        guard showFurigana || alternateTokenColors else {
+        guard showFurigana || tokenHighlightsEnabled else {
             Self.logFurigana("Skipping refresh (\(reason)): no consumers need annotated spans.")
             return
         }
@@ -838,7 +860,7 @@ struct PasteView: View {
     }
 
     private func makeFuriganaTask(token: Int, recomputeSpans: Bool) -> (() async -> Void)? {
-        guard showFurigana || alternateTokenColors else {
+        guard showFurigana || tokenHighlightsEnabled else {
             Self.logFurigana("No furigana task created because no consumer requires spans.")
             return nil
         }
@@ -850,6 +872,7 @@ struct PasteView: View {
         let currentText = inputText
         let currentShowFurigana = showFurigana
         let currentAlternateTokenColors = alternateTokenColors
+        let currentHighlightUnknownTokens = highlightUnknownTokens
         let currentIsEditing = isEditing
         let currentTextSize = readingTextSize
         let currentFuriganaSize = readingFuriganaSize
@@ -860,7 +883,7 @@ struct PasteView: View {
             await PasteView.recomputeFurigana(
                 text: currentText,
                 showFurigana: currentShowFurigana,
-                needsTokenHighlights: currentAlternateTokenColors,
+                needsTokenHighlights: (currentAlternateTokenColors || currentHighlightUnknownTokens),
                 isEditing: currentIsEditing,
                 textSize: currentTextSize,
                 furiganaSize: currentFuriganaSize,
@@ -1016,6 +1039,9 @@ private struct EditorContainer: View {
     var showFurigana: Bool
     var lineSpacing: Double
     var alternateTokenColors: Bool
+    var highlightUnknownTokens: Bool
+    var tokenPalette: [UIColor]
+    var unknownTokenColor: UIColor
     var selectedRangeHighlight: NSRange?
     var customizedRanges: [NSRange]
     var onTokenSelection: ((RubyText.SelectionPayload) -> Void)? = nil
@@ -1108,7 +1134,7 @@ private struct EditorContainer: View {
             lineHeightMultiple: 1.0,
             extraGap: CGFloat(max(0, lineSpacing)),
             annotationVisibility: annotationVisibility,
-            tokenOverlays: tokenBorderOverlays,
+            tokenOverlays: tokenColorOverlays,
             annotatedSpans: furiganaSpans ?? [],
                 selectedRange: selectedRangeHighlight,
                 customizedRanges: customizedRanges,
@@ -1121,19 +1147,29 @@ private struct EditorContainer: View {
         furiganaText ?? NSAttributedString(string: text)
     }
 
-    private var tokenBorderOverlays: [RubyText.TokenOverlay] {
-        guard alternateTokenColors, let spans = furiganaSpans else { return [] }
-        let palette: [UIColor] = [UIColor.systemBlue, UIColor.systemPink]
-        guard palette.isEmpty == false else { return [] }
+    private var tokenColorOverlays: [RubyText.TokenOverlay] {
+        guard let spans = furiganaSpans, (alternateTokenColors || highlightUnknownTokens) else { return [] }
         let backingString = furiganaText?.string ?? text
         let textStorage = backingString as NSString
-        let coverageRanges = Self.coverageRanges(from: spans, textStorage: textStorage)
         var overlays: [RubyText.TokenOverlay] = []
-        overlays.reserveCapacity(coverageRanges.count)
-        for (index, range) in coverageRanges.enumerated() {
-            let color = palette[index % palette.count]
-            overlays.append(RubyText.TokenOverlay(range: range, color: color))
+
+        if alternateTokenColors {
+            let palette = tokenPalette.filter { $0.cgColor.alpha > 0 }
+            if palette.isEmpty == false {
+                let coverageRanges = Self.coverageRanges(from: spans, textStorage: textStorage)
+                overlays.reserveCapacity(coverageRanges.count)
+                for (index, range) in coverageRanges.enumerated() {
+                    let color = palette[index % palette.count]
+                    overlays.append(RubyText.TokenOverlay(range: range, color: color))
+                }
+            }
         }
+
+        if highlightUnknownTokens {
+            let unknowns = Self.unknownTokenOverlays(from: spans, textStorage: textStorage, color: unknownTokenColor)
+            overlays.append(contentsOf: unknowns)
+        }
+
         return overlays
     }
 
@@ -1175,6 +1211,25 @@ private struct EditorContainer: View {
         let substring = textStorage.substring(with: range)
         return substring.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
+    
+    private static func clampRange(_ range: NSRange, length: Int) -> NSRange? {
+        guard length > 0 else { return nil }
+        let bounds = NSRange(location: 0, length: length)
+        let clamped = NSIntersectionRange(range, bounds)
+        return clamped.length > 0 ? clamped : nil
+    }
+
+    private static func unknownTokenOverlays(from spans: [AnnotatedSpan], textStorage: NSString, color: UIColor) -> [RubyText.TokenOverlay] {
+        guard textStorage.length > 0 else { return [] }
+        var overlays: [RubyText.TokenOverlay] = []
+        overlays.reserveCapacity(spans.count)
+        for span in spans where span.readingKana == nil {
+            guard let clamped = Self.clampRange(span.span.range, length: textStorage.length) else { continue }
+            if containsNonWhitespace(in: clamped, textStorage: textStorage) == false { continue }
+            overlays.append(RubyText.TokenOverlay(range: clamped, color: color))
+        }
+        return overlays
+    }
 }
 
 extension PasteView {
@@ -1187,3 +1242,4 @@ extension PasteView {
         PasteBufferStore.save("")
     }
 }
+

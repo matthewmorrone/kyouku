@@ -1,5 +1,9 @@
 # Kyouku — Functional Overview & Architecture
 
+please add a panel on the paste tab that lists all detected tokens in order. clicking on individual words on their text opens their definition, and ont he right is a plus button that saves them to the words list (either a bookmark or a star). these tokens should reflect tokenization on the paste area exactly, and their readings should match their furigana. they should have context menu options for merge left, merge right and split (keep left and right even though on this screen it's up and down). 
+
+please check this diff for anything worth keeping. first thing that comes to mind is centralized logging with easily configurable switches
+
 ## Purpose
 
 Kyouku is an iOS app for light-weight Japanese study. It lets users paste arbitrary text, keep quick notes, perform manual dictionary lookups, and run spaced repetition style drills on saved vocabulary. The experience is intentionally simple: no automatic parsing, no inline annotation toggles, and no background text processors to babysit.
@@ -51,11 +55,6 @@ Kyouku is an iOS app for light-weight Japanese study. It lets users paste arbitr
 - いだ for 抱
 - わたしま for 私待: correct, but 私 isn't properly centered
 
-## Recently Fixed
-- 巡り会う now shows めぐりあ over both kanji
-- 生き方 displays いきかた across the full word
-- 一度 renders with the correct kanji span
-- 思い出す places おもいだ over the entire verb
-- お願い renders even when starting with kana
-- 夜ふけ shows よふけ across both characters
-- 出逢 displays であ across the compound
+## Ideas
++ add a toggle for highlighting distinct parts of speech
++ add a toggle for distinguishing kanji, hiragana and katakana

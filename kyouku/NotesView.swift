@@ -16,6 +16,9 @@ struct NotesView: View {
     @State private var showDeleteAlert: Bool = false
     @State private var pendingDeleteHasAssociatedWords: Bool = false
     @State private var editModeState: EditMode = .inactive
+    @State private var showRenameAlert: Bool = false
+    @State private var renameTarget: Note? = nil
+    @State private var renameText: String = ""
 
     var body: some View {
         NavigationStack {
@@ -71,11 +74,16 @@ struct NotesView: View {
                             // Divider()
 
                             Button {
+                                presentRenameAlert(for: note)
+                            } label: {
+                                Label("Rename", systemImage: "text.cursor")
+                            }
+                            Button {
                                 router.noteToOpen = note
                                 router.pasteShouldBeginEditing = true
                                 router.selectedTab = .paste
                             } label: {
-                                Label("Rename / Edit", systemImage: "pencil")
+                                Label("Edit", systemImage: "pencil")
                             }
                             Button(role: .destructive) {
                                     // Trigger existing delete flow by setting pending offsets for this single note
@@ -150,6 +158,17 @@ struct NotesView: View {
                     Text("This will delete the selected note(s).")
                 }
             }
+            .alert("Rename Note", isPresented: $showRenameAlert, presenting: renameTarget) { note in
+                TextField("Title", text: $renameText)
+                Button("Save") {
+                    commitRename(note, title: renameText)
+                }
+                Button("Cancel", role: .cancel) {
+                    resetRenameState()
+                }
+            } message: { _ in
+                Text("Enter a new title for this note.")
+            }
         }
     }
 
@@ -167,6 +186,26 @@ struct NotesView: View {
         }
         pendingDeleteOffsets = nil
         pendingDeleteHasAssociatedWords = false
+    }
+
+    private func presentRenameAlert(for note: Note) {
+        renameTarget = note
+        renameText = note.title ?? ""
+        showRenameAlert = true
+    }
+
+    private func commitRename(_ note: Note, title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var updated = note
+        updated.title = trimmed.isEmpty ? nil : trimmed
+        notesStore.updateNote(updated)
+        resetRenameState()
+    }
+
+    private func resetRenameState() {
+        renameTarget = nil
+        renameText = ""
+        showRenameAlert = false
     }
 }
 

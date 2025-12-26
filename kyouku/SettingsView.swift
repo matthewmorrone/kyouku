@@ -9,6 +9,8 @@ struct SettingsView: View {
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
+    @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
+    @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
 
     @State private var exportURL: URL? = nil
     @State private var isImporting: Bool = false
@@ -33,6 +35,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 textAppearanceSection
+                tokenHighlightSection
                 Section("Backup & Restore") {
                     Button("Export…") {
                         exportAll()
@@ -144,6 +147,13 @@ struct SettingsView: View {
         }
     }
 
+    private var tokenHighlightSection: some View {
+        Section("Token Highlighting") {
+            ColorPicker("Primary Token Color", selection: alternateTokenColorABinding, supportsOpacity: false)
+            ColorPicker("Secondary Token Color", selection: alternateTokenColorBBinding, supportsOpacity: false)
+        }
+    }
+
     private var exportSheetBinding: Binding<Bool> {
         Binding(
             get: { exportURL != nil },
@@ -226,6 +236,28 @@ struct SettingsView: View {
         if abs(pendingReadingLineSpacing - newValue) > .ulpOfOne {
             pendingReadingLineSpacing = newValue
         }
+    }
+
+    private var alternateTokenColorABinding: Binding<Color> {
+        Binding(
+            get: { Color(hexString: alternateTokenColorAHex, fallback: Color(UIColor.systemBlue)) },
+            set: { newColor in
+                if let hex = newColor.hexString() {
+                    alternateTokenColorAHex = hex
+                }
+            }
+        )
+    }
+
+    private var alternateTokenColorBBinding: Binding<Color> {
+        Binding(
+            get: { Color(hexString: alternateTokenColorBHex, fallback: Color(UIColor.systemPink)) },
+            set: { newColor in
+                if let hex = newColor.hexString() {
+                    alternateTokenColorBHex = hex
+                }
+            }
+        )
     }
 
     private func schedulePreviewRebuild() {
