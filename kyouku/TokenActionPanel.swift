@@ -14,6 +14,8 @@ struct TokenActionPanel: View {
     let onSplit: (Int) -> Void
     let onReset: () -> Void
     let isSelectionCustomized: Bool
+    let enableDragToDismiss: Bool
+    let embedInMaterialBackground: Bool
     @State private var highlightedResultIndex = 0
     @GestureState private var dragOffset: CGFloat = 0
     @State private var isSplitMenuVisible = false
@@ -22,23 +24,50 @@ struct TokenActionPanel: View {
 
     private let dismissTranslationThreshold: CGFloat = 80
 
+    @ViewBuilder
     var body: some View {
+        if enableDragToDismiss {
+            panelContent.highPriorityGesture(dismissGesture)
+        } else {
+            panelContent
+        }
+    }
+
+    private var panelContent: some View {
+        Group {
+            if embedInMaterialBackground {
+                panelSurface
+                    .background(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                    )
+            } else {
+                panelSurface
+            }
+        }
+    }
+
+    private var panelSurface: some View {
         VStack(spacing: 12) {
             dictionaryScrollContainer
 
             actionRow
             if isSplitMenuVisible {
-                splitMenu
+                SplitMenuView(
+                    selectionCharacters: selectionCharacters,
+                    leftBucketCount: $leftBucketCount,
+                    onCancel: { closeSplitMenu(animated: true) },
+                    onApply: { offset in
+                        onSplit(offset)
+                        closeSplitMenu(animated: true)
+                    }
+                )
             }
         }
         .padding(.horizontal, 20)
-        .padding(.top, 16)
-        .padding(.bottom, 20)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
         .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(.ultraThinMaterial)
-        )
         .onAppear { resetSplitControls() }
         .onChange(of: selection) { _, _ in
             resetSplitControls()
@@ -50,7 +79,6 @@ struct TokenActionPanel: View {
         .contentShape(Rectangle())
         .offset(y: max(0, dragOffset))
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: dragOffset)
-        .highPriorityGesture(dismissGesture)
     }
 
     private var actionRow: some View {
@@ -99,8 +127,225 @@ struct TokenActionPanel: View {
         .accessibilityLabel(label)
     }
 
+    private var selectionCharacters: [Character] {
+        Array(selection.surface)
+    }
+
+    private func toggleSplitMenu() {
+        guard selectionCharacters.count > 1 else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            if isSplitMenuVisible {
+                isSplitMenuVisible = false
+            } else {
+                leftBucketCount = selectionCharacters.count
+                isSplitMenuVisible = true
+            }
+        }
+    }
+
+    private func resetSplitControls() {
+        leftBucketCount = selectionCharacters.count
+        isSplitMenuVisible = false
+    }
+
+    private func closeSplitMenu(animated: Bool) {
+        let animations = {
+            leftBucketCount = selectionCharacters.count
+            isSplitMenuVisible = false
+        }
+        if animated {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85), animations)
+        } else {
+            animations()
+        }
+    }
+
     @ViewBuilder
-    private var dictionaryResults: some View {
+    private var dictionaryScrollContainer: some View {
+        let measuredResults = LookupResultsView(
+            lookup: lookup,
+            selection: selection,
+            highlightedResultIndex: $highlightedResultIndex,
+            onUseReading: onUseReading,
+            onDefine: onDefine
+        )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: DictionaryContentHeightPreferenceKey.self, value: proxy.size.height)
+                }
+            )
+            .onPreferenceChange(DictionaryContentHeightPreferenceKey.self) { newValue in
+                let clamped = max(0, newValue)
+                if abs(dictionaryContentHeight - clamped) > 0.5 {
+                    dictionaryContentHeight = clamped
+                }
+            }
+
+        if let maxHeight = dictionaryScrollMaxHeight, dictionaryContentHeight > maxHeight {
+            ScrollView {
+                measuredResults
+                    .padding(.vertical, 4)
+            }
+            .frame(maxHeight: maxHeight, alignment: .top)
+            .scrollIndicators(.hidden)
+        } else {
+            measuredResults
+        }
+    }
+
+    private var dictionaryScrollMaxHeight: CGFloat? {
+        let allowance = panelHeightLimit - estimatedChromeHeight
+        return allowance > 0 ? allowance : nil
+    }
+
+    private var estimatedChromeHeight: CGFloat {
+        var height: CGFloat = 12 // spacing
+        height += actionRowHeight
+        if isSplitMenuVisible {
+            height += splitMenuHeight
+        }
+        return height + 24 // padding + misc
+    }
+
+    private var panelHeightLimit: CGFloat {
+        min(currentScreenHeight() * 0.7, 560)
+    }
+
+    private func currentScreenHeight() -> CGFloat {
+        if let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen {
+            return screen.bounds.height
+        }
+        return 480 // sensible fallback
+    }
+
+    private var actionRowHeight: CGFloat {
+        48
+    }
+
+    private var splitMenuHeight: CGFloat {
+        190
+    }
+
+    private var dismissGesture: some Gesture {
+        DragGesture(minimumDistance: 10)
+            .updating($dragOffset) { value, state, _ in
+                state = max(0, value.translation.height)
+            }
+            .onEnded { value in
+                let translation = value.translation.height
+                let predicted = value.predictedEndTranslation.height
+                guard translation > dismissTranslationThreshold || predicted > dismissTranslationThreshold else { return }
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    onDismiss()
+                }
+            }
+    }
+}
+
+private struct SplitMenuView: View {
+    let selectionCharacters: [Character]
+    @Binding var leftBucketCount: Int
+    let onCancel: () -> Void
+    let onApply: (Int) -> Void
+
+    private var canSplit: Bool {
+        selectionCharacters.count > 1 && leftBucketCount > 0 && leftBucketCount < selectionCharacters.count
+    }
+
+    private var leftText: String {
+        guard selectionCharacters.isEmpty == false else { return "" }
+        let count = max(0, min(leftBucketCount, selectionCharacters.count))
+        return String(selectionCharacters.prefix(count))
+    }
+
+    private var rightText: String {
+        guard selectionCharacters.isEmpty == false else { return "" }
+        let suffixCount = max(0, selectionCharacters.count - leftBucketCount)
+        guard suffixCount > 0 else { return "" }
+        return String(selectionCharacters.suffix(suffixCount))
+    }
+
+    private var leftUTF16Length: Int {
+        guard canSplit else { return 0 }
+        let prefixString = String(selectionCharacters.prefix(leftBucketCount))
+        return prefixString.utf16.count
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                bucketButton(text: leftText, alignment: .trailing, isEnabled: leftBucketCount < selectionCharacters.count) {
+                    moveCharacterRightToLeft()
+                }
+
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+
+                bucketButton(text: rightText, alignment: .leading, isEnabled: leftBucketCount > 0) {
+                    moveCharacterLeftToRight()
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button("Cancel") { onCancel() }
+                    .buttonStyle(.bordered)
+
+                Button("Apply") {
+                    guard canSplit else { return }
+                    onApply(leftUTF16Length)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.accentColor)
+                .disabled(canSplit == false)
+            }
+            .font(.caption)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+    }
+
+    private func bucketButton(text: String, alignment: Alignment, isEnabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(text.isEmpty ? "" : text)
+                .font(.title3)
+                .frame(maxWidth: .infinity, alignment: alignment)
+                .frame(height: 56)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isEnabled == false)
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isEnabled ? Color.accentColor : Color.secondary.opacity(0.4), lineWidth: 1.5)
+        )
+    }
+
+    private func moveCharacterLeftToRight() {
+        guard leftBucketCount > 0 else { return }
+        leftBucketCount -= 1
+    }
+
+    private func moveCharacterRightToLeft() {
+        guard leftBucketCount < selectionCharacters.count else { return }
+        leftBucketCount += 1
+    }
+}
+
+private struct LookupResultsView: View {
+    @ObservedObject var lookup: DictionaryLookupViewModel
+    let selection: TokenSelectionContext
+    @Binding var highlightedResultIndex: Int
+    let onUseReading: (DictionaryEntry) -> Void
+    let onDefine: (DictionaryEntry) -> Void
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if lookup.isLoading {
                 HStack(spacing: 8) {
@@ -117,13 +362,13 @@ struct TokenActionPanel: View {
                     .font(.subheadline)
                     .multilineTextAlignment(.leading)
             } else if let highlighted = highlightedEntry {
-                HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: 0) {
                     pagerButton(systemImage: "chevron.left", isDisabled: highlighted.index == 0) {
                         goToPreviousResult()
                     }
 
                     dictionaryCard(
-                        for: highlighted.entry,
+                        entry: highlighted.entry,
                         positionText: "\(highlighted.index + 1)/\(lookup.results.count)"
                     )
                     .highPriorityGesture(horizontalSwipeGesture)
@@ -171,8 +416,14 @@ struct TokenActionPanel: View {
         highlightedResultIndex += 1
     }
 
-    private func dictionaryCard(for entry: DictionaryEntry, positionText: String) -> some View {
-        let selectionHasKanji = containsKanji(selection.surface)
+    private var highlightedEntry: (entry: DictionaryEntry, index: Int)? {
+        guard lookup.results.isEmpty == false else { return nil }
+        let safeIndex = min(highlightedResultIndex, lookup.results.count - 1)
+        return (lookup.results[safeIndex], safeIndex)
+    }
+
+    private func dictionaryCard(entry: DictionaryEntry, positionText: String) -> some View {
+        let selectionHasKanji = selection.surface.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
         let primaryText: String
         if selectionHasKanji {
             if entry.kanji.isEmpty == false {
@@ -261,220 +512,9 @@ struct TokenActionPanel: View {
         .accessibilityLabel(accessibilityLabel)
     }
 
-    private var selectionCharacters: [Character] {
-        Array(selection.surface)
-    }
-
-    private var leftBucketText: String {
-        guard selectionCharacters.isEmpty == false else { return "" }
-        let count = max(0, min(leftBucketCount, selectionCharacters.count))
-        return String(selectionCharacters.prefix(count))
-    }
-
-    private var rightBucketText: String {
-        guard selectionCharacters.isEmpty == false else { return "" }
-        let suffixCount = max(0, selectionCharacters.count - leftBucketCount)
-        guard suffixCount > 0 else { return "" }
-        return String(selectionCharacters.suffix(suffixCount))
-    }
-
-    private var applySplitEnabled: Bool {
-        selectionCharacters.count > 1 && leftBucketCount > 0 && leftBucketCount < selectionCharacters.count
-    }
-
-    private var leftBucketUTF16Length: Int {
-        guard applySplitEnabled else { return 0 }
-        let prefixString = String(selectionCharacters.prefix(leftBucketCount))
-        return prefixString.utf16.count
-    }
-
-    private func moveCharacterLeftToRight() {
-        guard leftBucketCount > 0 else { return }
-        leftBucketCount -= 1
-    }
-
-    private func moveCharacterRightToLeft() {
-        guard leftBucketCount < selectionCharacters.count else { return }
-        leftBucketCount += 1
-    }
-
-    private func toggleSplitMenu() {
-        guard selectionCharacters.count > 1 else { return }
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-            if isSplitMenuVisible {
-                isSplitMenuVisible = false
-            } else {
-                leftBucketCount = selectionCharacters.count
-                isSplitMenuVisible = true
-            }
-        }
-    }
-
-    private func resetSplitControls() {
-        leftBucketCount = selectionCharacters.count
-        isSplitMenuVisible = false
-    }
-
-    @ViewBuilder
-    private var splitMenu: some View {
-        if selectionCharacters.count > 1 {
-            VStack(spacing: 12) {
-                HStack(spacing: 12) {
-                    splitBucketButton(
-                        text: leftBucketText,
-                        alignment: .trailing,
-                        isEnabled: leftBucketCount < selectionCharacters.count,
-                        action: moveCharacterRightToLeft
-                    )
-
-                    Image(systemName: "arrow.left.arrow.right")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-
-                    splitBucketButton(
-                        text: rightBucketText,
-                        alignment: .leading,
-                        isEnabled: leftBucketCount > 0,
-                        action: moveCharacterLeftToRight
-                    )
-                }
-
-                HStack(spacing: 12) {
-                    Button("Cancel") {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                            isSplitMenuVisible = false
-                        }
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Apply") {
-                        guard applySplitEnabled else { return }
-                        onSplit(leftBucketUTF16Length)
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                            isSplitMenuVisible = false
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.accentColor)
-                    .disabled(applySplitEnabled == false)
-                }
-                .font(.caption)
-            }
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color(uiColor: .secondarySystemBackground))
-            )
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
-        }
-    }
-
-    private func splitBucketButton(text: String, alignment: Alignment, isEnabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text.isEmpty ? "—" : text)
-                .font(.title3)
-                .frame(maxWidth: .infinity, alignment: alignment)
-                .frame(height: 56)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(isEnabled == false)
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isEnabled ? Color.accentColor : Color.secondary.opacity(0.4), lineWidth: 1.5)
-        )
-    }
-
-    @ViewBuilder
-    private var dictionaryScrollContainer: some View {
-        let measuredResults = dictionaryResults
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                GeometryReader { proxy in
-                    Color.clear
-                        .preference(key: DictionaryContentHeightPreferenceKey.self, value: proxy.size.height)
-                }
-            )
-            .onPreferenceChange(DictionaryContentHeightPreferenceKey.self) { newValue in
-                let clamped = max(0, newValue)
-                if abs(dictionaryContentHeight - clamped) > 0.5 {
-                    dictionaryContentHeight = clamped
-                }
-            }
-
-        if let maxHeight = dictionaryScrollMaxHeight, dictionaryContentHeight > maxHeight {
-            ScrollView {
-                measuredResults
-                    .padding(.vertical, 4)
-            }
-            .frame(maxHeight: maxHeight, alignment: .top)
-            .scrollIndicators(.hidden)
-        } else {
-            measuredResults
-        }
-    }
-
-    private var dictionaryScrollMaxHeight: CGFloat? {
-        let allowance = panelHeightLimit - estimatedChromeHeight
-        return allowance > 0 ? allowance : nil
-    }
-
-    private var estimatedChromeHeight: CGFloat {
-        var height: CGFloat = 12 // spacing
-        height += actionRowHeight
-        if isSplitMenuVisible {
-            height += splitMenuHeight
-        }
-        return height + 40 // padding + misc
-    }
-
-    private var panelHeightLimit: CGFloat {
-        min(currentScreenHeight() * 0.55, 480)
-    }
-
-    private func currentScreenHeight() -> CGFloat {
-        if let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen {
-            return screen.bounds.height
-        }
-        return 480 // sensible fallback
-    }
-
-    private var actionRowHeight: CGFloat {
-        48
-    }
-
-    private var splitMenuHeight: CGFloat {
-        190
-    }
-
-    private func containsKanji(_ text: String) -> Bool {
-        text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
-    }
-
     private func canUseReading(_ entry: DictionaryEntry) -> Bool {
         let candidate = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
         return candidate.isEmpty == false
-    }
-
-    private var highlightedEntry: (entry: DictionaryEntry, index: Int)? {
-        guard lookup.results.isEmpty == false else { return nil }
-        let safeIndex = min(highlightedResultIndex, lookup.results.count - 1)
-        return (lookup.results[safeIndex], safeIndex)
-    }
-
-    private var dismissGesture: some Gesture {
-        DragGesture(minimumDistance: 10)
-            .updating($dragOffset) { value, state, _ in
-                state = max(0, value.translation.height)
-            }
-            .onEnded { value in
-                let translation = value.translation.height
-                let predicted = value.predictedEndTranslation.height
-                guard translation > dismissTranslationThreshold || predicted > dismissTranslationThreshold else { return }
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    onDismiss()
-                }
-            }
     }
 }
 
@@ -504,7 +544,9 @@ private struct DictionaryContentHeightPreferenceKey: PreferenceKey {
         onMergeNext: {},
         onSplit: { _ in },
         onReset: {},
-        isSelectionCustomized: true
+        isSelectionCustomized: true,
+        enableDragToDismiss: true,
+        embedInMaterialBackground: true
     )
     .padding()
     .background(Color.black.opacity(0.05))

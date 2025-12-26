@@ -81,9 +81,7 @@ struct FlashcardsView: View {
             }
         }
     }
-
-    // MARK: - Subviews
-
+    
     private var header: some View {
         HStack {
             Text("\(index + 1) / \(session.count)")
@@ -107,134 +105,21 @@ struct FlashcardsView: View {
         let end = min(topIndex + 3, count)
         return ZStack {
             ForEach(Array((topIndex..<end)).reversed(), id: \.self) { idx in
-                let pos = idx - topIndex
                 let isTop = (idx == topIndex)
-                cardView(for: session[idx], isTop: isTop, position: pos)
+                FlashcardCard(
+                    word: session[idx],
+                    isTop: isTop,
+                    direction: direction,
+                    showBack: $showBack,
+                    dragOffset: $dragOffset,
+                    isSwipingOut: $isSwipingOut,
+                    swipeDirection: $swipeDirection,
+                    onKnow: { know() },
+                    onAgain: { again() }
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: 360)
-    }
-
-    private func cardView(for word: Word, isTop: Bool, position: Int) -> some View {
-
-        return ZStack {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(UIColor.secondarySystemBackground))
-                .shadow(color: Color.black.opacity(0.08), radius: 8, x: 0, y: 4)
-
-            VStack(alignment: .center, spacing: 10) {
-                if showBack && isTop {
-                    switch direction {
-                    case .kanjiToKana:
-                        Text(word.surface).font(.title2).bold()
-                        if let kana = word.kana, !kana.isEmpty {
-                            Text(kana).font(.title3).foregroundStyle(.secondary)
-                        }
-                        if !word.meaning.isEmpty { Text(word.meaning).font(.body).multilineTextAlignment(.center).padding(.top, 6) }
-                    case .kanaToEnglish:
-                        if !word.meaning.isEmpty { Text(word.meaning).font(.title3).bold() }
-                        if let kana = word.kana, !kana.isEmpty {
-                            Text(kana).font(.title2)
-                        }
-                        if !word.surface.isEmpty { Text(word.surface).font(.body).foregroundStyle(.secondary) }
-                    }
-                } else {
-                    switch direction {
-                    case .kanjiToKana:
-                        Text(word.surface).font(.largeTitle.weight(.bold))
-                    case .kanaToEnglish:
-                        if let kana = word.kana, !kana.isEmpty {
-                            Text(kana).font(.largeTitle.weight(.bold))
-                        }
-                        else { Text(word.surface).font(.largeTitle.weight(.bold)) }
-                    }
-                }
-            }
-            .padding(24)
-            .frame(maxWidth: .infinity, maxHeight: 320)
-        }
-        .opacity(isTop && isSwipingOut ? 0 : 1)
-        .overlay(
-            Group {
-                if isTop {
-                    // Left: Again
-                    Text("Again")
-                        .font(.headline)
-                        .padding(8)
-                        .background(Color.red.opacity(0.2))
-                        .cornerRadius(8)
-                        .opacity(max(0, min(1, -dragOffset.width / 100)))
-                        .padding()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-                    // Right: Know
-                    Text("Know")
-                        .font(.headline)
-                        .padding(8)
-                        .background(Color.green.opacity(0.2))
-                        .cornerRadius(8)
-                        .opacity(max(0, min(1, dragOffset.width / 100)))
-                        .padding()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                }
-            }
-        )
-        .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.85), value: dragOffset)
-        .animation(.easeInOut(duration: 0.2), value: showBack)
-        .gesture(
-            DragGesture()
-                .onChanged { value in
-                    guard isTop else { return }
-                    dragOffset = value.translation
-                }
-                .onEnded { value in
-                    guard isTop else { return }
-                    let dx: CGFloat = value.translation.width
-                    let tiny: CGFloat = 1
-                    if dx > tiny {
-                        // Reset shared drag offset immediately so the next card doesn't bounce
-                        withAnimation(.none) { dragOffset = .zero }
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                            isSwipingOut = true
-                            swipeDirection = 1
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                            know()
-                            showBack = false
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                                isSwipingOut = false
-                                swipeDirection = 0
-                            }
-                        }
-                    } else if dx < -tiny {
-                        withAnimation(.none) { dragOffset = .zero }
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                            isSwipingOut = true
-                            swipeDirection = -1
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                            again()
-                            showBack = false
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                                isSwipingOut = false
-                                swipeDirection = 0
-                            }
-                        }
-                    } else {
-                        // No meaningful horizontal drag: leave card in place; tap gesture handles flips
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                            dragOffset = .zero
-                        }
-                    }
-                }
-        )
-        .onTapGesture {
-            if isTop {
-                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                    showBack.toggle()
-                }
-            }
-        }
     }
 
     private var controls: some View {
@@ -429,6 +314,168 @@ struct FlashcardsView: View {
         return base
     }
 }
+
+private struct FlashcardCard: View {
+    let word: Word
+    let isTop: Bool
+    let direction: FlashcardsView.CardDirection
+    @Binding var showBack: Bool
+    @Binding var dragOffset: CGSize
+    @Binding var isSwipingOut: Bool
+    @Binding var swipeDirection: Int
+    let onKnow: () -> Void
+    let onAgain: () -> Void
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(UIColor.secondarySystemBackground))
+                .shadow(color: Color.black.opacity(0.08), radius: 8, x: 0, y: 4)
+
+            cardContent
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: 320)
+        }
+        .opacity(isTop && isSwipingOut ? 0 : 1)
+        .overlay(actionOverlays)
+        .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.85), value: dragOffset)
+        .animation(.easeInOut(duration: 0.2), value: showBack)
+        .gesture(dragGesture)
+        .onTapGesture { toggleFace() }
+    }
+
+    @ViewBuilder
+    private var cardContent: some View {
+        VStack(alignment: .center, spacing: 10) {
+            if showBack && isTop {
+                backFace
+            } else {
+                frontFace
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var frontFace: some View {
+        switch direction {
+        case .kanjiToKana:
+            Text(word.surface).font(.largeTitle.weight(.bold))
+        case .kanaToEnglish:
+            if let kana = word.kana, !kana.isEmpty {
+                Text(kana).font(.largeTitle.weight(.bold))
+            } else {
+                Text(word.surface).font(.largeTitle.weight(.bold))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var backFace: some View {
+        switch direction {
+        case .kanjiToKana:
+            Text(word.surface).font(.title2).bold()
+            if let kana = word.kana, !kana.isEmpty {
+                Text(kana).font(.title3).foregroundStyle(.secondary)
+            }
+            if !word.meaning.isEmpty {
+                Text(word.meaning)
+                    .font(.body)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 6)
+            }
+        case .kanaToEnglish:
+            if !word.meaning.isEmpty {
+                Text(word.meaning).font(.title3).bold()
+            }
+            if let kana = word.kana, !kana.isEmpty {
+                Text(kana).font(.title2)
+            }
+            if !word.surface.isEmpty {
+                Text(word.surface)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var actionOverlays: some View {
+        if isTop {
+            Group {
+                Text("Again")
+                    .font(.headline)
+                    .padding(8)
+                    .background(Color.red.opacity(0.2))
+                    .cornerRadius(8)
+                    .opacity(max(0, min(1, -dragOffset.width / 100)))
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                Text("Know")
+                    .font(.headline)
+                    .padding(8)
+                    .background(Color.green.opacity(0.2))
+                    .cornerRadius(8)
+                    .opacity(max(0, min(1, dragOffset.width / 100)))
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            }
+        }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                guard isTop else { return }
+                dragOffset = value.translation
+            }
+            .onEnded { value in
+                guard isTop else { return }
+                handleDragEnd(value.translation.width)
+            }
+    }
+
+    private func handleDragEnd(_ dx: CGFloat) {
+        let tiny: CGFloat = 1
+        if dx > tiny {
+            swipeOut(direction: 1) {
+                onKnow()
+            }
+        } else if dx < -tiny {
+            swipeOut(direction: -1) {
+                onAgain()
+            }
+        } else {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                dragOffset = .zero
+            }
+        }
+    }
+
+    private func swipeOut(direction dir: Int, completion: @escaping () -> Void) {
+        withAnimation(.none) { dragOffset = .zero }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+            isSwipingOut = true
+            swipeDirection = dir
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            completion()
+            showBack = false
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                isSwipingOut = false
+                swipeDirection = 0
+            }
+        }
+    }
+
+    private func toggleFace() {
+        guard isTop else { return }
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+            showBack.toggle()
+        }
+    }
+}
+
 private struct NotePicker: View {
     @EnvironmentObject var notes: NotesStore
     @Binding var selectedNoteID: UUID?

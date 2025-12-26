@@ -412,7 +412,9 @@ final class TokenOverlayTextView: UITextView {
         let tapPoint = gesture.location(in: self)
         Self.logEvent("Tap at x=\(tapPoint.x) y=\(tapPoint.y)")
         guard let index = characterIndex(at: tapPoint) else {
-            Self.logEvent("Tap ignored: no glyph resolved")
+            Self.logEvent("Tap ignored: no glyph resolved; clearing selection")
+            selectionHighlightRange = nil
+            selectionDelegate?.tokenOverlayTextViewDidClearSelection(self)
             return
         }
         Self.logEvent("index=\(index)") // annotatedSpans=\(annotatedSpans.enumerated())

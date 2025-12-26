@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct NotesView: View {
     @EnvironmentObject var notesStore: NotesStore
@@ -14,6 +15,7 @@ struct NotesView: View {
     @State private var pendingDeleteOffsets: IndexSet? = nil
     @State private var showDeleteAlert: Bool = false
     @State private var pendingDeleteHasAssociatedWords: Bool = false
+    @State private var editModeState: EditMode = .inactive
 
     var body: some View {
         NavigationStack {
@@ -36,7 +38,7 @@ struct NotesView: View {
                             router.selectedTab = .paste
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text(note.title?.isEmpty == false ? note.title! : "Untitled")
+                                Text((note.title?.isEmpty == false ? note.title! : "Untitled") as String)
                                     .font(.headline)
 
                                 Text(note.text)
@@ -45,6 +47,47 @@ struct NotesView: View {
                                     .lineLimit(3)
                             }
                             .padding(.vertical, 4)
+                        }
+                        .contextMenu {
+                            Button {
+                                UIPasteboard.general.string = note.text
+                            } label: {
+                                Label("Copy Text", systemImage: "doc.on.doc")
+                            }
+                            Button {
+                                // Duplicate note: insert a copy at the top and save
+                                let copy = Note(id: UUID(), title: note.title, text: note.text, createdAt: Date())
+                                notesStore.notes.insert(copy, at: 0)
+                                notesStore.save()
+                            } label: {
+                                Label("Duplicate", systemImage: "plus.square.on.square")
+                            }
+                            Button {
+                                // Reset custom spans (reading overrides) for this note
+                                NotificationCenter.default.post(name: .readingOverridesRequestRemoveAllForNote, object: nil, userInfo: ["noteID": note.id])
+                            } label: {
+                                Label("Reset Custom Spans", systemImage: "arrow.counterclockwise")
+                            }
+                            // Divider()
+
+                            Button {
+                                router.noteToOpen = note
+                                router.pasteShouldBeginEditing = true
+                                router.selectedTab = .paste
+                            } label: {
+                                Label("Rename / Edit", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                    // Trigger existing delete flow by setting pending offsets for this single note
+                                if let index = notesStore.notes.firstIndex(where: { $0.id == note.id }) {
+                                    pendingDeleteOffsets = IndexSet(integer: index)
+                                    let noteID = notesStore.notes[index].id
+                                    pendingDeleteHasAssociatedWords = store.words.contains { $0.sourceNoteID == noteID }
+                                    showDeleteAlert = true
+                                }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
                         }
                     }
                     .onDelete { offsets in
@@ -64,14 +107,27 @@ struct NotesView: View {
                 }
             }
             .navigationTitle("Notes")
+            .environment(\.editMode, $editModeState)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: { PasteView.createNewNote(notes: notesStore, router: router) }) {
-                        Image(systemName: "plus.square").font(.title2)
+                        Image(systemName: "plus.square")
+                            .font(.title2)
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    EditButton()
+                    Button {
+                        withAnimation {
+                            if editModeState.isEditing {
+                                editModeState = .inactive
+                            } else {
+                                editModeState = .active
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "pencil.line")
+                            .font(.title2)
+                    }
                 }
             }
             .confirmationDialog("Delete note?", isPresented: $showDeleteAlert, titleVisibility: .visible) {
@@ -114,4 +170,7 @@ struct NotesView: View {
     }
 }
 
+extension Notification.Name {
+    static let readingOverridesRequestRemoveAllForNote = Notification.Name("readingOverridesRequestRemoveAllForNote")
+}
 

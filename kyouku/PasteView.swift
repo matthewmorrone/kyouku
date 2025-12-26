@@ -14,6 +14,13 @@ struct PasteView: View {
             }
         }
     }
+    private struct SheetPanelHeightPreferenceKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var words: WordsStore
     @EnvironmentObject var readingOverrides: ReadingOverridesStore
@@ -21,6 +28,8 @@ struct PasteView: View {
 
     @State private var inputText: String = ""
     @State private var currentNote: Note? = nil
+    @State private var noteTitleInput: String = ""
+    @State private var hasManuallyEditedTitle: Bool = false
     @State private var hasInitialized: Bool = false
     @State private var isEditing: Bool = false
     @State private var furiganaAttributedText: NSAttributedString? = nil
@@ -34,6 +43,9 @@ struct PasteView: View {
     @State private var overrideSignature: Int = 0
     @State private var customizedRanges: [NSRange] = []
     @State private var tokenPanelFrame: CGRect? = nil
+    @State private var sheetSelection: TokenSelectionContext? = nil
+    @State private var sheetPanelHeight: CGFloat = 0
+    @State private var pendingSelectionRange: NSRange? = nil
 
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
@@ -54,6 +66,11 @@ struct PasteView: View {
     private static let furiganaLogger = DiagnosticsLogging.logger(.furigana)
     private static let selectionLogger = DiagnosticsLogging.logger(.pasteSelection)
     private static let coordinateSpaceName = "PasteViewRootSpace"
+    private static let inlineDictionaryPanelEnabledFlag = false
+    private static let sheetMaxHeightFraction: CGFloat = 0.8
+    private static let sheetExtraPadding: CGFloat = 36
+    private var inlineDictionaryPanelEnabled: Bool { Self.inlineDictionaryPanelEnabledFlag }
+    private var sheetDictionaryPanelEnabled: Bool { inlineDictionaryPanelEnabled == false }
     private static let highlightWhitespace: CharacterSet = {
         var set = CharacterSet.whitespacesAndNewlines
         set.formUnion(CharacterSet(charactersIn: "\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{200B}"))
@@ -68,6 +85,15 @@ struct PasteView: View {
 
     @ViewBuilder
     private var contentView: some View {
+        if inlineDictionaryPanelEnabled {
+            inlineDictionaryContainer
+        } else {
+            applyDictionarySheet(to: coreContent)
+        }
+    }
+
+    @ViewBuilder
+    private var inlineDictionaryContainer: some View {
         if #available(iOS 17.0, *) {
             coreContent
                 .coordinateSpace(name: Self.coordinateSpaceName)
@@ -76,8 +102,7 @@ struct PasteView: View {
                 }
                 .simultaneousGesture(
                     SpatialTapGesture().onEnded { value in
-                        let point = value.location
-                        handleTapOutsidePanel(at: point)
+                        handleTapOutsidePanel(at: value.location)
                     },
                     including: .all
                 )
@@ -88,154 +113,8 @@ struct PasteView: View {
 
     private var coreContent: some View {
         ZStack(alignment: .bottom) {
-            VStack(spacing: 0) {
-                HStack(spacing: 0) {
-                    ControlCell {
-                        Button(action: newNote) {
-                            Image(systemName: "plus.square").font(.title2)
-                        }
-                        .accessibilityLabel("New Note")
-                        .disabled(isEditing)
-                    }
-
-                    ControlCell {
-                        Button(action: resetAllCustomSpans) {
-                            Image(systemName: "arrow.counterclockwise").font(.title2)
-                        }
-                        .accessibilityLabel("Reset Custom Spans")
-                        .disabled(customizedRanges.isEmpty)
-                        .opacity(customizedRanges.isEmpty ? 0.4 : 1.0)
-                    }
-                }
-                .controlSize(.small)
-
-                EditorContainer(
-                    text: $inputText,
-                    furiganaText: furiganaAttributedText,
-                    furiganaSpans: furiganaSpans,
-                    textSize: readingTextSize,
-                    isEditing: isEditing,
-                    showFurigana: showFurigana,
-                    lineSpacing: readingLineSpacing,
-                    alternateTokenColors: alternateTokenColors,
-                    selectedRangeHighlight: persistentSelectionRange,
-                    customizedRanges: customizedRanges,
-                    onTokenSelection: handleTokenSelection,
-                    onSelectionCleared: { clearSelection() }
-                )
-                .padding(.vertical, 16)
-                .padding(.horizontal, 16)
-
-                if tokenSelection == nil {
-                    HStack(alignment: .center, spacing: 0) {
-                        ControlCell {
-                            Button { hideKeyboard() } label: {
-                                Image(systemName: "keyboard.chevron.compact.down").font(.title2)
-                            }
-                            .accessibilityLabel("Hide Keyboard")
-                        }
-
-                        ControlCell {
-                            Button(action: pasteFromClipboard) {
-                                Image(systemName: "doc.on.clipboard").font(.title2)
-                            }
-                            .accessibilityLabel("Paste")
-                        }
-
-                        ControlCell {
-                            Button(action: saveNote) {
-                                Image(systemName: "square.and.arrow.down").font(.title2)
-                            }
-                            .accessibilityLabel("Save")
-                        }
-
-                        ControlCell {
-                            Button {
-                                guard isEditing == false else { return }
-                                showFurigana.toggle()
-                                if showFurigana {
-                                    triggerFuriganaRefreshIfNeeded(reason: "manual toggle button")
-                                }
-                            } label: {
-                                ZStack {
-                                    Color.clear.frame(width: 28, height: 28)
-                                    Image(showFurigana ? "furigana.on" : "furigana.off")
-                                        .renderingMode(.template)
-                                        .foregroundColor(.accentColor)
-                                        .font(.system(size: 22))
-                                }
-                            }
-                            .tint(.accentColor)
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
-                            .opacity(isEditing ? 0.45 : 1.0)
-                            .contextMenu {
-                                Toggle(isOn: $alternateTokenColors) {
-                                    Label("Alternate Token Colors", systemImage: "textformat.alt")
-                                }
-                            }
-                        }
-
-                        ControlCell {
-                            Toggle(isOn: $isEditing) {
-                                if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
-                                    Image(systemName: "character.cursor.ibeam.ja")
-                                } else {
-                                    Image(systemName: "character.cursor.ibeam")
-                                }
-                            }
-                            .labelsHidden()
-                            .toggleStyle(.button)
-                            .tint(.accentColor)
-                            .font(.title2)
-                            .accessibilityLabel("Edit")
-                        }
-                    }
-                    .controlSize(.small)
-                }
-            }
-
-            if tokenSelection != nil {
-                legacyDismissOverlay
-            }
-
-            if let selection = tokenSelection, selection.range.length > 0 {
-                VStack(spacing: 0) {
-                    Spacer(minLength: 0)
-
-                    TokenActionPanel(
-                        selection: selection,
-                        lookup: inlineLookup,
-                        canMergePrevious: canMergeSelection(.previous),
-                        canMergeNext: canMergeSelection(.next),
-                        onDismiss: { clearSelection(resetPersistent: false) },
-                        onDefine: { entry in
-                            defineWord(using: entry)
-                        },
-                        onUseReading: { entry in
-                            applyDictionaryReading(entry)
-                        },
-                        onMergePrevious: { mergeSelection(.previous) },
-                        onMergeNext: { mergeSelection(.next) },
-                        onSplit: { offset in splitSelection(at: offset) },
-                        onReset: resetSelectionOverrides,
-                        isSelectionCustomized: selectionIsCustomized(selection)
-                    )
-                    .padding(.horizontal, 0)
-                    .padding(.bottom, 0)
-                    .ignoresSafeArea(edges: .bottom)
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: TokenActionPanelFramePreferenceKey.self,
-                                    value: proxy.frame(in: .named(Self.coordinateSpaceName))
-                            )
-                        }
-                    )
-                }
-                .zIndex(1)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+            editorColumn
+            inlineDictionaryOverlay
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(currentNote?.title ?? "Paste")
@@ -310,49 +189,174 @@ struct PasteView: View {
             }
         }
     }
-}
 
-private extension PasteView {
+    private var editorColumn: some View {
+        VStack(spacing: 0) {
+            EditorContainer(
+                text: $inputText,
+                furiganaText: furiganaAttributedText,
+                furiganaSpans: furiganaSpans,
+                textSize: readingTextSize,
+                isEditing: isEditing,
+                showFurigana: showFurigana,
+                lineSpacing: readingLineSpacing,
+                alternateTokenColors: alternateTokenColors,
+                selectedRangeHighlight: persistentSelectionRange,
+                customizedRanges: customizedRanges,
+                onTokenSelection: handleTokenSelection,
+                onSelectionCleared: { clearSelection() },
+                title: noteTitleBinding
+            )
+            .padding(.vertical, 16)
+            .padding(.horizontal, 16)
 
-    private func pasteFromClipboard() {
-        if let str = UIPasteboard.general.string {
-            inputText = str
-            // Update current note's title to the first line of the pasted text
-            let firstLine = str.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if let existing = currentNote {
-                // Update the note's title and text in the store
-                notes.notes = notes.notes.map { n in
-                    if n.id == existing.id {
-                        return Note(id: n.id, title: firstLine.isEmpty ? nil : firstLine, text: str, createdAt: n.createdAt)
-                    } else {
-                        return n
-                    }
-                }
-                notes.save()
-                // Keep our local currentNote in sync
-                if let updated = notes.notes.first(where: { $0.id == existing.id }) {
-                    currentNote = updated
-                }
+            if tokenSelection == nil {
+                editorToolbar
             }
         }
     }
 
-    private func saveNote() {
-        guard !inputText.isEmpty else { return }
-        if let existing = currentNote {
-            notes.notes = notes.notes.map { n in
-                if n.id == existing.id {
-                    return Note(id: n.id, title: n.title, text: inputText, createdAt: n.createdAt)
-                } else {
-                    return n
+    private var editorToolbar: some View {
+        HStack(alignment: .center, spacing: 0) {
+            ControlCell {
+                Button { hideKeyboard() } label: {
+                    Image(systemName: "keyboard.chevron.compact.down").font(.title2)
+                }
+                .accessibilityLabel("Hide Keyboard")
+            }
+
+            ControlCell {
+                Button(action: pasteFromClipboard) {
+                    Image(systemName: "doc.on.clipboard").font(.title2)
+                }
+                .accessibilityLabel("Paste")
+            }
+
+            ControlCell {
+                Button(action: saveNote) {
+                    Image(systemName: "square.and.arrow.down").font(.title2)
+                }
+                .accessibilityLabel("Save")
+            }
+
+            ControlCell {
+                Button {
+                    guard isEditing == false else { return }
+                    showFurigana.toggle()
+                    if showFurigana {
+                        triggerFuriganaRefreshIfNeeded(reason: "manual toggle button")
+                    }
+                } label: {
+                    ZStack {
+                        Color.clear.frame(width: 28, height: 28)
+                        Image(showFurigana ? "furigana.on" : "furigana.off")
+                            .renderingMode(.template)
+                            .foregroundColor(.accentColor)
+                            .font(.system(size: 22))
+                    }
+                }
+                .tint(.accentColor)
+                .buttonStyle(.plain)
+                .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
+                .opacity(isEditing ? 0.45 : 1.0)
+                .contextMenu {
+                    Toggle(isOn: $alternateTokenColors) {
+                        Label("Alternate Token Colors", systemImage: "textformat.alt")
+                    }
                 }
             }
-            notes.save()
+
+            ControlCell {
+                Toggle(isOn: $isEditing) {
+                    if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
+                        Image(systemName: "character.cursor.ibeam.ja")
+                    } else {
+                        Image(systemName: "character.cursor.ibeam")
+                    }
+                }
+                .labelsHidden()
+                .toggleStyle(.button)
+                .tint(.accentColor)
+                .font(.title2)
+                .accessibilityLabel("Edit")
+            }
+        }
+        .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private var inlineDictionaryOverlay: some View {
+        if inlineDictionaryPanelEnabled {
+            if tokenSelection != nil {
+                legacyDismissOverlay
+            }
+            if let selection = tokenSelection, selection.range.length > 0 {
+                inlineTokenActionPanel(for: selection)
+            }
+        }
+    }
+
+    private func inlineTokenActionPanel(for selection: TokenSelectionContext) -> some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+
+            TokenActionPanel(
+                selection: selection,
+                lookup: inlineLookup,
+                canMergePrevious: canMergeSelection(.previous),
+                canMergeNext: canMergeSelection(.next),
+                onDismiss: { clearSelection(resetPersistent: false) },
+                onDefine: { entry in
+                    defineWord(using: entry)
+                },
+                onUseReading: { entry in
+                    applyDictionaryReading(entry)
+                },
+                onMergePrevious: { mergeSelection(.previous) },
+                onMergeNext: { mergeSelection(.next) },
+                onSplit: { offset in splitSelection(at: offset) },
+                onReset: resetSelectionOverrides,
+                isSelectionCustomized: selectionIsCustomized(selection),
+                enableDragToDismiss: true,
+                embedInMaterialBackground: true
+            )
+            .padding(.horizontal, 0)
+            .padding(.bottom, 0)
+            .ignoresSafeArea(edges: .bottom)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: TokenActionPanelFramePreferenceKey.self,
+                        value: proxy.frame(in: .named(Self.coordinateSpaceName))
+                    )
+                }
+            )
+        }
+        .zIndex(1)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private func pasteFromClipboard() {
+        if let str = UIPasteboard.general.string {
+            inputText = str
+        }
+    }
+
+    private func saveNote() {
+        guard inputText.isEmpty == false else { return }
+        let resolvedTitle = normalizedTitle(noteTitleInput) ?? inferredTitle(from: inputText)
+        if var existing = currentNote {
+            existing.text = inputText
+            existing.title = resolvedTitle
+            notes.updateNote(existing)
+            currentNote = existing
+            noteTitleInput = resolvedTitle ?? ""
         } else {
-            let firstLine = inputText.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)
-            let title = firstLine?.trimmingCharacters(in: .whitespacesAndNewlines)
-            notes.addNote(title: (title?.isEmpty == true) ? nil : title, text: inputText)
-            currentNote = notes.notes.first
+            notes.addNote(title: resolvedTitle, text: inputText)
+            if let newest = notes.notes.first {
+                currentNote = newest
+                noteTitleInput = newest.title ?? ""
+            }
         }
     }
 
@@ -366,10 +370,18 @@ private extension PasteView {
 
         if let newest = notes.notes.first {
             currentNote = newest
-        } else if let last = notes.notes.last {
+            noteTitleInput = newest.title ?? ""
+            hasManuallyEditedTitle = (newest.title?.isEmpty == false)
+        }
+        else if let last = notes.notes.last {
             currentNote = last
-        } else {
+            noteTitleInput = last.title ?? ""
+            hasManuallyEditedTitle = (last.title?.isEmpty == false)
+        }
+        else {
             currentNote = nil
+            noteTitleInput = ""
+            hasManuallyEditedTitle = false
         }
 
         PasteBufferStore.save("")
@@ -381,9 +393,12 @@ private extension PasteView {
         if let note = router.noteToOpen {
             currentNote = note
             inputText = note.text
+            noteTitleInput = note.title ?? ""
+            hasManuallyEditedTitle = (note.title?.isEmpty == false)
             if router.pasteShouldBeginEditing {
                 setEditing(true)
-            } else {
+            }
+            else {
                 setEditing(false, suppressRefresh: true)
             }
             router.pasteShouldBeginEditing = false
@@ -391,7 +406,6 @@ private extension PasteView {
         }
         if !hasInitialized {
             if inputText.isEmpty {
-                // Default to edit mode when starting with empty paste area
                 setEditing(true)
             }
             hasInitialized = true
@@ -402,26 +416,62 @@ private extension PasteView {
                 inputText = persisted
                 setEditing(false, suppressRefresh: true)
             }
+            noteTitleInput = ""
+            hasManuallyEditedTitle = false
         }
         overrideSignature = computeOverrideSignature()
         updateCustomizedRanges()
     }
 
     private func syncNoteForInputChange(_ newValue: String) {
-        // Keep current note's title synced to the first line of the text
         guard let existing = currentNote else { return }
-        let firstLine = newValue.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        notes.notes = notes.notes.map { n in
-            if n.id == existing.id {
-                return Note(id: n.id, title: firstLine.isEmpty ? nil : firstLine, text: newValue, createdAt: n.createdAt)
-            } else {
-                return n
+        var updated = existing
+        updated.text = newValue
+        let nextTitle: String?
+        if hasManuallyEditedTitle == false {
+            let fallback = inferredTitle(from: newValue)
+            nextTitle = fallback
+            noteTitleInput = fallback ?? ""
+        } else {
+            nextTitle = normalizedTitle(noteTitleInput)
+        }
+        updated.title = nextTitle
+        notes.updateNote(updated)
+        currentNote = updated
+    }
+
+    private var noteTitleBinding: Binding<String>? {
+        guard currentNote != nil else { return nil }
+        return Binding(
+            get: { noteTitleInput },
+            set: { newValue in
+                noteTitleInput = newValue
+                hasManuallyEditedTitle = true
+                syncNoteTitleChange(newValue)
             }
+        )
+    }
+
+    private func syncNoteTitleChange(_ newValue: String) {
+        guard var existing = currentNote else { return }
+        let normalized = normalizedTitle(newValue)
+        if normalized == existing.title {
+            return
         }
-        notes.save()
-        if let updated = notes.notes.first(where: { $0.id == existing.id }) {
-            currentNote = updated
-        }
+        existing.title = normalized
+        notes.updateNote(existing)
+        currentNote = existing
+    }
+
+    private func normalizedTitle(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func inferredTitle(from text: String) -> String? {
+        let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private var activeNoteID: UUID {
@@ -434,11 +484,21 @@ private extension PasteView {
             persistentSelectionRange = nil
         }
         tokenSelection = nil
+        sheetSelection = nil
+        sheetPanelHeight = 0
+        pendingSelectionRange = nil
         Task { @MainActor in
             inlineLookup.results = []
             inlineLookup.errorMessage = nil
             inlineLookup.isLoading = false
         }
+    }
+
+    @MainActor
+    private func beginPendingSelectionRestoration(for range: NSRange) {
+        guard range.location != NSNotFound, range.length > 0 else { return }
+        pendingSelectionRange = range
+        persistentSelectionRange = range
     }
 
     private func handleSelectionLookup(for term: String) {
@@ -456,6 +516,65 @@ private extension PasteView {
         }
     }
 
+    private func applyDictionarySheet<Content: View>(to view: Content) -> AnyView {
+        if sheetDictionaryPanelEnabled {
+            return AnyView(
+                view.sheet(item: $sheetSelection, onDismiss: { clearSelection(resetPersistent: false) }) { selection in
+                    let sheetPanel = TokenActionPanel(
+                        selection: selection,
+                        lookup: inlineLookup,
+                        canMergePrevious: canMergeSelection(.previous),
+                        canMergeNext: canMergeSelection(.next),
+                        onDismiss: { clearSelection(resetPersistent: false) },
+                        onDefine: { entry in
+                            defineWord(using: entry)
+                        },
+                        onUseReading: { entry in
+                            applyDictionaryReading(entry)
+                        },
+                        onMergePrevious: { mergeSelection(.previous) },
+                        onMergeNext: { mergeSelection(.next) },
+                        onSplit: { offset in splitSelection(at: offset) },
+                        onReset: resetSelectionOverrides,
+                        isSelectionCustomized: selectionIsCustomized(selection),
+                        enableDragToDismiss: false,
+                        embedInMaterialBackground: false
+                    )
+
+                    sheetPanel
+                        .overlay(
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: SheetPanelHeightPreferenceKey.self,
+                                    value: proxy.size.height
+                                )
+                            }
+                        )
+                        .onPreferenceChange(SheetPanelHeightPreferenceKey.self) { newValue in
+                            sheetPanelHeight = newValue
+                        }
+                        .presentationDragIndicator(.visible)
+                        .presentationDetents([
+                            .height(max(sheetPanelHeight + 50, 300))
+                        ])
+                        .presentationBackgroundInteraction(.enabled)
+                }
+            )
+        } else {
+            return AnyView(view)
+        }
+    }
+
+    private func preferredSheetDetentHeight() -> CGFloat {
+        let screenHeight = UIScreen.main.bounds.height
+        let fallback = screenHeight * 0.45
+        guard sheetPanelHeight > 0 else { return fallback }
+        let padded = sheetPanelHeight + Self.sheetExtraPadding
+        let maxHeight = screenHeight * Self.sheetMaxHeightFraction
+        let minHeight: CGFloat = 280
+        return min(max(padded, minHeight), maxHeight)
+    }
+
     @available(iOS 17.0, *)
     private func handleTapOutsidePanel(at location: CGPoint) {
         guard tokenSelection != nil else { return }
@@ -469,7 +588,8 @@ private extension PasteView {
     private var legacyDismissOverlay: some View {
         if #available(iOS 17.0, *) {
             EmptyView()
-        } else {
+        }
+        else {
             Color.black.opacity(0.001)
                 .ignoresSafeArea()
                 .onTapGesture { clearSelection(resetPersistent: false) }
@@ -489,12 +609,16 @@ private extension PasteView {
         }
         Self.selectionLogger.debug("Token selected spanIndex=\(payload.index) rawRange=\(range.location)-\(NSMaxRange(range)) highlight=\(trimmed.range.location)-\(NSMaxRange(trimmed.range)) surface=\(trimmed.surface, privacy: .public)")
         persistentSelectionRange = trimmed.range
-        tokenSelection = TokenSelectionContext(
+        let context = TokenSelectionContext(
             spanIndex: payload.index,
             range: trimmed.range,
             surface: trimmed.surface,
             annotatedSpan: payload.span
         )
+        tokenSelection = context
+        if sheetDictionaryPanelEnabled {
+            sheetSelection = context
+        }
     }
 
     private func trimmedSelection(from payload: RubyText.SelectionPayload) -> (range: NSRange, surface: String)? {
@@ -598,6 +722,7 @@ private extension PasteView {
         )
         applyOverridesChange(range: union, newOverrides: [override], actionName: "Merge Tokens")
         clearSelection(resetPersistent: false)
+        beginPendingSelectionRestoration(for: union)
     }
 
     private func splitSelection(at offset: Int) {
@@ -747,9 +872,34 @@ private extension PasteView {
                 if inputText == currentText && showFurigana == currentShowFurigana && isEditing == currentIsEditing {
                     furiganaSpans = newSpans
                     furiganaAttributedText = newAttributed
+                    restoreSelectionIfNeeded()
                 }
             }
         }
+    }
+
+    @MainActor
+    private func restoreSelectionIfNeeded() {
+        guard let targetRange = pendingSelectionRange else { return }
+        guard let spans = furiganaSpans else { return }
+        guard let match = spans.enumerated().first(where: { $0.element.span.range == targetRange }) else { return }
+        let textStorage = inputText as NSString
+        guard NSMaxRange(targetRange) <= textStorage.length else {
+            pendingSelectionRange = nil
+            return
+        }
+        let surface = textStorage.substring(with: targetRange)
+        let context = TokenSelectionContext(
+            spanIndex: match.offset,
+            range: targetRange,
+            surface: surface,
+            annotatedSpan: match.element
+        )
+        tokenSelection = context
+        if sheetDictionaryPanelEnabled {
+            sheetSelection = context
+        }
+        pendingSelectionRange = nil
     }
 
     private static func recomputeFurigana(
@@ -832,6 +982,10 @@ struct TokenSelectionContext: Equatable {
     let annotatedSpan: AnnotatedSpan
 }
 
+extension TokenSelectionContext: Identifiable {
+    var id: String { "\(spanIndex)-\(range.location)-\(range.length)" }
+}
+
 private final class OverrideUndoToken: NSObject {
     private let action: () -> Void
 
@@ -866,6 +1020,7 @@ private struct EditorContainer: View {
     var customizedRanges: [NSRange]
     var onTokenSelection: ((RubyText.SelectionPayload) -> Void)? = nil
     var onSelectionCleared: (() -> Void)? = nil
+    var title: Binding<String>? = nil
 
     private let placeholder = "Paste or type Japanese text"
 
@@ -873,16 +1028,19 @@ private struct EditorContainer: View {
         ZStack(alignment: .topLeading) {
             if isEditing {
                 editorContent
-            } else if text.isEmpty {
+            }
+            else if text.isEmpty {
                 displayShell {
                     EmptyView()
                 }
-            } else if showFurigana {
+            }
+            else if showFurigana {
                 displayShell {
                     rubyBlock(annotationVisibility: .visible)
                         .fixedSize(horizontal: false, vertical: true) // prevent vertical compression
                 }
-            } else {
+            }
+            else {
                 displayShell {
                     rubyBlock(annotationVisibility: .removed)
                 }
@@ -895,19 +1053,39 @@ private struct EditorContainer: View {
     }
 
     private var editorContent: some View {
-        TextEditor(text: $text)
-            .font(.system(size: textSize))
-            .lineSpacing(lineSpacing)
-            .scrollContentBackground(.hidden)
-            .background(Color.clear)
-            .foregroundColor(.primary)
-            .padding(editorInsets)
+        VStack(spacing: 0) {
+            if let titleBinding = title, isEditing {
+                TextField("Title", text: titleBinding)
+                    .font(.headline)
+                    .textInputAutocapitalization(.sentences)
+                    .disableAutocorrection(true)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
+                Divider()
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 4)
+            }
+
+            TextEditor(text: $text)
+                .font(.system(size: textSize))
+                .lineSpacing(lineSpacing)
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+                .foregroundColor(.primary)
+                .padding(editorInsets)
+        }
     }
 
     private var editorInsets: EdgeInsets {
         let rubyHeadroom = max(0.0, textSize * 0.6 + lineSpacing)
-        let topInset = max(8.0, rubyHeadroom)
+        let baseTop = max(8.0, rubyHeadroom)
+        let topInset = hasTitleField ? 8.0 : baseTop
         return EdgeInsets(top: CGFloat(topInset), leading: 11, bottom: 12, trailing: 12)
+    }
+
+    private var hasTitleField: Bool {
+        title != nil && isEditing
     }
 
     private func displayShell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -947,8 +1125,9 @@ private struct EditorContainer: View {
         guard alternateTokenColors, let spans = furiganaSpans else { return [] }
         let palette: [UIColor] = [UIColor.systemBlue, UIColor.systemPink]
         guard palette.isEmpty == false else { return [] }
-        let maxLength = furiganaText?.length ?? (text as NSString).length
-        let coverageRanges = Self.coverageRanges(from: spans, textLength: maxLength)
+        let backingString = furiganaText?.string ?? text
+        let textStorage = backingString as NSString
+        let coverageRanges = Self.coverageRanges(from: spans, textStorage: textStorage)
         var overlays: [RubyText.TokenOverlay] = []
         overlays.reserveCapacity(coverageRanges.count)
         for (index, range) in coverageRanges.enumerated() {
@@ -958,7 +1137,8 @@ private struct EditorContainer: View {
         return overlays
     }
 
-    private static func coverageRanges(from spans: [AnnotatedSpan], textLength: Int) -> [NSRange] {
+    private static func coverageRanges(from spans: [AnnotatedSpan], textStorage: NSString) -> [NSRange] {
+        let textLength = textStorage.length
         guard textLength > 0 else { return [] }
         let bounds = NSRange(location: 0, length: textLength)
         let sorted = spans
@@ -973,15 +1153,27 @@ private struct EditorContainer: View {
         var cursor = 0
         for range in sorted {
             if range.location > cursor {
-                ranges.append(NSRange(location: cursor, length: range.location - cursor))
+                let gap = NSRange(location: cursor, length: range.location - cursor)
+                if containsNonWhitespace(in: gap, textStorage: textStorage) {
+                    ranges.append(gap)
+                }
             }
             ranges.append(range)
             cursor = max(cursor, NSMaxRange(range))
         }
         if cursor < textLength {
-            ranges.append(NSRange(location: cursor, length: textLength - cursor))
+            let trailing = NSRange(location: cursor, length: textLength - cursor)
+            if containsNonWhitespace(in: trailing, textStorage: textStorage) {
+                ranges.append(trailing)
+            }
         }
         return ranges
+    }
+
+    private static func containsNonWhitespace(in range: NSRange, textStorage: NSString) -> Bool {
+        guard range.length > 0 else { return false }
+        let substring = textStorage.substring(with: range)
+        return substring.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 }
 
@@ -995,4 +1187,3 @@ extension PasteView {
         PasteBufferStore.save("")
     }
 }
-
