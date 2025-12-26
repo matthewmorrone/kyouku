@@ -8,9 +8,7 @@ func Log(_ message: @autoclosure () -> String,
          file: StaticString = #fileID,
          line: UInt = #line,
          function: StaticString = #function) {
-    #if DEBUG
     print("[\(file):\(line)] \(function): \(message())")
-    #endif
 }
 
 extension NSAttributedString.Key {
@@ -152,7 +150,7 @@ struct RubyText: UIViewRepresentable {
         let extraFromMultiplier = max(0, lineHeight * (multiplier - 1))
         let bottom = spacing + extraFromMultiplier
         // let rubyHeadroom = max(0, font.pointSize * 0.6 + spacing)
-        return UIEdgeInsets(top: -spacing, left: 0, bottom: bottom, right: 0)
+        return UIEdgeInsets(top: 0, left: 0, bottom: bottom, right: 0)
     }
 
     private static let coreTextRubyAttribute = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
@@ -209,6 +207,7 @@ struct RubyText: UIViewRepresentable {
         guard attributedString.length > 0 else { return }
         let length = attributedString.length
         for overlay in overlays {
+
             guard overlay.range.location != NSNotFound, overlay.range.length > 0 else { continue }
             guard NSMaxRange(overlay.range) <= length else { continue }
             attributedString.addAttribute(.foregroundColor, value: overlay.color, range: overlay.range)
@@ -301,7 +300,8 @@ final class TokenOverlayTextView: UITextView {
         recognizer.cancelsTouchesInView = false
         return recognizer
     }()
-    private let selectionHighlightLayer = CAShapeLayer()
+    // 1) Replace CAShapeLayer with bezier path storage
+    private var selectionHighlightPath: UIBezierPath? = nil
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
@@ -325,19 +325,34 @@ final class TokenOverlayTextView: UITextView {
         showsVerticalScrollIndicator = false
         showsHorizontalScrollIndicator = false
         addGestureRecognizer(tapRecognizer)
-        selectionHighlightLayer.fillColor = UIColor.systemYellow.withAlphaComponent(0.22).cgColor
-        selectionHighlightLayer.zPosition = -1
-        layer.insertSublayer(selectionHighlightLayer, at: 0)
+        // 2) Remove layer setup for selectionHighlightLayer
+        // Removed these lines:
+        // selectionHighlightLayer.fillColor = UIColor.systemYellow.withAlphaComponent(0.22).cgColor
+        // selectionHighlightLayer.zPosition = -1
+        // layer.insertSublayer(selectionHighlightLayer, at: 0)
     }
 
     override var canBecomeFirstResponder: Bool {
         false
     }
 
+    // 3) Replace layoutSubviews body
     override func layoutSubviews() {
         super.layoutSubviews()
-        selectionHighlightLayer.frame = bounds
         updateSelectionHighlightPath()
+        setNeedsDisplay()
+    }
+
+    // 5) Add draw override to paint highlight beneath text
+    override func draw(_ rect: CGRect) {
+        if let path = selectionHighlightPath {
+            let ctx = UIGraphicsGetCurrentContext()
+            ctx?.saveGState()
+            UIColor.systemYellow.withAlphaComponent(0.22).setFill()
+            path.fill()
+            ctx?.restoreGState()
+        }
+        super.draw(rect)
     }
 
     func selectionPayload(forExactRange range: NSRange) -> RubyText.SelectionPayload? {
@@ -373,28 +388,6 @@ final class TokenOverlayTextView: UITextView {
         }.map { (span: $0.element, offset: $0.offset) }
     }
 
-    private func snapSpan(near index: Int) -> (span: AnnotatedSpan, offset: Int)? {
-        guard let string = textStorage.string as NSString? else { return nil }
-        var forwardCandidate: (span: AnnotatedSpan, offset: Int)?
-        if let ahead = spanAfter(index: index) {
-            let distance = max(0, min(ahead.span.span.range.location - index, string.length - index))
-            let whitespaceRange = NSRange(location: index, length: distance)
-            if whitespaceOnly(range: whitespaceRange, in: string) {
-                forwardCandidate = ahead
-            }
-        }
-        if let forwardCandidate { return forwardCandidate }
-        if let behind = spanBefore(index: index) {
-            let spanEnd = NSMaxRange(behind.span.span.range)
-            let length = max(0, min(index - spanEnd, string.length - spanEnd))
-            let whitespaceRange = NSRange(location: spanEnd, length: length)
-            if whitespaceOnly(range: whitespaceRange, in: string) {
-                return behind
-            }
-        }
-        return nil
-    }
-
     private func whitespaceOnly(range: NSRange, in string: NSString) -> Bool {
         guard range.length > 0 else { return true }
         guard range.location >= 0, NSMaxRange(range) <= string.length else { return false }
@@ -407,9 +400,67 @@ final class TokenOverlayTextView: UITextView {
         return true
     }
 
+    private func isAnnotation(at index: Int) -> Bool {
+        guard index >= 0, index < textStorage.length else { return false }
+        let value = textStorage.attribute(.rubyAnnotation, at: index, effectiveRange: nil) as? Bool
+        return value == true
+    }
+
+    private func baseCharacterIndex(around index: Int) -> Int? {
+        guard textStorage.length > 0 else { return nil }
+        // Prefer nearest non-annotation character to the left, then to the right
+        var i = index
+        while i >= 0 {
+            if isAnnotation(at: i) == false { return i }
+            i -= 1
+        }
+        i = index
+        while i < textStorage.length {
+            if isAnnotation(at: i) == false { return i }
+            i += 1
+        }
+        return nil
+    }
+
+    private func whitespaceOrAnnotationOnly(range: NSRange) -> Bool {
+        guard range.length > 0 else { return true }
+        guard range.location >= 0, NSMaxRange(range) <= textStorage.length else { return false }
+        for idx in range.location..<NSMaxRange(range) {
+            if isAnnotation(at: idx) { continue }
+            let scalar = UnicodeScalar((textStorage.string as NSString).character(at: idx))
+            if scalar == nil || TokenOverlayTextView.whitespaceSet.contains(scalar!) == false {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func snapSpan(near index: Int) -> (span: AnnotatedSpan, offset: Int)? {
+        guard textStorage.length > 0 else { return nil }
+        var forwardCandidate: (span: AnnotatedSpan, offset: Int)?
+        if let ahead = spanAfter(index: index) {
+            let distance = max(0, min(ahead.span.range.location - index, textStorage.length - index))
+            let whitespaceRange = NSRange(location: index, length: distance)
+            if whitespaceOrAnnotationOnly(range: whitespaceRange) {
+                forwardCandidate = ahead
+            }
+        }
+        if let forwardCandidate { return forwardCandidate }
+        if let behind = spanBefore(index: index) {
+            let spanEnd = NSMaxRange(behind.span.range)
+            let length = max(0, min(index - spanEnd, textStorage.length - spanEnd))
+            let whitespaceRange = NSRange(location: spanEnd, length: length)
+            if whitespaceOrAnnotationOnly(range: whitespaceRange) {
+                return behind
+            }
+        }
+        return nil
+    }
+
     @objc private func handleTokenTap(_ gesture: UITapGestureRecognizer) {
         guard gesture.state == .ended else { return }
         let tapPoint = gesture.location(in: self)
+
         Self.logEvent("Tap at x=\(tapPoint.x) y=\(tapPoint.y)")
         guard let index = characterIndex(at: tapPoint) else {
             Self.logEvent("Tap ignored: no glyph resolved; clearing selection")
@@ -417,25 +468,32 @@ final class TokenOverlayTextView: UITextView {
             selectionDelegate?.tokenOverlayTextViewDidClearSelection(self)
             return
         }
-        Self.logEvent("index=\(index)") // annotatedSpans=\(annotatedSpans.enumerated())
-        if let match = spanContaining(index: index) {
+
+        Self.logEvent("index=\(index)")
+        var resolvedIndex = index
+        if isAnnotation(at: index), let base = baseCharacterIndex(around: index) {
+            resolvedIndex = base
+            Self.logEvent("Resolved annotation tap to base index=\(resolvedIndex)")
+        }
+        if let match = spanContaining(index: resolvedIndex) {
             deliverSelection(match.span, offset: match.offset)
             return
         }
 
-        if let snapped = snapSpan(near: index) {
+        if let snapped = snapSpan(near: resolvedIndex) {
             Self.logEvent("Snapped selection to span index=\(snapped.offset)")
             deliverSelection(snapped.span, offset: snapped.offset)
             return
         }
 
-        selectedRange = NSRange(location: index, length: 0)
+        self.selectionHighlightRange = nil
         Self.logEvent("Cleared selection at index=\(index)")
         selectionDelegate?.tokenOverlayTextViewDidClearSelection(self)
     }
 
     private func deliverSelection(_ span: AnnotatedSpan, offset: Int) {
-        let spanRange = span.span.range
+        let spanRange = span.range
+        self.selectionHighlightRange = spanRange
         let payload = RubyText.SelectionPayload(span: span, index: offset, range: spanRange)
         Self.logEvent("Selected span index=\(offset) range=\(spanRange.location)-\(NSMaxRange(spanRange))")
         selectionDelegate?.tokenOverlayTextView(self, didSelect: payload)
@@ -462,19 +520,22 @@ final class TokenOverlayTextView: UITextView {
         return characterIndex
     }
 
+    // 4) Modify updateSelectionHighlightPath to store path instead of assigning to layer
     private func updateSelectionHighlightPath() {
+        selectionHighlightPath = nil
+
         guard let range = selectionHighlightRange,
               range.location != NSNotFound,
               range.length > 0,
               NSMaxRange(range) <= textStorage.length else {
-            selectionHighlightLayer.path = nil
+            selectionHighlightPath = nil
             return
         }
 
         layoutManager.ensureLayout(for: textContainer)
         let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
         guard glyphRange.length > 0 else {
-            selectionHighlightLayer.path = nil
+            selectionHighlightPath = nil
             return
         }
 
@@ -499,6 +560,17 @@ final class TokenOverlayTextView: UITextView {
             }
             guard highlightRect.width > 0, highlightRect.height > 0 else { return }
 
+            // Constrain highlight to base text line height to avoid overlapping ruby
+            if let baseFont = self.font {
+                let baseHeight = baseFont.lineHeight
+                if baseHeight > 0 {
+                    let desiredHeight = min(highlightRect.height, baseHeight)
+                    // Anchor to the baseline area: keep the bottom of the rect and reduce height from the top
+                    highlightRect.origin.y = highlightRect.maxY - desiredHeight
+                    highlightRect.size.height = desiredHeight
+                }
+            }
+
             let offsetX = self.textContainerInset.left - self.contentOffset.x
             let offsetY = self.textContainerInset.top - self.contentOffset.y
             highlightRect = highlightRect.offsetBy(dx: offsetX, dy: offsetY)
@@ -518,8 +590,12 @@ final class TokenOverlayTextView: UITextView {
             }
         }
 
-        selectionHighlightLayer.path = path.isEmpty ? nil : path.cgPath
+        selectionHighlightPath = path.isEmpty ? nil : path
     }
+}
+
+extension AnnotatedSpan {
+    var range: NSRange { span.range }
 }
 
 enum RubyAnnotationHelper {

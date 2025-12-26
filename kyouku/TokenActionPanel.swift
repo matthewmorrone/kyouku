@@ -4,6 +4,7 @@ import UIKit
 struct TokenActionPanel: View {
     let selection: TokenSelectionContext
     @ObservedObject var lookup: DictionaryLookupViewModel
+    let preferredReading: String?
     let canMergePrevious: Bool
     let canMergeNext: Bool
     let onDismiss: () -> Void
@@ -68,13 +69,16 @@ struct TokenActionPanel: View {
         .padding(.top, 10)
         .padding(.bottom, 4)
         .frame(maxWidth: .infinity)
-        .onAppear { resetSplitControls() }
+        .onAppear {
+            resetSplitControls()
+            resetHighlightedResult()
+        }
         .onChange(of: selection) { _, _ in
             resetSplitControls()
-            highlightedResultIndex = 0
+            resetHighlightedResult()
         }
-        .onChange(of: lookup.results.count) { _, _ in
-            highlightedResultIndex = 0
+        .onChange(of: lookup.results) { _, _ in
+            resetHighlightedResult()
         }
         .contentShape(Rectangle())
         .offset(y: max(0, dragOffset))
@@ -157,6 +161,22 @@ struct TokenActionPanel: View {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85), animations)
         } else {
             animations()
+        }
+    }
+
+    private func resetHighlightedResult() {
+        if let preferred = preferredResultIndex() {
+            highlightedResultIndex = preferred
+        } else {
+            highlightedResultIndex = 0
+        }
+    }
+
+    private func preferredResultIndex() -> Int? {
+        guard let raw = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines), raw.isEmpty == false else { return nil }
+        return lookup.results.firstIndex { entry in
+            let candidate = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
+            return candidate == raw
         }
     }
 
@@ -535,6 +555,7 @@ private struct DictionaryContentHeightPreferenceKey: PreferenceKey {
             annotatedSpan: AnnotatedSpan(span: TextSpan(range: NSRange(location: 0, length: 2), surface: "京都"), readingKana: "きょうと")
         ),
         lookup: DictionaryLookupViewModel(),
+        preferredReading: nil,
         canMergePrevious: false,
         canMergeNext: true,
         onDismiss: {},

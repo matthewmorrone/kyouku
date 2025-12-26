@@ -63,10 +63,14 @@ actor SegmentationService {
 
         let mapInterval = signposter.beginInterval("MapRangesToSpans")
         let mapStart = CFAbsoluteTimeGetCurrent()
-        let spans = ranges.compactMap { range -> TextSpan? in
-            guard let trimmedRange = Self.trimmedRange(from: range, in: nsText) else { return nil }
-            let surface = nsText.substring(with: trimmedRange)
-            return TextSpan(range: trimmedRange, surface: surface)
+        let spans = ranges.flatMap { range -> [TextSpan] in
+            guard let trimmedRange = Self.trimmedRange(from: range, in: nsText) else { return [] }
+            let newlineSeparated = Self.splitRangeByNewlines(trimmedRange, in: nsText)
+            return newlineSeparated.compactMap { segment in
+                guard let clamped = Self.trimmedRange(from: segment, in: nsText) else { return nil }
+                let surface = nsText.substring(with: clamped)
+                return TextSpan(range: clamped, surface: surface)
+            }
         }
         let mapMs = (CFAbsoluteTimeGetCurrent() - mapStart) * 1000
         await debug("SegmentationService: mapping ranges->spans took \(String(format: "%.3f", mapMs)) ms.")
@@ -153,6 +157,28 @@ actor SegmentationService {
         }
         guard end > start else { return nil }
         return NSRange(location: start, length: end - start)
+    }
+
+    private static func splitRangeByNewlines(_ range: NSRange, in text: NSString) -> [NSRange] {
+        guard range.length > 0 else { return [] }
+        var segments: [NSRange] = []
+        var segmentStart = range.location
+        let upperBound = NSMaxRange(range)
+        var index = range.location
+        while index < upperBound {
+            let unit = text.character(at: index)
+            if let scalar = UnicodeScalar(unit), newlineCharacters.contains(scalar) {
+                if index > segmentStart {
+                    segments.append(NSRange(location: segmentStart, length: index - segmentStart))
+                }
+                segmentStart = index + 1
+            }
+            index += 1
+        }
+        if segmentStart < upperBound {
+            segments.append(NSRange(location: segmentStart, length: upperBound - segmentStart))
+        }
+        return segments
     }
 
     private func getTrie() async throws -> LexiconTrie {
@@ -510,6 +536,8 @@ actor SegmentationService {
         let chars = "、。！？：；（）［］｛｝「」『』・…―〜。・"
         return Set(chars.unicodeScalars)
     }()
+
+    private static let newlineCharacters = CharacterSet.newlines
 
     private static func stringHasPrefix(_ text: String, prefix: String, fromUTF16Offset offset: Int) -> Bool {
         guard offset >= 0 else { return false }

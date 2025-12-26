@@ -1,8 +1,9 @@
 # Kyouku — Functional Overview & Architecture
 
-please add a panel on the paste tab that lists all detected tokens in order. clicking on individual words on their text opens their definition, and ont he right is a plus button that saves them to the words list (either a bookmark or a star). these tokens should reflect tokenization on the paste area exactly, and their readings should match their furigana. they should have context menu options for merge left, merge right and split (keep left and right even though on this screen it's up and down). 
 
 please check this diff for anything worth keeping. first thing that comes to mind is centralized logging with easily configurable switches
+
+please review this previous commit for features that were previously implemented but no longer present. word of the day notifications is one feature
 
 ## Purpose
 

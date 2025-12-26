@@ -14,9 +14,29 @@ import SQLite3
 ///   database. It reflects the canonical reading of the lexical entry but may
 ///   differ from how a word appears in running user text.
 struct DictionaryEntry: Identifiable, Hashable {
-    let id: Int64
+    let entryID: Int64
     let kanji: String
     let kana: String?
+    let gloss: String
+    let isCommon: Bool
+    private let stableIdentifier: String
+
+    nonisolated init(entryID: Int64, kanji: String, kana: String?, gloss: String, isCommon: Bool) {
+        self.entryID = entryID
+        self.kanji = kanji
+        self.kana = kana
+        self.gloss = gloss
+        self.isCommon = isCommon
+        let kanaComponent = kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.stableIdentifier = "\(entryID)#\(kanaComponent)"
+    }
+
+    var id: String { stableIdentifier }
+}
+
+private struct RawDictionaryRow {
+    let entryID: Int64
+    let kanji: String
     let gloss: String
     let isCommon: Bool
 }
@@ -231,22 +251,20 @@ actor DictionarySQLiteStore {
         sqlite3_bind_text(stmt, 1, term, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
-        var rows: [DictionaryEntry] = []
+        var rows: [RawDictionaryRow] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
-            let kana = kanaText.isEmpty ? nil : kanaText
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))
+            rows.append(RawDictionaryRow(entryID: id, kanji: kanji, gloss: gloss, isCommon: isCommon))
         }
 
         if containsKanjiCharacters(term) {
             rows = rows.filter { $0.kanji == term }
         }
 
-        return rows
+        return try expandRows(rows)
     }
 
     private func selectEntriesByGloss(matching term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -294,17 +312,15 @@ actor DictionarySQLiteStore {
         sqlite3_bind_text(stmt, 1, ftsQuery, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
-        var rows: [DictionaryEntry] = []
+        var rows: [RawDictionaryRow] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
-            let kana = kanaText.isEmpty ? nil : kanaText
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))
+            rows.append(RawDictionaryRow(entryID: id, kanji: kanji, gloss: gloss, isCommon: isCommon))
         }
-        return rows
+        return try expandRows(rows)
     }
 
     private func selectEntriesBySurfaceToken(matching term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -394,17 +410,71 @@ actor DictionarySQLiteStore {
         }
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
-        var rows: [DictionaryEntry] = []
+        var rows: [RawDictionaryRow] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
-            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
-            let kana = kanaText.isEmpty ? nil : kanaText
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(DictionaryEntry(id: id, kanji: kanji, kana: kana, gloss: gloss, isCommon: isCommon))
+            rows.append(RawDictionaryRow(entryID: id, kanji: kanji, gloss: gloss, isCommon: isCommon))
         }
-        return rows
+        return try expandRows(rows)
+    }
+
+    private func expandRows(_ rows: [RawDictionaryRow]) throws -> [DictionaryEntry] {
+        guard rows.isEmpty == false else { return [] }
+        let entryIDs = Array(Set(rows.map { $0.entryID }))
+        let kanaMap = try fetchKanaVariants(for: entryIDs)
+        var expanded: [DictionaryEntry] = []
+        expanded.reserveCapacity(rows.count)
+        for row in rows {
+            let readings = kanaMap[row.entryID] ?? []
+            if readings.isEmpty {
+                expanded.append(DictionaryEntry(entryID: row.entryID, kanji: row.kanji, kana: nil, gloss: row.gloss, isCommon: row.isCommon))
+                continue
+            }
+            var seen: Set<String> = []
+            for reading in readings {
+                guard reading.isEmpty == false else { continue }
+                if seen.insert(reading).inserted == false { continue }
+                expanded.append(DictionaryEntry(entryID: row.entryID, kanji: row.kanji, kana: reading, gloss: row.gloss, isCommon: row.isCommon))
+            }
+        }
+        return expanded
+    }
+
+    private func fetchKanaVariants(for entryIDs: [Int64]) throws -> [Int64: [String]] {
+        guard let db, entryIDs.isEmpty == false else { return [:] }
+        var mappings: [Int64: [String]] = [:]
+        let chunkSize = 500
+        var offset = 0
+        while offset < entryIDs.count {
+            let chunk = Array(entryIDs[offset..<min(entryIDs.count, offset + chunkSize)])
+            let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+            let sql = """
+            SELECT entry_id, text
+            FROM kana_forms
+            WHERE entry_id IN (\(placeholders))
+            ORDER BY entry_id ASC, is_common DESC, id ASC;
+            """
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+                throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+            for (index, entryID) in chunk.enumerated() {
+                sqlite3_bind_int64(stmt, Int32(index + 1), entryID)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let entryID = sqlite3_column_int64(stmt, 0)
+                guard let textPtr = sqlite3_column_text(stmt, 1) else { continue }
+                let reading = String(cString: textPtr)
+                guard reading.isEmpty == false else { continue }
+                mappings[entryID, default: []].append(reading)
+            }
+            offset += chunk.count
+        }
+        return mappings
     }
 
     private func containsKanjiCharacters(_ text: String) -> Bool {
