@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
+    @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
 
     @State private var exportURL: URL? = nil
     @State private var isImporting: Bool = false
@@ -36,6 +37,7 @@ struct SettingsView: View {
             Form {
                 textAppearanceSection
                 tokenHighlightSection
+                extractFilterSection
                 Section("Backup & Restore") {
                     Button("Export…") {
                         exportAll()
@@ -152,6 +154,19 @@ struct SettingsView: View {
             ColorPicker("Primary Token Color", selection: alternateTokenColorABinding, supportsOpacity: false)
             ColorPicker("Secondary Token Color", selection: alternateTokenColorBBinding, supportsOpacity: false)
         }
+    }
+
+    private var extractFilterSection: some View {
+        Section("Extract Filters") {
+            ParticleTagEditor(tags: commonParticlesBinding)
+        }
+    }
+
+    private var commonParticlesBinding: Binding<[String]> {
+        Binding(
+            get: { CommonParticleSettings.decodeList(from: commonParticlesRaw) },
+            set: { commonParticlesRaw = CommonParticleSettings.encodeList($0) }
+        )
     }
 
     private var exportSheetBinding: Binding<Bool> {
@@ -302,6 +317,112 @@ struct SettingsView: View {
             await MainActor.run { previewSpans = [] }
             return []
         }
+    }
+}
+
+enum CommonParticleSettings {
+    static let storageKey = "extractCommonParticles"
+    static let defaultValues: [String] = [
+        "は", "が", "を", "に", "へ", "で", "と", "も", "や", "ね", "よ", "な", "の"
+    ]
+    static let defaultRawValue: String = defaultValues.joined(separator: ",")
+
+    static func decodeList(from rawValue: String) -> [String] {
+        let source = rawValue.isEmpty ? defaultRawValue : rawValue
+        return source
+            .components(separatedBy: separatorCharacterSet)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+    }
+
+    static func encodeList(_ list: [String]) -> String {
+        list
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+            .joined(separator: ",")
+    }
+
+    static func normalizedToken(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static let separatorCharacterSet = CharacterSet(charactersIn: ",\n\r\t")
+}
+
+private struct ParticleTagEditor: View {
+    @Binding var tags: [String]
+    @State private var draft: String = ""
+
+    private let columns: [GridItem] = [GridItem(.adaptive(minimum: 70), spacing: 8)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if tags.isEmpty {
+                Text("No particles configured yet. Add particles to hide them from the Extract Words list when filtering is enabled.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                    ForEach(tags, id: \.self) { tag in
+                        tagChip(for: tag)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("Add particle", text: $draft)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .onSubmit { commitDraft() }
+
+                Button("Add") { commitDraft() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.accentColor)
+                    .disabled(CommonParticleSettings.normalizedToken(draft).isEmpty)
+            }
+
+            Text("Tap a tag’s × button to remove it. These values inform the ‘Hide common particles’ filter in Extract Words.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func tagChip(for tag: String) -> some View {
+        HStack(spacing: 6) {
+            Text(tag)
+                .font(.subheadline)
+            Button(role: .destructive) {
+                remove(tag: tag)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+        )
+    }
+
+    private func commitDraft() {
+        let normalized = CommonParticleSettings.normalizedToken(draft)
+        guard normalized.isEmpty == false else { return }
+        if tags.contains(normalized) == false {
+            tags.append(normalized)
+            tags.sort()
+        }
+        draft = ""
+    }
+
+    private func remove(tag: String) {
+        tags.removeAll { $0 == tag }
     }
 }
 

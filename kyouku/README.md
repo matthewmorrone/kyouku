@@ -1,9 +1,13 @@
 # Kyouku — Functional Overview & Architecture
 
+Furigana still disappears when touching the paste area
+Selecting words sucks
+When you select a word, you cannot select another word until the dictionary popup has appeared, which sucks if the word you’re trying to press isn’t able to be pressed 
 
 please check this diff for anything worth keeping. first thing that comes to mind is centralized logging with easily configurable switches
 
-please review this previous commit for features that were previously implemented but no longer present. word of the day notifications is one feature
+うらなう
+
 
 ## Purpose
 

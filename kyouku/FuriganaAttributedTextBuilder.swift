@@ -151,12 +151,19 @@ private extension FuriganaAttributedTextBuilder {
     ) -> [TextSpan] {
         guard overrides.isEmpty == false else { return spans }
         let nsText = text as NSString
-        let boundedOverrides: [TextSpan] = overrides.compactMap { override in
-            let range = override.nsRange
-            guard range.location != NSNotFound, range.length > 0 else { return nil }
-            guard NSMaxRange(range) <= nsText.length else { return nil }
-            let surface = nsText.substring(with: range)
-            return TextSpan(range: range, surface: surface)
+        var boundedOverrides: [TextSpan] = []
+        for override in overrides {
+            let rawRange = override.nsRange
+            guard rawRange.location != NSNotFound, rawRange.length > 0 else { continue }
+            guard NSMaxRange(rawRange) <= nsText.length else { continue }
+            guard let trimmed = Self.trimmedRange(from: rawRange, in: nsText) else { continue }
+            let newlineSegments = Self.splitRangeByNewlines(trimmed, in: nsText)
+            for segment in newlineSegments {
+                guard let clamped = Self.trimmedRange(from: segment, in: nsText) else { continue }
+                guard clamped.length > 0 else { continue }
+                let surface = nsText.substring(with: clamped)
+                boundedOverrides.append(TextSpan(range: clamped, surface: surface))
+            }
         }
         guard boundedOverrides.isEmpty == false else { return spans }
         var filtered = spans.filter { span in
@@ -171,6 +178,53 @@ private extension FuriganaAttributedTextBuilder {
             return lhs.range.location < rhs.range.location
         }
         return filtered
+    }
+
+    private static func trimmedRange(from range: NSRange, in text: NSString) -> NSRange? {
+        guard range.location != NSNotFound, range.length > 0 else { return nil }
+        var start = range.location
+        var end = NSMaxRange(range)
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        while start < end {
+            guard let scalar = UnicodeScalar(text.character(at: start)) else { break }
+            if whitespace.contains(scalar) {
+                start += 1
+            } else {
+                break
+            }
+        }
+        while end > start {
+            guard let scalar = UnicodeScalar(text.character(at: end - 1)) else { break }
+            if whitespace.contains(scalar) {
+                end -= 1
+            } else {
+                break
+            }
+        }
+        guard end > start else { return nil }
+        return NSRange(location: start, length: end - start)
+    }
+
+    private static func splitRangeByNewlines(_ range: NSRange, in text: NSString) -> [NSRange] {
+        guard range.length > 0 else { return [] }
+        var segments: [NSRange] = []
+        var segmentStart = range.location
+        let upperBound = NSMaxRange(range)
+        var index = range.location
+        while index < upperBound {
+            let unit = text.character(at: index)
+            if let scalar = UnicodeScalar(unit), CharacterSet.newlines.contains(scalar) {
+                if index > segmentStart {
+                    segments.append(NSRange(location: segmentStart, length: index - segmentStart))
+                }
+                segmentStart = index + 1
+            }
+            index += 1
+        }
+        if segmentStart < upperBound {
+            segments.append(NSRange(location: segmentStart, length: upperBound - segmentStart))
+        }
+        return segments.isEmpty ? [range] : segments
     }
 
     private static func applyReadingOverrides(

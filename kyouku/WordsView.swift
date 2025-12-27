@@ -4,6 +4,9 @@ struct WordsView: View {
     @EnvironmentObject var store: WordsStore
     @StateObject private var lookup = DictionaryLookupViewModel()
     @State private var searchText: String = ""
+    @State private var editModeState: EditMode = .inactive
+    @State private var selectedWordIDs: Set<Word.ID> = []
+    @State private var showDeleteAllConfirmation = false
 
     var body: some View {
         NavigationStack {
@@ -24,15 +27,56 @@ struct WordsView: View {
             }
             .navigationTitle("Dictionary")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    if hasActiveSearch == false, store.words.isEmpty == false {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if canEditSavedWords {
+                        Button {
+                            showDeleteAllConfirmation = true
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .accessibilityLabel("Delete all saved entries")
                         EditButton()
+                    }
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    if isEditing {
+                        Button(role: .destructive) {
+                            deleteSelection()
+                        } label: {
+                            Label("Delete Selected", systemImage: "trash")
+                        }
+                        .disabled(selectedWordIDs.isEmpty)
                     }
                 }
             }
         }
+        .environment(\.editMode, $editModeState)
         .task(id: searchText) {
             await performLookup()
+        }
+        .onChange(of: editModeState) { newValue in
+            if newValue.isEditing == false {
+                selectedWordIDs.removeAll()
+            }
+        }
+        .onChange(of: trimmedSearchText) { trimmed in
+            if trimmed.isEmpty == false {
+                editModeState = .inactive
+            }
+        }
+        .onReceive(store.$words) { words in
+            let ids = Set(words.map { $0.id })
+            selectedWordIDs.formIntersection(ids)
+        }
+        .confirmationDialog(
+            "Delete all saved entries?",
+            isPresented: $showDeleteAllConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete All", role: .destructive) {
+                emptySavedWords()
+            }
+            Button("Cancel", role: .cancel) { }
         }
     }
 
@@ -95,28 +139,40 @@ struct WordsView: View {
                 .foregroundStyle(.secondary)
         } else {
             ForEach(sortedWords) { word in
-                VStack(alignment: .leading) {
-                    Text(word.surface)
-                        .font(.headline)
-                    if let kana = word.kana, kana.isEmpty == false, kana != word.surface {
-                        Text(kana)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 12) {
+                    if isEditing {
+                        Image(systemName: selectedWordIDs.contains(word.id) ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(selectedWordIDs.contains(word.id) ? Color.accentColor : Color.secondary)
+                            .accessibilityHidden(true)
                     }
-                    if word.meaning.isEmpty == false {
-                        Text(word.meaning)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                    VStack(alignment: .leading) {
+                        Text(word.surface)
+                            .font(.headline)
+                        if let kana = word.kana, kana.isEmpty == false, kana != word.surface {
+                            Text(kana)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        if word.meaning.isEmpty == false {
+                            Text(word.meaning)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
-            }
-            .onDelete { offsets in
-                let current = sortedWords
-                let ids: [UUID] = offsets.compactMap { index in
-                    guard index < current.count else { return nil }
-                    return current[index].id
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if isEditing {
+                        toggleSelection(for: word)
+                    }
                 }
-                store.delete(ids: Set(ids))
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        store.delete(id: word.id)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
             }
         }
     }
@@ -155,5 +211,39 @@ struct WordsView: View {
 
     private var hasActiveSearch: Bool {
         trimmedSearchText.isEmpty == false
+    }
+
+    private var isEditing: Bool {
+        editModeState.isEditing
+    }
+
+    private var canEditSavedWords: Bool {
+        hasActiveSearch == false && store.words.isEmpty == false
+    }
+
+    private func toggleSelection(for word: Word) {
+        if selectedWordIDs.contains(word.id) {
+            selectedWordIDs.remove(word.id)
+        } else {
+            selectedWordIDs.insert(word.id)
+        }
+    }
+
+    private func deleteSelection() {
+        guard selectedWordIDs.isEmpty == false else { return }
+        store.delete(ids: selectedWordIDs)
+        selectedWordIDs.removeAll()
+    }
+
+    private func emptySavedWords() {
+        store.deleteAll()
+        selectedWordIDs.removeAll()
+        editModeState = .inactive
+    }
+}
+
+private extension EditMode {
+    var isEditing: Bool {
+        self == .active
     }
 }

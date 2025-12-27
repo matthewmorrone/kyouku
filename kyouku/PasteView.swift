@@ -38,16 +38,46 @@ struct PasteView: View {
     @State private var furiganaTaskHandle: Task<Void, Never>? = nil
     @State private var suppressNextEditingRefresh: Bool = false
     @StateObject private var inlineLookup = DictionaryLookupViewModel()
-    @State private var tokenSelection: TokenSelectionContext? = nil
-    @State private var persistentSelectionRange: NSRange? = nil
+    @StateObject private var selectionController = TokenSelectionController()
     @State private var overrideSignature: Int = 0
     @State private var customizedRanges: [NSRange] = []
-    @State private var tokenPanelFrame: CGRect? = nil
-    @State private var sheetSelection: TokenSelectionContext? = nil
-    @State private var sheetPanelHeight: CGFloat = 0
-    @State private var pendingSelectionRange: NSRange? = nil
-    @State private var pendingSplitFocusSelectionID: String? = nil
-    @State private var showTokensFullScreen: Bool = false
+    @State private var showTokensPopover: Bool = false
+    @State private var pendingRouterResetNoteID: UUID? = nil
+
+    private var tokenSelection: TokenSelectionContext? {
+        get { selectionController.tokenSelection }
+        nonmutating set { selectionController.tokenSelection = newValue }
+    }
+
+    private var persistentSelectionRange: NSRange? {
+        get { selectionController.persistentSelectionRange }
+        nonmutating set { selectionController.persistentSelectionRange = newValue }
+    }
+
+    private var sheetSelection: TokenSelectionContext? {
+        get { selectionController.sheetSelection }
+        nonmutating set { selectionController.sheetSelection = newValue }
+    }
+
+    private var sheetPanelHeight: CGFloat {
+        get { selectionController.sheetPanelHeight }
+        nonmutating set { selectionController.sheetPanelHeight = newValue }
+    }
+
+    private var pendingSelectionRange: NSRange? {
+        get { selectionController.pendingSelectionRange }
+        nonmutating set { selectionController.pendingSelectionRange = newValue }
+    }
+
+    private var pendingSplitFocusSelectionID: String? {
+        get { selectionController.pendingSplitFocusSelectionID }
+        nonmutating set { selectionController.pendingSplitFocusSelectionID = newValue }
+    }
+
+    private var tokenPanelFrame: CGRect? {
+        get { selectionController.tokenPanelFrame }
+        nonmutating set { selectionController.tokenPanelFrame = newValue }
+    }
 
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
@@ -58,6 +88,9 @@ struct PasteView: View {
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage("pasteViewScratchNoteID") private var scratchNoteIDRaw: String = ""
+    @AppStorage("extractHideDuplicateTokens") private var hideDuplicateTokens: Bool = false
+    @AppStorage("extractHideCommonParticles") private var hideCommonParticles: Bool = false
+    @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
 
     private var scratchNoteID: UUID {
         if let cached = UUID(uuidString: scratchNoteIDRaw) {
@@ -74,8 +107,12 @@ struct PasteView: View {
     private static let inlineDictionaryPanelEnabledFlag = false
     private static let sheetMaxHeightFraction: CGFloat = 0.8
     private static let sheetExtraPadding: CGFloat = 36
+    private let furiganaPipeline = FuriganaPipelineService()
     private var inlineDictionaryPanelEnabled: Bool { Self.inlineDictionaryPanelEnabledFlag }
     private var sheetDictionaryPanelEnabled: Bool { inlineDictionaryPanelEnabled == false }
+    private var pasteAreaDictionaryEnabled: Bool { false }
+    private var tokenSpansAlwaysOn: Bool { true }
+    private var spanConsumersActive: Bool { showFurigana || tokenHighlightsEnabled || tokenSpansAlwaysOn }
     private static let highlightWhitespace: CharacterSet = {
         var set = CharacterSet.whitespacesAndNewlines
         set.formUnion(CharacterSet(charactersIn: "\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{200B}"))
@@ -89,6 +126,15 @@ struct PasteView: View {
     }
     private var unknownTokenColor: UIColor { UIColor.systemOrange }
     private var tokenHighlightsEnabled: Bool { alternateTokenColors || highlightUnknownTokens }
+    private var sheetSelectionBinding: Binding<TokenSelectionContext?> {
+        Binding(
+            get: { showTokensPopover ? nil : sheetSelection },
+            set: { sheetSelection = $0 }
+        )
+    }
+    private var commonParticleSet: Set<String> {
+        Set(CommonParticleSettings.decodeList(from: commonParticlesRaw))
+    }
 
     var body: some View {
         NavigationStack {
@@ -113,14 +159,22 @@ struct PasteView: View {
                 .onPreferenceChange(TokenActionPanelFramePreferenceKey.self) { frame in
                     tokenPanelFrame = frame
                 }
-                .simultaneousGesture(
-                    SpatialTapGesture().onEnded { value in
-                        handleTapOutsidePanel(at: value.location)
-                    },
-                    including: .all
-                )
         } else {
             coreContent
+        }
+    }
+
+    private var tokenListButton: some View {
+        Button {
+            showTokensPopover = true
+        } label: {
+            Image(systemName: "list.bullet.rectangle")
+        }
+        .accessibilityLabel("Extract Words")
+        .sheet(isPresented: $showTokensPopover) {
+            tokenListSheet
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
         }
     }
 
@@ -130,20 +184,15 @@ struct PasteView: View {
             inlineDictionaryOverlay
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle(currentNote?.title ?? "Paste")
+        .navigationTitle(noteTitleInput.isEmpty ? "Paste" : noteTitleInput)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showTokensFullScreen = true
-                } label: {
-                    Image(systemName: "list.bullet.rectangle")
-                }
-                .accessibilityLabel("Tokens")
+                tokenListButton
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if tokenSelection == nil {
+            if selectionController.tokenSelection == nil {
                 Color.clear.frame(height: 24)
             }
         }
@@ -168,19 +217,19 @@ struct PasteView: View {
         .onChange(of: isEditing) { _, editing in
             if editing {
                 clearSelection()
-                triggerFuriganaRefreshIfNeeded(reason: "editing toggled on", recomputeSpans: false)
+                triggerFuriganaRefreshIfNeeded(reason: "editing toggled on", recomputeSpans: true)
             } else {
-                if suppressNextEditingRefresh {
-                    suppressNextEditingRefresh = false
-                    Self.logFurigana("Skipping refresh: editing toggle was programmatic.")
-                    return
-                }
+//                if suppressNextEditingRefresh {
+//                    suppressNextEditingRefresh = false
+//                    Self.logFurigana("Skipping refresh: editing toggle was programmatic.")
+//                    return
+//                }
                 triggerFuriganaRefreshIfNeeded(reason: "editing toggled off", recomputeSpans: true)
             }
         }
         .onChange(of: showFurigana) { _, enabled in
             if enabled {
-                triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: false)
+                triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: true)
             } else {
                 furiganaTaskHandle?.cancel()
             }
@@ -198,31 +247,43 @@ struct PasteView: View {
         .onChange(of: readingFuriganaSize) { _, _ in
             triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
         }
-        .onChange(of: tokenSelection?.surface ?? "") { _, newValue in
-            handleSelectionLookup(for: newValue)
+        .onChange(of: selectionController.tokenSelection) { _, newSelection in
+            handleSelectionLookup(for: newSelection?.surface ?? "")
         }
         .onChange(of: currentNote?.id) { _, _ in
             clearSelection()
             overrideSignature = computeOverrideSignature()
             updateCustomizedRanges()
+            processPendingRouterResetRequest()
         }
         .onReceive(readingOverrides.$overrides) { _ in
             handleOverridesExternalChange()
+        }
+        .onChange(of: router.pendingResetNoteID) { _, newValue in
+            pendingRouterResetNoteID = newValue
+            processPendingRouterResetRequest()
         }
         .onChange(of: tokenSelection == nil) { _, isNil in
             if isNil {
                 tokenPanelFrame = nil
             }
         }
-        .fullScreenCover(isPresented: $showTokensFullScreen) {
-            NavigationStack {
-                VStack(spacing: 0) {
+    }
+
+    @ViewBuilder
+    private var tokenListSheet: some View {
+        NavigationStack {
+            ZStack(alignment: .bottom) {
+                VStack(alignment: .leading, spacing: 16) {
+                    tokenFilterControls
+                    Divider()
                     TokenListPanel(
                         items: tokenListItems,
                         isReady: furiganaSpans != nil,
                         isEditing: isEditing,
                         selectedRange: persistentSelectionRange,
-                        onSelect: { selectSpanFromList(at: $0, focusSplitMenu: false) },
+                        onSelect: { presentDictionaryForSpan(at: $0, focusSplitMenu: false) },
+                        onGoTo: { goToSpanInNote(at: $0) },
                         onAdd: { bookmarkToken(at: $0) },
                         onMergeLeft: { mergeSpan(at: $0, direction: .previous) },
                         onMergeRight: { mergeSpan(at: $0, direction: .next) },
@@ -230,20 +291,48 @@ struct PasteView: View {
                         canMergeLeft: { canMergeSpan(at: $0, direction: .previous) },
                         canMergeRight: { canMergeSpan(at: $0, direction: .next) }
                     )
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button("Close") { showTokensFullScreen = false }
-                        }
+                    .frame(maxHeight: .infinity, alignment: .top)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+
+                if sheetDictionaryPanelEnabled, let selection = sheetSelection {
+                    ZStack(alignment: .bottom) {
+                        Color.black.opacity(0.25)
+                            .ignoresSafeArea()
+                            .transition(.opacity)
+                            .onTapGesture { clearSelection(resetPersistent: false) }
+
+                        dictionaryPanel(for: selection, enableDragToDismiss: true, embedInMaterialBackground: true)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 24)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
+                    .zIndex(1)
                 }
             }
+            .navigationTitle("Extract Words")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showTokensPopover = false }
+                }
+            }
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: sheetSelection?.id)
         }
+    }
+
+    private var tokenFilterControls: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Toggle("Hide duplicates", isOn: $hideDuplicateTokens)
+            Toggle("Hide particles", isOn: $hideCommonParticles)
+        }
+        .toggleStyle(.switch)
     }
 
     private var editorColumn: some View {
         VStack(spacing: 0) {
-            EditorContainer(
+            FuriganaRenderingHost(
                 text: $inputText,
                 furiganaText: furiganaAttributedText,
                 furiganaSpans: furiganaSpans,
@@ -257,16 +346,14 @@ struct PasteView: View {
                 unknownTokenColor: unknownTokenColor,
                 selectedRangeHighlight: persistentSelectionRange,
                 customizedRanges: customizedRanges,
-                onTokenSelection: handleTokenSelection,
-                onSelectionCleared: { /* no-op to avoid clearing on tap */ },
-                title: noteTitleBinding
+                enableTapInspection: true
             )
             .padding(.vertical, 16)
             .padding(.horizontal, 16)
-
-            if tokenSelection == nil {
-                editorToolbar
-            }
+            Divider()
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            editorToolbar
         }
     }
 
@@ -347,7 +434,8 @@ struct PasteView: View {
             isReady: furiganaSpans != nil,
             isEditing: isEditing,
             selectedRange: persistentSelectionRange,
-            onSelect: { selectSpanFromList(at: $0, focusSplitMenu: false) },
+            onSelect: { presentDictionaryForSpan(at: $0, focusSplitMenu: false) },
+            onGoTo: { goToSpanInNote(at: $0) },
             onAdd: { bookmarkToken(at: $0) },
             onMergeLeft: { mergeSpan(at: $0, direction: .previous) },
             onMergeRight: { mergeSpan(at: $0, direction: .next) },
@@ -360,15 +448,34 @@ struct PasteView: View {
 
     private var tokenListItems: [TokenListItem] {
         guard let spans = furiganaSpans else { return [] }
+        var seenKeys: Set<String> = []
+        let particleSet: Set<String> = hideCommonParticles ? commonParticleSet : []
+
         return spans.enumerated().compactMap { index, span in
             guard let trimmed = trimmedRangeAndSurface(for: span.span.range) else { return nil }
+            let normalizedSurface = trimmed.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if hideCommonParticles, particleSet.contains(normalizedSurface) {
+                return nil
+            }
+
             let reading = normalizedReading(span.readingKana)
+            let displayReading = readingWithOkurigana(surface: trimmed.surface, baseReading: reading)
+            if hideDuplicateTokens {
+                let key = tokenDuplicateKey(surface: normalizedSurface, reading: reading)
+                if seenKeys.contains(key) {
+                    return nil
+                }
+                seenKeys.insert(key)
+            }
+
             let alreadySaved = hasSavedWord(surface: trimmed.surface, reading: reading)
             return TokenListItem(
                 spanIndex: index,
                 range: trimmed.range,
                 surface: trimmed.surface,
                 reading: reading,
+                displayReading: displayReading,
                 isAlreadySaved: alreadySaved
             )
         }
@@ -410,8 +517,8 @@ struct PasteView: View {
                 isSelectionCustomized: selectionIsCustomized(selection),
                 enableDragToDismiss: true,
                 embedInMaterialBackground: true,
-//                focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
-//                onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
+                focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
+                onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
             )
             .padding(.horizontal, 0)
             .padding(.bottom, 0)
@@ -496,6 +603,9 @@ struct PasteView: View {
             }
             router.pasteShouldBeginEditing = false
             router.noteToOpen = nil
+        } else if let existingNote = currentNote, noteTitleInput.isEmpty {
+            noteTitleInput = existingNote.title ?? ""
+            hasManuallyEditedTitle = (existingNote.title?.isEmpty == false)
         }
         if !hasInitialized {
             if inputText.isEmpty {
@@ -514,6 +624,9 @@ struct PasteView: View {
         }
         overrideSignature = computeOverrideSignature()
         updateCustomizedRanges()
+        pendingRouterResetNoteID = router.pendingResetNoteID
+        processPendingRouterResetRequest()
+        ensureInitialFuriganaReady(reason: "onAppear initialization")
     }
 
     private func syncNoteForInputChange(_ newValue: String) {
@@ -533,29 +646,6 @@ struct PasteView: View {
         currentNote = updated
     }
 
-    private var noteTitleBinding: Binding<String>? {
-        guard currentNote != nil else { return nil }
-        return Binding(
-            get: { noteTitleInput },
-            set: { newValue in
-                noteTitleInput = newValue
-                hasManuallyEditedTitle = true
-                syncNoteTitleChange(newValue)
-            }
-        )
-    }
-
-    private func syncNoteTitleChange(_ newValue: String) {
-        guard var existing = currentNote else { return }
-        let normalized = normalizedTitle(newValue)
-        if normalized == existing.title {
-            return
-        }
-        existing.title = normalized
-        notes.updateNote(existing)
-        currentNote = existing
-    }
-
     private func normalizedTitle(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -573,14 +663,7 @@ struct PasteView: View {
 
     private func clearSelection(resetPersistent: Bool = true) {
         Self.selectionLogger.debug("Clearing selection resetPersistent=\(resetPersistent)")
-        if resetPersistent {
-            persistentSelectionRange = nil
-        }
-        tokenSelection = nil
-        sheetSelection = nil
-        sheetPanelHeight = 0
-        pendingSelectionRange = nil
-        pendingSplitFocusSelectionID = nil
+        selectionController.clearSelection(resetPersistent: resetPersistent)
         Task { @MainActor in
             inlineLookup.results = []
             inlineLookup.errorMessage = nil
@@ -590,9 +673,7 @@ struct PasteView: View {
 
     @MainActor
     private func beginPendingSelectionRestoration(for range: NSRange) {
-        guard range.location != NSNotFound, range.length > 0 else { return }
-        pendingSelectionRange = range
-        persistentSelectionRange = range
+        selectionController.beginPendingSelectionRestoration(for: range)
     }
 
     private func handleSelectionLookup(for term: String) {
@@ -610,32 +691,40 @@ struct PasteView: View {
         }
     }
 
+    private func dictionaryPanel(for selection: TokenSelectionContext, enableDragToDismiss: Bool, embedInMaterialBackground: Bool) -> TokenActionPanel {
+        TokenActionPanel(
+            selection: selection,
+            lookup: inlineLookup,
+            preferredReading: selection.annotatedSpan.readingKana,
+            canMergePrevious: canMergeSelection(.previous),
+            canMergeNext: canMergeSelection(.next),
+            onDismiss: { clearSelection(resetPersistent: false) },
+            onDefine: { entry in
+                defineWord(using: entry)
+            },
+            onUseReading: { entry in
+                applyDictionaryReading(entry)
+            },
+            onMergePrevious: { mergeSelection(.previous) },
+            onMergeNext: { mergeSelection(.next) },
+            onSplit: { offset in splitSelection(at: offset) },
+            onReset: resetSelectionOverrides,
+            isSelectionCustomized: selectionIsCustomized(selection),
+            enableDragToDismiss: enableDragToDismiss,
+            embedInMaterialBackground: embedInMaterialBackground,
+            focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
+            onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
+        )
+    }
+
     private func applyDictionarySheet<Content: View>(to view: Content) -> AnyView {
         if sheetDictionaryPanelEnabled {
             return AnyView(
-                view.sheet(item: $sheetSelection, onDismiss: { clearSelection(resetPersistent: false) }) { selection in
-                    let sheetPanel = TokenActionPanel(
-                        selection: selection,
-                        lookup: inlineLookup,
-                        preferredReading: selection.annotatedSpan.readingKana,
-                        canMergePrevious: canMergeSelection(.previous),
-                        canMergeNext: canMergeSelection(.next),
-                        onDismiss: { clearSelection(resetPersistent: false) },
-                        onDefine: { entry in
-                            defineWord(using: entry)
-                        },
-                        onUseReading: { entry in
-                            applyDictionaryReading(entry)
-                        },
-                        onMergePrevious: { mergeSelection(.previous) },
-                        onMergeNext: { mergeSelection(.next) },
-                        onSplit: { offset in splitSelection(at: offset) },
-                        onReset: resetSelectionOverrides,
-                        isSelectionCustomized: selectionIsCustomized(selection),
+                view.sheet(item: sheetSelectionBinding, onDismiss: { clearSelection(resetPersistent: false) }) { selection in
+                    let sheetPanel = dictionaryPanel(
+                        for: selection,
                         enableDragToDismiss: false,
-                        embedInMaterialBackground: false,
-//                        focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
-//                        onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
+                        embedInMaterialBackground: false
                     )
 
                     sheetPanel
@@ -687,15 +776,6 @@ struct PasteView: View {
         return min(max(padded, minHeight), maxHeight)
     }
 
-    @available(iOS 17.0, *)
-    private func handleTapOutsidePanel(at location: CGPoint) {
-        guard tokenSelection != nil else { return }
-        if let frame = tokenPanelFrame, frame.contains(location) {
-            return
-        }
-        clearSelection(resetPersistent: false)
-    }
-
     @ViewBuilder
     private var legacyDismissOverlay: some View {
         if #available(iOS 17.0, *) {
@@ -708,33 +788,6 @@ struct PasteView: View {
                 .transition(.opacity)
                 .zIndex(0.5)
         }
-    }
-
-    private func handleTokenSelection(_ payload: RubyText.SelectionPayload) {
-        guard isEditing == false else { return }
-        let range = payload.range
-        guard range.location != NSNotFound, range.length > 0 else { return }
-        guard NSMaxRange(range) <= (inputText as NSString).length else { return }
-        guard let trimmed = trimmedSelection(from: payload) else {
-            Self.selectionLogger.debug("Token selection ignored spanIndex=\(payload.index) reason=whitespace-only")
-            return
-        }
-        Self.selectionLogger.debug("Token selected spanIndex=\(payload.index) rawRange=\(range.location)-\(NSMaxRange(range)) highlight=\(trimmed.range.location)-\(NSMaxRange(trimmed.range)) surface=\(trimmed.surface, privacy: .public)")
-        persistentSelectionRange = trimmed.range
-        let context = TokenSelectionContext(
-            spanIndex: payload.index,
-            range: trimmed.range,
-            surface: trimmed.surface,
-            annotatedSpan: payload.span
-        )
-        tokenSelection = context
-        if sheetDictionaryPanelEnabled {
-            sheetSelection = context
-        }
-    }
-
-    private func trimmedSelection(from payload: RubyText.SelectionPayload) -> (range: NSRange, surface: String)? {
-        trimmedRangeAndSurface(for: payload.span.span.range)
     }
 
     private func trimmedRangeAndSurface(for spanRange: NSRange) -> (range: NSRange, surface: String)? {
@@ -782,8 +835,7 @@ struct PasteView: View {
         )
     }
 
-    private func selectSpanFromList(at index: Int, focusSplitMenu: Bool) {
-        guard isEditing == false else { return }
+    private func presentDictionaryForSpan(at index: Int, focusSplitMenu: Bool) {
         guard let context = selectionContext(forSpanAt: index) else { return }
         pendingSelectionRange = nil
         persistentSelectionRange = context.range
@@ -792,6 +844,18 @@ struct PasteView: View {
             sheetSelection = context
         }
         pendingSplitFocusSelectionID = focusSplitMenu ? context.id : nil
+    }
+
+    private func goToSpanInNote(at index: Int) {
+        guard let context = selectionContext(forSpanAt: index) else { return }
+        pendingSelectionRange = nil
+        persistentSelectionRange = context.range
+        tokenSelection = nil
+        if sheetDictionaryPanelEnabled {
+            sheetSelection = nil
+        }
+        pendingSplitFocusSelectionID = nil
+        showTokensPopover = false
     }
 
     private func bookmarkToken(at index: Int) {
@@ -804,12 +868,12 @@ struct PasteView: View {
             let entry = await lookupPreferredDictionaryEntry(surface: context.surface, reading: reading)
             await MainActor.run {
                 guard let entry else {
-                    selectSpanFromList(at: index, focusSplitMenu: false)
+                    presentDictionaryForSpan(at: index, focusSplitMenu: false)
                     return
                 }
                 let meaning = normalizedMeaning(from: entry.gloss)
                 guard meaning.isEmpty == false else {
-                    selectSpanFromList(at: index, focusSplitMenu: false)
+                    presentDictionaryForSpan(at: index, focusSplitMenu: false)
                     return
                 }
                 let kana = normalizedReading(entry.kana)
@@ -868,10 +932,46 @@ struct PasteView: View {
         return value
     }
 
+    private func readingWithOkurigana(surface: String, baseReading: String?) -> String? {
+        guard var reading = baseReading else { return nil }
+        guard let suffix = trailingKanaSuffix(in: surface), suffix.isEmpty == false else { return reading }
+        if reading.hasSuffix(suffix) {
+            return reading
+        }
+        reading.append(suffix)
+        return reading
+    }
+
+    private func trailingKanaSuffix(in surface: String) -> String? {
+        guard surface.isEmpty == false else { return nil }
+        var scalars: [UnicodeScalar] = []
+        for scalar in surface.unicodeScalars.reversed() {
+            if isKanaScalar(scalar) {
+                scalars.append(scalar)
+            } else {
+                break
+            }
+        }
+        guard scalars.isEmpty == false else { return nil }
+        return String(String.UnicodeScalarView(scalars.reversed()))
+    }
+
+    private func isKanaScalar(_ scalar: UnicodeScalar) -> Bool {
+        (0x3040...0x309F).contains(scalar.value) ||
+        (0x30A0...0x30FF).contains(scalar.value) ||
+        scalar.value == 0xFF70
+    }
+
     private func hasSavedWord(surface: String, reading: String?) -> Bool {
         words.words.contains { word in
             word.surface == surface && word.kana == reading
         }
+    }
+
+    private func tokenDuplicateKey(surface: String, reading: String?) -> String {
+        let normalizedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedReading = reading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "\(normalizedSurface)|\(normalizedReading)"
     }
 
     private func mergeSpan(at index: Int, direction: MergeDirection) {
@@ -888,14 +988,19 @@ struct PasteView: View {
             userKana: nil
         )
         applyOverridesChange(range: union, newOverrides: [override], actionName: "Merge Tokens")
-        beginPendingSelectionRestoration(for: union)
+        persistentSelectionRange = union
+        pendingSelectionRange = nil
+        tokenSelection = nil
+        if sheetDictionaryPanelEnabled {
+            sheetSelection = nil
+        }
     }
 
     private func startSplitFlow(for index: Int) {
         guard let spans = furiganaSpans else { return }
         guard spans.indices.contains(index) else { return }
         guard let trimmed = trimmedRangeAndSurface(for: spans[index].span.range), trimmed.range.length > 1 else { return }
-        selectSpanFromList(at: index, focusSplitMenu: true)
+        presentDictionaryForSpan(at: index, focusSplitMenu: true)
     }
 
     private func canMergeSpan(at index: Int, direction: MergeDirection) -> Bool {
@@ -913,7 +1018,6 @@ struct PasteView: View {
         updateCustomizedRanges()
         guard inputText.isEmpty == false else { return }
         guard showFurigana || tokenHighlightsEnabled else { return }
-        guard isEditing == false else { return }
         triggerFuriganaRefreshIfNeeded(reason: "reading overrides changed", recomputeSpans: true)
     }
 
@@ -1012,6 +1116,14 @@ struct PasteView: View {
         triggerFuriganaRefreshIfNeeded(reason: "reset all overrides", recomputeSpans: true)
     }
 
+    private func processPendingRouterResetRequest() {
+        guard let requestedID = pendingRouterResetNoteID else { return }
+        guard let activeID = currentNote?.id, requestedID == activeID else { return }
+        pendingRouterResetNoteID = nil
+        router.pendingResetNoteID = nil
+        resetAllCustomSpans()
+    }
+
     private func applyOverridesChange(range: NSRange, newOverrides: [ReadingOverride], actionName: String) {
         let noteID = activeNoteID
         let previous = readingOverrides.overrides(for: noteID, overlapping: range)
@@ -1065,11 +1177,13 @@ struct PasteView: View {
         isEditing = editing
     }
 
+    private func ensureInitialFuriganaReady(reason: String) {
+        guard furiganaSpans == nil || furiganaAttributedText == nil else { return }
+        guard inputText.isEmpty == false else { return }
+        triggerFuriganaRefreshIfNeeded(reason: reason, recomputeSpans: true)
+    }
+
     private func triggerFuriganaRefreshIfNeeded(reason: String = "state change", recomputeSpans: Bool = true) {
-        guard showFurigana || tokenHighlightsEnabled else {
-            Self.logFurigana("Skipping refresh (\(reason)): no consumers need annotated spans.")
-            return
-        }
         guard inputText.isEmpty == false else {
             Self.logFurigana("Skipping refresh (\(reason)): paste text is empty.")
             return
@@ -1088,10 +1202,6 @@ struct PasteView: View {
     }
 
     private func makeFuriganaTask(token: Int, recomputeSpans: Bool) -> (() async -> Void)? {
-        guard showFurigana || tokenHighlightsEnabled else {
-            Self.logFurigana("No furigana task created because no consumer requires spans.")
-            return nil
-        }
         guard inputText.isEmpty == false else {
             Self.logFurigana("No furigana task created because text is empty.")
             return nil
@@ -1101,31 +1211,43 @@ struct PasteView: View {
         let currentShowFurigana = showFurigana
         let currentAlternateTokenColors = alternateTokenColors
         let currentHighlightUnknownTokens = highlightUnknownTokens
-        let currentIsEditing = isEditing
+        let currentSpanConsumersActive = spanConsumersActive
         let currentTextSize = readingTextSize
         let currentFuriganaSize = readingFuriganaSize
         let currentSpans = furiganaSpans
         let currentOverrides = readingOverrides.overrides(for: activeNoteID)
-        Self.logFurigana("Creating furigana task token \(token) for text length \(currentText.count). ShowF: \(currentShowFurigana), isEditing: \(currentIsEditing)")
+        let pipelineInput = FuriganaPipelineService.Input(
+            text: currentText,
+            showFurigana: currentShowFurigana,
+            needsTokenHighlights: currentSpanConsumersActive,
+            textSize: currentTextSize,
+            furiganaSize: currentFuriganaSize,
+            recomputeSpans: recomputeSpans,
+            existingSpans: currentSpans,
+            overrides: currentOverrides,
+            context: "PasteView"
+        )
+        let service = furiganaPipeline
+        Self.logFurigana("Creating furigana task token \(token) for text length \(currentText.count). ShowF: \(currentShowFurigana)")
         return {
-            await PasteView.recomputeFurigana(
-                text: currentText,
-                showFurigana: currentShowFurigana,
-                needsTokenHighlights: (currentAlternateTokenColors || currentHighlightUnknownTokens),
-                isEditing: currentIsEditing,
-                textSize: currentTextSize,
-                furiganaSize: currentFuriganaSize,
-                recomputeSpans: recomputeSpans,
-                existingSpans: currentSpans,
-                overrides: currentOverrides
-            ) { newSpans, newAttributed in
-                // Only update if state still matches to avoid stale updates
-                if inputText == currentText && showFurigana == currentShowFurigana {
-                    furiganaSpans = newSpans
-                    Self.logFurigana("Applied spans: \(newSpans?.count ?? 0)")
-                    furiganaAttributedText = newAttributed
-                    restoreSelectionIfNeeded()
+            let result = await service.render(pipelineInput)
+            await MainActor.run {
+                guard Task.isCancelled == false else {
+                    Self.logFurigana("Discarded cancelled furigana task token \(token)")
+                    return
                 }
+                guard token == furiganaRefreshToken else {
+                    Self.logFurigana("Discarded stale furigana result token \(token); latest token is \(furiganaRefreshToken)")
+                    return
+                }
+                guard inputText == currentText && showFurigana == currentShowFurigana else {
+                    Self.logFurigana("Discarded furigana result token \(token) because state changed before apply")
+                    return
+                }
+                furiganaSpans = result.spans
+                Self.logFurigana("Applied spans: \(result.spans?.count ?? 0)")
+                furiganaAttributedText = result.attributedString
+                restoreSelectionIfNeeded()
             }
         }
     }
@@ -1159,78 +1281,11 @@ struct PasteView: View {
         furiganaLogger.info("\(file) \(line) \(functionName) \(message, privacy: .public)")
     }
 
-    private static func recomputeFurigana(
-        text: String,
-        showFurigana: Bool,
-        needsTokenHighlights: Bool,
-        isEditing: Bool,
-        textSize: Double,
-        furiganaSize: Double,
-        recomputeSpans: Bool,
-        existingSpans: [AnnotatedSpan]?,
-        overrides: [ReadingOverride],
-        update: @escaping ([AnnotatedSpan]?, NSAttributedString?) -> Void
-    ) async {
-        guard showFurigana || needsTokenHighlights else {
-            logFurigana("Aborting recompute: no consumers require annotated spans.")
-            await MainActor.run { update(existingSpans, nil) }
-            return
-        }
-        guard text.isEmpty == false else {
-            logFurigana("Aborting recompute: paste text is empty.")
-            await MainActor.run { update(nil, nil) }
-            return
-        }
-
-        logFurigana("Starting furigana recompute for text length \(text.count). Recompute spans: \(recomputeSpans ? "yes" : "no"). Editing=\(isEditing ? "on" : "off").")
-        if Task.isCancelled { return }
-
-        var spans = existingSpans
-        if recomputeSpans || spans == nil {
-            do {
-                spans = try await FuriganaAttributedTextBuilder.computeAnnotatedSpans(
-                    text: text,
-                    context: "PasteView",
-                    overrides: overrides
-                )
-            } catch {
-                logFurigana("Span computation failed: \(String(describing: error)).")
-                return
-            }
-        }
-
-        guard let readySpans = spans else {
-            logFurigana("No spans available after recompute; returning plain text.")
-            await MainActor.run { update(nil, NSAttributedString(string: text)) }
-            return
-        }
-
-        let attributed = FuriganaAttributedTextBuilder.project(
-            text: text,
-            annotatedSpans: readySpans,
-            textSize: textSize,
-            furiganaSize: furiganaSize,
-            context: "PasteView"
-        )
-        logFurigana("Furigana projection succeeded with length \(attributed.length).")
-        await MainActor.run { update(readySpans, attributed) }
-    }
 }
 
 private enum MergeDirection {
     case previous
     case next
-}
-
-struct TokenSelectionContext: Equatable {
-    let spanIndex: Int
-    let range: NSRange
-    let surface: String
-    let annotatedSpan: AnnotatedSpan
-}
-
-extension TokenSelectionContext: Identifiable {
-    var id: String { "\(spanIndex)-\(range.location)-\(range.length)" }
 }
 
 private final class OverrideUndoToken: NSObject {
@@ -1254,220 +1309,12 @@ private struct ControlCell<Content: View>: View {
     }
 }
 
-private struct EditorContainer: View {
-    @Binding var text: String
-    var furiganaText: NSAttributedString?
-    var furiganaSpans: [AnnotatedSpan]?
-    var textSize: Double
-    var isEditing: Bool
-    var showFurigana: Bool
-    var lineSpacing: Double
-    var alternateTokenColors: Bool
-    var highlightUnknownTokens: Bool
-    var tokenPalette: [UIColor]
-    var unknownTokenColor: UIColor
-    var selectedRangeHighlight: NSRange?
-    var customizedRanges: [NSRange]
-    var onTokenSelection: ((RubyText.SelectionPayload) -> Void)? = nil
-    var onSelectionCleared: (() -> Void)? = nil
-    var title: Binding<String>? = nil
-
-    private let placeholder = "Paste or type Japanese text"
-
-    var body: some View {
-        let shouldRenderFurigana = (text.isEmpty == false && showFurigana)
-        PasteView.logFurigana("EditorContainer shouldRenderFurigana=\(shouldRenderFurigana)")
-        return ZStack(alignment: .topLeading) {
-            if text.isEmpty {
-                displayShell {
-                    EmptyView()
-                }
-            }
-            else if shouldRenderFurigana {
-                displayShell {
-                    rubyBlock(annotationVisibility: .visible)
-                        .fixedSize(horizontal: false, vertical: true) // prevent vertical compression
-                }
-                .allowsHitTesting(isEditing == false)
-                .opacity(isEditing ? 0.35 : 1.0)
-            }
-            else {
-                displayShell {
-                    rubyBlock(annotationVisibility: .removed)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            if isEditing {
-                editorContent
-            }
-        }
-        .padding(0)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
-        .cornerRadius(12)
-        .roundedBorder(Color(.white), cornerRadius: 12)
-    }
-
-    private var editorContent: some View {
-        VStack(spacing: 0) {
-            if let titleBinding = title, isEditing {
-                TextField("Title", text: titleBinding)
-                    .font(.headline)
-                    .textInputAutocapitalization(.sentences)
-                    .disableAutocorrection(true)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 8)
-                Divider()
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 4)
-            }
-
-            TextEditor(text: $text)
-                .font(.system(size: textSize))
-                .lineSpacing(lineSpacing)
-                .scrollContentBackground(.hidden)
-                .background(Color.clear)
-                .foregroundColor(.primary)
-                .padding(editorInsets)
-        }
-    }
-
-    private var editorInsets: EdgeInsets {
-        let rubyHeadroom = max(0.0, textSize * 0.6 + lineSpacing)
-        let baseTop = max(8.0, rubyHeadroom)
-        let topInset = hasTitleField ? 8.0 : baseTop
-        return EdgeInsets(top: CGFloat(topInset), leading: 11, bottom: 12, trailing: 12)
-    }
-
-    private var hasTitleField: Bool {
-        title != nil && isEditing
-    }
-
-    private func displayShell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                content()
-                    .padding(8)
-            }
-            .font(.system(size: textSize))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .multilineTextAlignment(.leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func rubyBlock(annotationVisibility: RubyAnnotationVisibility) -> some View {
-        RubyText(
-            attributed: resolvedAttributedText,
-            fontSize: CGFloat(textSize),
-            lineHeightMultiple: 1.0,
-            extraGap: CGFloat(max(0, lineSpacing)),
-            annotationVisibility: annotationVisibility,
-            tokenOverlays: tokenColorOverlays,
-            annotatedSpans: furiganaSpans ?? [],
-            selectedRange: selectedRangeHighlight,
-            customizedRanges: customizedRanges,
-            onTokenSelection: onTokenSelection,
-            onSelectionCleared: onSelectionCleared
-        )
-    }
-
-    private var resolvedAttributedText: NSAttributedString {
-        furiganaText ?? NSAttributedString(string: text)
-    }
-
-    private var tokenColorOverlays: [RubyText.TokenOverlay] {
-        guard let spans = furiganaSpans, (alternateTokenColors || highlightUnknownTokens) else { return [] }
-        let backingString = furiganaText?.string ?? text
-        let textStorage = backingString as NSString
-        var overlays: [RubyText.TokenOverlay] = []
-
-        if alternateTokenColors {
-            let palette = tokenPalette.filter { $0.cgColor.alpha > 0 }
-            if palette.isEmpty == false {
-                let coverageRanges = Self.coverageRanges(from: spans, textStorage: textStorage)
-                overlays.reserveCapacity(coverageRanges.count)
-                for (index, range) in coverageRanges.enumerated() {
-                    let color = palette[index % palette.count]
-                    overlays.append(RubyText.TokenOverlay(range: range, color: color))
-                }
-            }
-        }
-
-        if highlightUnknownTokens {
-            let unknowns = Self.unknownTokenOverlays(from: spans, textStorage: textStorage, color: unknownTokenColor)
-            overlays.append(contentsOf: unknowns)
-        }
-
-        return overlays
-    }
-
-    private static func coverageRanges(from spans: [AnnotatedSpan], textStorage: NSString) -> [NSRange] {
-        let textLength = textStorage.length
-        guard textLength > 0 else { return [] }
-        let bounds = NSRange(location: 0, length: textLength)
-        let sorted = spans
-            .map { $0.span.range }
-            .filter { $0.location != NSNotFound && $0.length > 0 }
-            .map { NSIntersectionRange($0, bounds) }
-            .filter { $0.length > 0 }
-            .sorted { $0.location < $1.location }
-
-        var ranges: [NSRange] = []
-        ranges.reserveCapacity(sorted.count + 4)
-        var cursor = 0
-        for range in sorted {
-            if range.location > cursor {
-                let gap = NSRange(location: cursor, length: range.location - cursor)
-                if containsNonWhitespace(in: gap, textStorage: textStorage) {
-                    ranges.append(gap)
-                }
-            }
-            ranges.append(range)
-            cursor = max(cursor, NSMaxRange(range))
-        }
-        if cursor < textLength {
-            let trailing = NSRange(location: cursor, length: textLength - cursor)
-            if containsNonWhitespace(in: trailing, textStorage: textStorage) {
-                ranges.append(trailing)
-            }
-        }
-        return ranges
-    }
-
-    private static func containsNonWhitespace(in range: NSRange, textStorage: NSString) -> Bool {
-        guard range.length > 0 else { return false }
-        let substring = textStorage.substring(with: range)
-        return substring.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-    }
-    
-    private static func clampRange(_ range: NSRange, length: Int) -> NSRange? {
-        guard length > 0 else { return nil }
-        let bounds = NSRange(location: 0, length: length)
-        let clamped = NSIntersectionRange(range, bounds)
-        return clamped.length > 0 ? clamped : nil
-    }
-
-    private static func unknownTokenOverlays(from spans: [AnnotatedSpan], textStorage: NSString, color: UIColor) -> [RubyText.TokenOverlay] {
-        guard textStorage.length > 0 else { return [] }
-        var overlays: [RubyText.TokenOverlay] = []
-        overlays.reserveCapacity(spans.count)
-        for span in spans where span.readingKana == nil {
-            guard let clamped = Self.clampRange(span.span.range, length: textStorage.length) else { continue }
-            if containsNonWhitespace(in: clamped, textStorage: textStorage) == false { continue }
-            overlays.append(RubyText.TokenOverlay(range: clamped, color: color))
-        }
-        return overlays
-    }
-}
-
 private struct TokenListItem: Identifiable {
     let spanIndex: Int
     let range: NSRange
     let surface: String
     let reading: String?
+    let displayReading: String?
     let isAlreadySaved: Bool
 
     var id: Int { spanIndex }
@@ -1480,6 +1327,7 @@ private struct TokenListPanel: View {
     let isEditing: Bool
     let selectedRange: NSRange?
     let onSelect: (Int) -> Void
+    let onGoTo: (Int) -> Void
     let onAdd: (Int) -> Void
     let onMergeLeft: (Int) -> Void
     let onMergeRight: (Int) -> Void
@@ -1488,11 +1336,8 @@ private struct TokenListPanel: View {
     let canMergeRight: (Int) -> Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text("Detected Tokens")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
                 Spacer()
                 if isReady == false, isEditing == false {
                     ProgressView()
@@ -1518,6 +1363,7 @@ private struct TokenListPanel: View {
                                 item: item,
                                 isSelected: isItemSelected(item),
                                 onSelect: { onSelect(item.spanIndex) },
+                                onGoTo: { onGoTo(item.spanIndex) },
                                 onAdd: { onAdd(item.spanIndex) },
                                 onMergeLeft: { onMergeLeft(item.spanIndex) },
                                 onMergeRight: { onMergeRight(item.spanIndex) },
@@ -1529,11 +1375,12 @@ private struct TokenListPanel: View {
                     }
                     .padding(.vertical, 4)
                 }
-                .frame(maxHeight: 240)
+                .frame(maxHeight: .infinity, alignment: .top)
             }
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func isItemSelected(_ item: TokenListItem) -> Bool {
@@ -1545,6 +1392,7 @@ private struct TokenListPanel: View {
         let item: TokenListItem
         let isSelected: Bool
         let onSelect: () -> Void
+        let onGoTo: () -> Void
         let onAdd: () -> Void
         let onMergeLeft: () -> Void
         let onMergeRight: () -> Void
@@ -1558,12 +1406,14 @@ private struct TokenListPanel: View {
                     Text(item.surface)
                         .font(.body)
                         .lineLimit(1)
-                    if let reading = item.reading {
+                    if let reading = readingText {
                         Text(reading)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onSelect)
                 Spacer(minLength: 12)
                 Button(action: onAdd) {
                     if item.isAlreadySaved {
@@ -1585,13 +1435,12 @@ private struct TokenListPanel: View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(.secondarySystemBackground))
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
-            )
             .contentShape(Rectangle())
-            .onTapGesture(perform: onSelect)
             .contextMenu {
+                Button(action: onGoTo) {
+                    Label("Go to in Note", systemImage: "text.magnifyingglass")
+                }
+
                 Button(action: onMergeLeft) {
                     Label("Merge Left", systemImage: "arrow.left.to.line")
                 }
@@ -1607,6 +1456,30 @@ private struct TokenListPanel: View {
                 }
                 .disabled(item.canSplit == false)
             }
+        }
+
+        private var readingText: String? {
+            guard let reading = item.displayReading?.trimmingCharacters(in: .whitespacesAndNewlines), reading.isEmpty == false else { return nil }
+            if Self.isKanaOnly(item.surface) {
+                return nil
+            }
+            return reading
+        }
+
+        private static func isKanaOnly(_ text: String) -> Bool {
+            let scalars = text.unicodeScalars
+            guard scalars.isEmpty == false else { return false }
+            return scalars.allSatisfy { scalar in
+                isHiragana(scalar) || isKatakana(scalar)
+            }
+        }
+
+        private static func isHiragana(_ scalar: UnicodeScalar) -> Bool {
+            (0x3040...0x309F).contains(Int(scalar.value))
+        }
+
+        private static func isKatakana(_ scalar: UnicodeScalar) -> Bool {
+            (0x30A0...0x30FF).contains(Int(scalar.value)) || Int(scalar.value) == 0xFF70
         }
     }
 }

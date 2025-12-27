@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 import OSLog
 
-// MARK: - Logging Helper
+    // MARK: - Logging Helper
 @inline(__always)
 func Log(_ message: @autoclosure () -> String,
          file: StaticString = #fileID,
@@ -32,24 +32,19 @@ struct RubyText: UIViewRepresentable {
     var annotatedSpans: [AnnotatedSpan] = []
     var selectedRange: NSRange? = nil
     var customizedRanges: [NSRange] = []
-    var onTokenSelection: ((SelectionPayload) -> Void)? = nil
-    var onSelectionCleared: (() -> Void)? = nil
-
+    var enableTapInspection: Bool = true
+    
     private static let defaultInsets = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
-
+    
     struct TokenOverlay: Equatable {
         let range: NSRange
         let color: UIColor
-
+        
         static func == (lhs: TokenOverlay, rhs: TokenOverlay) -> Bool {
             lhs.range == rhs.range && lhs.color.isEqual(rhs.color)
         }
     }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
+    
     func makeUIView(context: Context) -> TokenOverlayTextView {
         let textView = TokenOverlayTextView()
         textView.isEditable = false
@@ -67,25 +62,23 @@ struct RubyText: UIViewRepresentable {
         textView.setContentCompressionResistancePriority(.required, for: .vertical)
         textView.setContentHuggingPriority(.defaultHigh, for: .vertical)
         textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        textView.delegate = context.coordinator
-        textView.selectionDelegate = context.coordinator
+        textView.isTapInspectionEnabled = enableTapInspection
         return textView
     }
-
+    
     func updateUIView(_ uiView: TokenOverlayTextView, context: Context) {
-        context.coordinator.parent = self
         uiView.font = UIFont.systemFont(ofSize: fontSize)
         uiView.textColor = .label
         uiView.tintColor = .clear
-
-        // Compute extra headroom for ruby above the baseline.
-        // Tune the multiplier as needed; 0.6 is a reasonable starting point.
+        
+            // Compute extra headroom for ruby above the baseline.
+            // Tune the multiplier as needed; 0.6 is a reasonable starting point.
         let rubyHeadroom = max(0, fontSize * 0.6 + extraGap)
-
+        
         var insets = textInsets
         insets.top = max(insets.top, rubyHeadroom)
         uiView.textContainerInset = insets
-
+        
         let mutable = NSMutableAttributedString(attributedString: attributed)
         let fullRange = NSRange(location: 0, length: mutable.length)
         let paragraph = NSMutableParagraphStyle()
@@ -97,26 +90,27 @@ struct RubyText: UIViewRepresentable {
         mutable.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
         mutable.addAttribute(.foregroundColor, value: UIColor.label, range: fullRange)
         mutable.addAttribute(.font, value: baseFont, range: fullRange)
-
+        
         if tokenOverlays.isEmpty == false {
             RubyText.applyTokenColors(tokenOverlays, to: mutable)
         }
-
+        
         if customizedRanges.isEmpty == false {
             RubyText.applyCustomizationHighlights(customizedRanges, to: mutable)
         }
-
+        
         let processed = RubyText.applyAnnotationVisibility(annotationVisibility, to: mutable)
-        uiView.attributedText = processed
+        uiView.applyCanonicalAttributedText(processed)
         uiView.annotatedSpans = annotatedSpans
         uiView.selectionHighlightRange = selectedRange
+        uiView.isTapInspectionEnabled = enableTapInspection
         
-        // Help the view expand vertically rather than compress
+            // Help the view expand vertically rather than compress
         uiView.setContentCompressionResistancePriority(.required, for: .vertical)
         uiView.setContentHuggingPriority(.defaultLow, for: .horizontal)
         uiView.setContentHuggingPriority(.defaultHigh, for: .vertical)
     }
-
+    
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: TokenOverlayTextView, context: Context) -> CGSize {
         let proposedWidth = proposal.width
         let contextScreenWidth: CGFloat? = uiView.window?.windowScene?.screen.bounds.width
@@ -124,37 +118,37 @@ struct RubyText: UIViewRepresentable {
         let baseWidth = proposedWidth ?? fallbackWidth
         let insets = uiView.textContainerInset
         let availableWidth = max(0, baseWidth - insets.left - insets.right)
-
-        // Drive the text container for measurement
+        
+            // Drive the text container for measurement
         uiView.textContainer.size = CGSize(width: availableWidth, height: .greatestFiniteMagnitude)
         uiView.textContainer.widthTracksTextView = false
         uiView.layoutManager.ensureLayout(for: uiView.textContainer)
         let used = uiView.layoutManager.usedRect(for: uiView.textContainer)
         var measuredHeight = ceil(used.height) + insets.top + insets.bottom
-
-        // Fallback if TextKit reports 0 height but we have text
+        
+            // Fallback if TextKit reports 0 height but we have text
         if measuredHeight <= 0, (uiView.attributedText?.length ?? 0) > 0 {
             let fitting = uiView.sizeThatFits(CGSize(width: baseWidth, height: .greatestFiniteMagnitude))
             measuredHeight = max(measuredHeight, fitting.height)
         }
-
-        // Restore normal behavior
+        
+            // Restore normal behavior
         uiView.textContainer.widthTracksTextView = true
         return CGSize(width: baseWidth, height: measuredHeight)
     }
-
+    
     private func selectionHighlightInsets(for font: UIFont) -> UIEdgeInsets {
         let spacing = max(0, extraGap)
         let multiplier = max(0.8, lineHeightMultiple)
         let lineHeight = font.lineHeight
         let extraFromMultiplier = max(0, lineHeight * (multiplier - 1))
         let bottom = spacing + extraFromMultiplier
-        // let rubyHeadroom = max(0, font.pointSize * 0.6 + spacing)
+            // let rubyHeadroom = max(0, font.pointSize * 0.6 + spacing)
         return UIEdgeInsets(top: 0, left: 0, bottom: bottom, right: 0)
     }
-
+    
     private static let coreTextRubyAttribute = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
-
+    
     private static func applyAnnotationVisibility(
         _ visibility: RubyAnnotationVisibility,
         to attributedString: NSMutableAttributedString
@@ -170,7 +164,7 @@ struct RubyText: UIViewRepresentable {
             return removeAnnotationRuns(from: attributedString)
         }
     }
-
+    
     private static func annotationRanges(in attributedString: NSAttributedString) -> [NSRange] {
         guard attributedString.length > 0 else { return [] }
         var ranges: [NSRange] = []
@@ -183,13 +177,13 @@ struct RubyText: UIViewRepresentable {
         }
         return ranges
     }
-
+    
     private static func hideAnnotationRuns(in attributedString: NSMutableAttributedString) {
         for range in annotationRanges(in: attributedString) {
             attributedString.removeAttribute(coreTextRubyAttribute, range: range)
         }
     }
-
+    
     private static func removeAnnotationRuns(from attributedString: NSMutableAttributedString) -> NSAttributedString {
         let ranges = annotationRanges(in: attributedString)
         guard ranges.isEmpty == false else { return attributedString }
@@ -199,7 +193,7 @@ struct RubyText: UIViewRepresentable {
         }
         return attributedString
     }
-
+    
     private static func applyTokenColors(
         _ overlays: [TokenOverlay],
         to attributedString: NSMutableAttributedString
@@ -207,22 +201,22 @@ struct RubyText: UIViewRepresentable {
         guard attributedString.length > 0 else { return }
         let length = attributedString.length
         for overlay in overlays {
-
+            
             guard overlay.range.location != NSNotFound, overlay.range.length > 0 else { continue }
             guard NSMaxRange(overlay.range) <= length else { continue }
             attributedString.addAttribute(.foregroundColor, value: overlay.color, range: overlay.range)
         }
     }
-
+    
     private static func applyCustomizationHighlights(_ ranges: [NSRange], to attributedString: NSMutableAttributedString) {
         guard attributedString.length > 0 else { return }
         for range in ranges {
             guard clampRange(range, length: attributedString.length) != nil else { continue }
-            // attributedString.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: clamped)
-            // attributedString.addAttribute(.underlineColor, value: UIColor.systemTeal, range: clamped)
+                // attributedString.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: clamped)
+                // attributedString.addAttribute(.underlineColor, value: UIColor.systemTeal, range: clamped)
         }
     }
-
+    
     private static func clampRange(_ range: NSRange, length: Int) -> NSRange? {
         guard range.location != NSNotFound, range.length > 0 else { return nil }
         guard length > 0 else { return nil }
@@ -232,41 +226,10 @@ struct RubyText: UIViewRepresentable {
         guard clampedLength > 0 else { return nil }
         return NSRange(location: range.location, length: clampedLength)
     }
-
-    struct SelectionPayload: Equatable {
-        let span: AnnotatedSpan
-        let index: Int
-        let range: NSRange
-    }
-
-    final class Coordinator: NSObject, UITextViewDelegate, TokenOverlaySelectionDelegate {
-        var parent: RubyText
-
-        init(parent: RubyText) {
-            self.parent = parent
-        }
-
-        func tokenOverlayTextView(_ view: TokenOverlayTextView, didSelect payload: RubyText.SelectionPayload) {
-            DispatchQueue.main.async { [weak self] in
-                self?.parent.onTokenSelection?(payload)
-            }
-        }
-
-        func tokenOverlayTextViewDidClearSelection(_ view: TokenOverlayTextView) {
-            DispatchQueue.main.async { [weak self] in
-                self?.parent.onSelectionCleared?()
-            }
-        }
-    }
-}
-
-protocol TokenOverlaySelectionDelegate: AnyObject {
-    func tokenOverlayTextView(_ view: TokenOverlayTextView, didSelect payload: RubyText.SelectionPayload)
-    func tokenOverlayTextViewDidClearSelection(_ view: TokenOverlayTextView)
+    
 }
 
 final class TokenOverlayTextView: UITextView {
-    weak var selectionDelegate: TokenOverlaySelectionDelegate?
     var annotatedSpans: [AnnotatedSpan] = []
     var selectionHighlightRange: NSRange? {
         didSet {
@@ -280,39 +243,42 @@ final class TokenOverlayTextView: UITextView {
             }
         }
     }
+    var isTapInspectionEnabled: Bool = true {
+        didSet {
+            guard oldValue != isTapInspectionEnabled else { return }
+            updateInspectionGestureState()
+        }
+    }
+    
     private static let eventLogger = DiagnosticsLogging.logger(.tokenOverlayEvents)
     private static let geometryLogger = DiagnosticsLogging.logger(.tokenOverlayGeometry)
-    private static let whitespaceSet: CharacterSet = {
-        var set = CharacterSet.whitespacesAndNewlines
-        set.formUnion(CharacterSet(charactersIn: "\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{200B}"))
-        return set
-    }()
-
+    
     private static func logEvent(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
         eventLogger.debug("[\(file):\(line)] \(function): \(message, privacy: .public)")
     }
-
+    
     private static func logGeometry(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
         geometryLogger.debug("[\(file):\(line)] \(function): \(message, privacy: .public)")
     }
-    private lazy var tapRecognizer: UITapGestureRecognizer = {
-        let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleTokenTap(_:)))
+    private lazy var inspectionTapRecognizer: UITapGestureRecognizer = {
+        let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleInspectionTap(_:)))
         recognizer.cancelsTouchesInView = false
         return recognizer
     }()
-    // 1) Replace CAShapeLayer with bezier path storage
+        // 1) Replace CAShapeLayer with bezier path storage
     private var selectionHighlightPath: UIBezierPath? = nil
-
+    private var canonicalAttributedText: NSAttributedString?
+    
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
         sharedInit()
     }
-
+    
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         sharedInit()
     }
-
+    
     private func sharedInit() {
         isEditable = false
         isSelectable = false
@@ -324,26 +290,26 @@ final class TokenOverlayTextView: UITextView {
         layer.masksToBounds = false
         showsVerticalScrollIndicator = false
         showsHorizontalScrollIndicator = false
-        addGestureRecognizer(tapRecognizer)
-        // 2) Remove layer setup for selectionHighlightLayer
-        // Removed these lines:
-        // selectionHighlightLayer.fillColor = UIColor.systemYellow.withAlphaComponent(0.22).cgColor
-        // selectionHighlightLayer.zPosition = -1
-        // layer.insertSublayer(selectionHighlightLayer, at: 0)
+            // 2) Remove layer setup for selectionHighlightLayer
+            // Removed these lines:
+            // selectionHighlightLayer.fillColor = UIColor.systemYellow.withAlphaComponent(0.22).cgColor
+            // selectionHighlightLayer.zPosition = -1
+            // layer.insertSublayer(selectionHighlightLayer, at: 0)
+        updateInspectionGestureState()
     }
-
+    
     override var canBecomeFirstResponder: Bool {
         false
     }
-
-    // 3) Replace layoutSubviews body
+    
+        // 3) Replace layoutSubviews body
     override func layoutSubviews() {
         super.layoutSubviews()
         updateSelectionHighlightPath()
         setNeedsDisplay()
     }
-
-    // 5) Add draw override to paint highlight beneath text
+    
+        // 5) Add draw override to paint highlight beneath text
     override func draw(_ rect: CGRect) {
         if let path = selectionHighlightPath {
             let ctx = UIGraphicsGetCurrentContext()
@@ -354,176 +320,34 @@ final class TokenOverlayTextView: UITextView {
         }
         super.draw(rect)
     }
-
-    func selectionPayload(forExactRange range: NSRange) -> RubyText.SelectionPayload? {
-        guard range.location != NSNotFound, range.length > 0 else { return nil }
-        guard let match = spanMatching(range: range) else { return nil }
-        return RubyText.SelectionPayload(span: match.span, index: match.index, range: match.span.span.range)
+    
+    func applyCanonicalAttributedText(_ text: NSAttributedString) {
+        let snapshot = NSAttributedString(attributedString: text)
+        canonicalAttributedText = snapshot
+        replaceDisplayedText(with: snapshot)
     }
-
-    private func spanMatching(range: NSRange) -> (span: AnnotatedSpan, index: Int)? {
-        for (index, span) in annotatedSpans.enumerated() {
-            if span.span.range.location == range.location && span.span.range.length == range.length {
-                return (span, index)
-            }
+    
+    private func restoreCanonicalAttributedTextIfNeeded() {
+        guard let canonical = canonicalAttributedText else { return }
+        replaceDisplayedText(with: canonical)
+    }
+    
+    private func replaceDisplayedText(with text: NSAttributedString) {
+        if textStorage.length > 0 {
+            textStorage.beginEditing()
+            textStorage.setAttributedString(text)
+            textStorage.endEditing()
+        } else {
+            textStorage.setAttributedString(text)
         }
-        return nil
+        attributedText = text
+        setNeedsDisplay()
     }
-
-    private func spanContaining(index: Int) -> (span: AnnotatedSpan, offset: Int)? {
-        annotatedSpans.enumerated().first { _, annotated in
-            NSLocationInRange(index, annotated.span.range)
-        }.map { (span: $0.element, offset: $0.offset) }
-    }
-
-    private func spanBefore(index: Int) -> (span: AnnotatedSpan, offset: Int)? {
-        annotatedSpans.enumerated().last { _, annotated in
-            NSMaxRange(annotated.span.range) <= index
-        }.map { (span: $0.element, offset: $0.offset) }
-    }
-
-    private func spanAfter(index: Int) -> (span: AnnotatedSpan, offset: Int)? {
-        annotatedSpans.enumerated().first { _, annotated in
-            annotated.span.range.location > index
-        }.map { (span: $0.element, offset: $0.offset) }
-    }
-
-    private func whitespaceOnly(range: NSRange, in string: NSString) -> Bool {
-        guard range.length > 0 else { return true }
-        guard range.location >= 0, NSMaxRange(range) <= string.length else { return false }
-        for idx in range.location..<NSMaxRange(range) {
-            let scalar = UnicodeScalar(string.character(at: idx))
-            if scalar == nil || TokenOverlayTextView.whitespaceSet.contains(scalar!) == false {
-                return false
-            }
-        }
-        return true
-    }
-
-    private func isAnnotation(at index: Int) -> Bool {
-        guard index >= 0, index < textStorage.length else { return false }
-        let value = textStorage.attribute(.rubyAnnotation, at: index, effectiveRange: nil) as? Bool
-        return value == true
-    }
-
-    private func baseCharacterIndex(around index: Int) -> Int? {
-        guard textStorage.length > 0 else { return nil }
-        // Prefer nearest non-annotation character to the left, then to the right
-        var i = index
-        while i >= 0 {
-            if isAnnotation(at: i) == false { return i }
-            i -= 1
-        }
-        i = index
-        while i < textStorage.length {
-            if isAnnotation(at: i) == false { return i }
-            i += 1
-        }
-        return nil
-    }
-
-    private func whitespaceOrAnnotationOnly(range: NSRange) -> Bool {
-        guard range.length > 0 else { return true }
-        guard range.location >= 0, NSMaxRange(range) <= textStorage.length else { return false }
-        for idx in range.location..<NSMaxRange(range) {
-            if isAnnotation(at: idx) { continue }
-            let scalar = UnicodeScalar((textStorage.string as NSString).character(at: idx))
-            if scalar == nil || TokenOverlayTextView.whitespaceSet.contains(scalar!) == false {
-                return false
-            }
-        }
-        return true
-    }
-
-    private func snapSpan(near index: Int) -> (span: AnnotatedSpan, offset: Int)? {
-        guard textStorage.length > 0 else { return nil }
-        var forwardCandidate: (span: AnnotatedSpan, offset: Int)?
-        if let ahead = spanAfter(index: index) {
-            let distance = max(0, min(ahead.span.range.location - index, textStorage.length - index))
-            let whitespaceRange = NSRange(location: index, length: distance)
-            if whitespaceOrAnnotationOnly(range: whitespaceRange) {
-                forwardCandidate = ahead
-            }
-        }
-        if let forwardCandidate { return forwardCandidate }
-        if let behind = spanBefore(index: index) {
-            let spanEnd = NSMaxRange(behind.span.range)
-            let length = max(0, min(index - spanEnd, textStorage.length - spanEnd))
-            let whitespaceRange = NSRange(location: spanEnd, length: length)
-            if whitespaceOrAnnotationOnly(range: whitespaceRange) {
-                return behind
-            }
-        }
-        return nil
-    }
-
-    @objc private func handleTokenTap(_ gesture: UITapGestureRecognizer) {
-        guard gesture.state == .ended else { return }
-        let tapPoint = gesture.location(in: self)
-
-        Self.logEvent("Tap at x=\(tapPoint.x) y=\(tapPoint.y)")
-        guard let index = characterIndex(at: tapPoint) else {
-            Self.logEvent("Tap ignored: no glyph resolved; clearing selection")
-            selectionHighlightRange = nil
-            selectionDelegate?.tokenOverlayTextViewDidClearSelection(self)
-            return
-        }
-
-        Self.logEvent("index=\(index)")
-        var resolvedIndex = index
-        if isAnnotation(at: index), let base = baseCharacterIndex(around: index) {
-            resolvedIndex = base
-            Self.logEvent("Resolved annotation tap to base index=\(resolvedIndex)")
-        }
-        if let match = spanContaining(index: resolvedIndex) {
-            deliverSelection(match.span, offset: match.offset)
-            return
-        }
-
-        if let snapped = snapSpan(near: resolvedIndex) {
-            Self.logEvent("Snapped selection to span index=\(snapped.offset)")
-            deliverSelection(snapped.span, offset: snapped.offset)
-            return
-        }
-
-        self.selectionHighlightRange = nil
-        Self.logEvent("Cleared selection at index=\(index)")
-        selectionDelegate?.tokenOverlayTextViewDidClearSelection(self)
-    }
-
-    private func deliverSelection(_ span: AnnotatedSpan, offset: Int) {
-        let spanRange = span.range
-        self.selectionHighlightRange = spanRange
-        let payload = RubyText.SelectionPayload(span: span, index: offset, range: spanRange)
-        Self.logEvent("Selected span index=\(offset) range=\(spanRange.location)-\(NSMaxRange(spanRange))")
-        selectionDelegate?.tokenOverlayTextView(self, didSelect: payload)
-    }
-
-    private func characterIndex(at point: CGPoint) -> Int? {
-        guard textStorage.length > 0 else { return nil }
-        layoutManager.ensureLayout(for: textContainer)
-
-        var location = point
-        location.x -= textContainerInset.left
-        location.y -= textContainerInset.top
-        location.x += contentOffset.x
-        location.y += contentOffset.y
-
-        var fraction: CGFloat = 0
-        let glyphIndex = layoutManager.glyphIndex(for: location, in: textContainer, fractionOfDistanceThroughGlyph: &fraction)
-        var lineRange = NSRange(location: 0, length: 0)
-        let lineRect = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphIndex, effectiveRange: &lineRange, withoutAdditionalLayout: true)
-        let paddedRect = lineRect.insetBy(dx: -4, dy: -4)
-        guard paddedRect.contains(location) else { return nil }
-        let characterIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
-        guard characterIndex < textStorage.length else { return nil }
-        return characterIndex
-    }
-
-    // 4) Modify updateSelectionHighlightPath to store path instead of assigning to layer
+    
+        // 4) Modify updateSelectionHighlightPath to store path instead of assigning to layer
     private func updateSelectionHighlightPath() {
         selectionHighlightPath = nil
-
+        
         guard let range = selectionHighlightRange,
               range.location != NSNotFound,
               range.length > 0,
@@ -531,18 +355,18 @@ final class TokenOverlayTextView: UITextView {
             selectionHighlightPath = nil
             return
         }
-
+        
         layoutManager.ensureLayout(for: textContainer)
         let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
         guard glyphRange.length > 0 else {
             selectionHighlightPath = nil
             return
         }
-
+        
         let path = UIBezierPath()
         var loggedRectCount = 0
         Self.logEvent("Highlight range location=\(range.location) length=\(range.length) glyphLength=\(glyphRange.length)")
-
+        
         layoutManager.enumerateEnclosingRects(
             forGlyphRange: glyphRange,
             withinSelectedGlyphRange: glyphRange,
@@ -559,23 +383,20 @@ final class TokenOverlayTextView: UITextView {
                 highlightRect.size.height -= (insets.top + insets.bottom)
             }
             guard highlightRect.width > 0, highlightRect.height > 0 else { return }
-
-            // Constrain highlight to base text line height to avoid overlapping ruby
+            
+                // Constrain highlight to base text line height to avoid overlapping ruby
             if let baseFont = self.font {
                 let baseHeight = baseFont.lineHeight
                 if baseHeight > 0 {
                     let desiredHeight = min(highlightRect.height, baseHeight)
-                    // Anchor to the baseline area: keep the bottom of the rect and reduce height from the top
+                        // Anchor to the baseline area: keep the bottom of the rect and reduce height from the top
                     highlightRect.origin.y = highlightRect.maxY - desiredHeight
                     highlightRect.size.height = desiredHeight
                 }
             }
-
-            let offsetX = self.textContainerInset.left - self.contentOffset.x
-            let offsetY = self.textContainerInset.top - self.contentOffset.y
-            highlightRect = highlightRect.offsetBy(dx: offsetX, dy: offsetY)
+            
             path.append(UIBezierPath(roundedRect: highlightRect, cornerRadius: 4))
-
+            
             if loggedRectCount < 3 {
                 var textRectInLayer = textRect
                 if insets != .zero {
@@ -584,14 +405,146 @@ final class TokenOverlayTextView: UITextView {
                     textRectInLayer.size.width -= (insets.left + insets.right)
                     textRectInLayer.size.height -= (insets.top + insets.bottom)
                 }
-                textRectInLayer = textRectInLayer.offsetBy(dx: offsetX, dy: offsetY)
                 Self.logGeometry("Selection #\(loggedRectCount) textOrigin=(\(textRectInLayer.origin.x), \(textRectInLayer.origin.y)) textSize=(\(textRectInLayer.width), \(textRectInLayer.height)) highlightOrigin=(\(highlightRect.origin.x), \(highlightRect.origin.y)) highlightSize=(\(highlightRect.width), \(highlightRect.height))")
                 loggedRectCount += 1
             }
         }
-
+        
         selectionHighlightPath = path.isEmpty ? nil : path
     }
+    
+    private func updateInspectionGestureState() {
+        if isTapInspectionEnabled {
+            let alreadyAdded = gestureRecognizers?.contains(where: { $0 === inspectionTapRecognizer }) ?? false
+            if alreadyAdded == false {
+                addGestureRecognizer(inspectionTapRecognizer)
+            }
+        } else {
+            let alreadyAdded = gestureRecognizers?.contains(where: { $0 === inspectionTapRecognizer }) ?? false
+            if alreadyAdded {
+                removeGestureRecognizer(inspectionTapRecognizer)
+            }
+        }
+    }
+    
+    @objc
+    private func handleInspectionTap(_ recognizer: UITapGestureRecognizer) {
+        guard isTapInspectionEnabled, recognizer.state == .ended else { return }
+        restoreCanonicalAttributedTextIfNeeded()
+        let tapPoint = recognizer.location(in: self)
+        Self.logEvent("Inspect tap at x=\(tapPoint.x) y=\(tapPoint.y)")
+        
+        guard let rawIndex = utf16IndexForTap(at: tapPoint) else {
+            Self.logEvent("Inspect tap ignored: no glyph resolved")
+            return
+        }
+        
+        guard let resolvedIndex = resolvedTextIndex(from: rawIndex) else {
+            Self.logEvent("Inspect tap unresolved: no base character near index=\(rawIndex)")
+            return
+        }
+        
+        guard let details = inspectionDetails(forUTF16Index: resolvedIndex) else {
+            Self.logEvent("Inspect tap unresolved: failed to extract character at index=\(resolvedIndex)")
+            return
+        }
+        
+        let charDescription = formattedCharacterDescription(details.character)
+        let rangeDescription = "[\(details.utf16Range.location)..<\(NSMaxRange(details.utf16Range))]"
+        let scalarsDescription = details.scalars.joined(separator: ", ")
+        let indexSummary = rawIndex == resolvedIndex ? "\(resolvedIndex)" : "\(resolvedIndex) (resolved from \(rawIndex))"
+        
+        Self.logEvent(
+            "Inspect tap char=\(charDescription) utf16Index=\(indexSummary) utf16Range=\(rangeDescription) scalars=[\(scalarsDescription)]"
+        )
+        restoreCanonicalAttributedTextIfNeeded()
+    }
+    
+    private func utf16IndexForTap(at point: CGPoint) -> Int? {
+        guard textStorage.length > 0 else { return nil }
+
+        layoutManager.ensureLayout(for: textContainer)
+
+        var location = point
+        location.x -= textContainerInset.left
+        location.y -= textContainerInset.top
+        location.x += contentOffset.x
+        location.y += contentOffset.y
+
+        var fraction: CGFloat = 0
+        let glyphIndex = layoutManager.glyphIndex(
+            for: location,
+            in: textContainer,
+            fractionOfDistanceThroughGlyph: &fraction
+        )
+
+        guard glyphIndex < layoutManager.numberOfGlyphs else { return nil }
+
+        var lineRange = NSRange(location: 0, length: 0)
+        let lineRect = layoutManager.lineFragmentUsedRect(
+            forGlyphAt: glyphIndex,
+            effectiveRange: &lineRange,
+            withoutAdditionalLayout: true
+        )
+        let toleranceRect = lineRect.insetBy(dx: -6, dy: -6)
+        guard toleranceRect.contains(location) else {
+            Self.logEvent("Hit-test rejected: tap outside line rect for glyph=\(glyphIndex)")
+            return nil
+        }
+
+        let characterIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        guard characterIndex >= 0, characterIndex < textStorage.length else { return nil }
+
+        Self.logEvent("Hit-test success glyphIndex=\(glyphIndex) utf16Index=\(characterIndex)")
+        return characterIndex
+    }
+    
+    private func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
+        if rect.contains(point) { return 0 }
+        let dx: CGFloat
+        if point.x < rect.minX { dx = rect.minX - point.x }
+        else if point.x > rect.maxX { dx = point.x - rect.maxX }
+        else { dx = 0 }
+        
+        let dy: CGFloat
+        if point.y < rect.minY { dy = rect.minY - point.y }
+        else if point.y > rect.maxY { dy = point.y - rect.maxY }
+        else { dy = 0 }
+        
+        return hypot(dx, dy)
+    }
+    
+    private func resolvedTextIndex(from candidate: Int) -> Int? {
+        guard textStorage.length > 0 else { return nil }
+        guard candidate >= 0, candidate < textStorage.length else { return nil }
+        return candidate
+    }
+    
+    private func inspectionDetails(forUTF16Index index: Int) -> (character: Character, utf16Range: NSRange, scalars: [String])? {
+        guard index >= 0, index < textStorage.length else { return nil }
+        let backingString = textStorage.string
+        guard backingString.isEmpty == false else { return nil }
+        
+        let utf16View = backingString.utf16
+        guard let startUTF16 = utf16View.index(utf16View.startIndex, offsetBy: index, limitedBy: utf16View.endIndex) else {
+            return nil
+        }
+        guard let startIndex = String.Index(startUTF16, within: backingString) else { return nil }
+        let character = backingString[startIndex]
+        let nextIndex = backingString.index(after: startIndex)
+        guard let endUTF16 = nextIndex.samePosition(in: utf16View) else { return nil }
+        let length = utf16View.distance(from: startUTF16, to: endUTF16)
+        let nsRange = NSRange(location: index, length: length)
+        let scalars = character.unicodeScalars.map { scalar in
+            String(format: "U+%04X", scalar.value)
+        }
+        return (character, nsRange, scalars)
+    }
+    
+    private func formattedCharacterDescription(_ character: Character) -> String {
+        character.debugDescription
+    }
+    
 }
 
 extension AnnotatedSpan {
@@ -599,14 +552,14 @@ extension AnnotatedSpan {
 }
 
 enum RubyAnnotationHelper {
-    /// Marks the specified range as a ruby annotation run.
+        /// Marks the specified range as a ruby annotation run.
     static func markAnnotation(in attributedString: NSMutableAttributedString, range: NSRange) {
         guard range.location != NSNotFound, range.length > 0 else { return }
         guard NSMaxRange(range) <= attributedString.length else { return }
         attributedString.addAttribute(.rubyAnnotation, value: true, range: range)
     }
-
-    /// Creates a standalone ruby annotation attributed string segment.
+    
+        /// Creates a standalone ruby annotation attributed string segment.
     static func annotationSegment(
         _ text: String,
         attributes: [NSAttributedString.Key: Any]? = nil

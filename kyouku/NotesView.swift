@@ -66,8 +66,9 @@ struct NotesView: View {
                                 Label("Duplicate", systemImage: "plus.square.on.square")
                             }
                             Button {
-                                // Reset custom spans (reading overrides) for this note
-                                NotificationCenter.default.post(name: .readingOverridesRequestRemoveAllForNote, object: nil, userInfo: ["noteID": note.id])
+                                router.pendingResetNoteID = note.id
+                                router.noteToOpen = note
+                                router.selectedTab = .paste
                             } label: {
                                 Label("Reset Custom Spans", systemImage: "arrow.counterclockwise")
                             }
@@ -210,6 +211,6 @@ struct NotesView: View {
 }
 
 extension Notification.Name {
-    static let readingOverridesRequestRemoveAllForNote = Notification.Name("readingOverridesRequestRemoveAllForNote")
+
 }
 

@@ -17,6 +17,8 @@ struct TokenActionPanel: View {
     let isSelectionCustomized: Bool
     let enableDragToDismiss: Bool
     let embedInMaterialBackground: Bool
+    let focusSplitMenu: Bool
+    let onSplitFocusConsumed: () -> Void
     @State private var highlightedResultIndex = 0
     @GestureState private var dragOffset: CGFloat = 0
     @State private var isSplitMenuVisible = false
@@ -24,6 +26,44 @@ struct TokenActionPanel: View {
     @State private var dictionaryContentHeight: CGFloat = 0
 
     private let dismissTranslationThreshold: CGFloat = 80
+
+    init(
+        selection: TokenSelectionContext,
+        lookup: DictionaryLookupViewModel,
+        preferredReading: String?,
+        canMergePrevious: Bool,
+        canMergeNext: Bool,
+        onDismiss: @escaping () -> Void,
+        onDefine: @escaping (DictionaryEntry) -> Void,
+        onUseReading: @escaping (DictionaryEntry) -> Void,
+        onMergePrevious: @escaping () -> Void,
+        onMergeNext: @escaping () -> Void,
+        onSplit: @escaping (Int) -> Void,
+        onReset: @escaping () -> Void,
+        isSelectionCustomized: Bool,
+        enableDragToDismiss: Bool,
+        embedInMaterialBackground: Bool,
+        focusSplitMenu: Bool = false,
+        onSplitFocusConsumed: @escaping () -> Void = {}
+    ) {
+        self.selection = selection
+        self._lookup = ObservedObject(initialValue: lookup)
+        self.preferredReading = preferredReading
+        self.canMergePrevious = canMergePrevious
+        self.canMergeNext = canMergeNext
+        self.onDismiss = onDismiss
+        self.onDefine = onDefine
+        self.onUseReading = onUseReading
+        self.onMergePrevious = onMergePrevious
+        self.onMergeNext = onMergeNext
+        self.onSplit = onSplit
+        self.onReset = onReset
+        self.isSelectionCustomized = isSelectionCustomized
+        self.enableDragToDismiss = enableDragToDismiss
+        self.embedInMaterialBackground = embedInMaterialBackground
+        self.focusSplitMenu = focusSplitMenu
+        self.onSplitFocusConsumed = onSplitFocusConsumed
+    }
 
     @ViewBuilder
     var body: some View {
@@ -72,6 +112,7 @@ struct TokenActionPanel: View {
         .onAppear {
             resetSplitControls()
             resetHighlightedResult()
+            focusSplitMenuIfNeeded(focusSplitMenu)
         }
         .onChange(of: selection) { _, _ in
             resetSplitControls()
@@ -79,6 +120,9 @@ struct TokenActionPanel: View {
         }
         .onChange(of: lookup.results) { _, _ in
             resetHighlightedResult()
+        }
+        .onChange(of: focusSplitMenu) { _, newValue in
+            focusSplitMenuIfNeeded(newValue)
         }
         .contentShape(Rectangle())
         .offset(y: max(0, dragOffset))
@@ -144,6 +188,16 @@ struct TokenActionPanel: View {
                 leftBucketCount = selectionCharacters.count
                 isSplitMenuVisible = true
             }
+        }
+    }
+
+    private func focusSplitMenuIfNeeded(_ shouldFocus: Bool) {
+        guard shouldFocus else { return }
+        defer { onSplitFocusConsumed() }
+        guard selectionCharacters.count > 1 else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            leftBucketCount = selectionCharacters.count
+            isSplitMenuVisible = true
         }
     }
 
@@ -567,7 +621,9 @@ private struct DictionaryContentHeightPreferenceKey: PreferenceKey {
         onReset: {},
         isSelectionCustomized: true,
         enableDragToDismiss: true,
-        embedInMaterialBackground: true
+        embedInMaterialBackground: true,
+        focusSplitMenu: false,
+        onSplitFocusConsumed: {}
     )
     .padding()
     .background(Color.black.opacity(0.05))

@@ -71,6 +71,13 @@ final class WordsStore: ObservableObject {
         save()
     }
 
+    /// Removes every saved word.
+    func deleteAll() {
+        guard words.isEmpty == false else { return }
+        words.removeAll()
+        save()
+    }
+
     /// Convenience for deleting a single word by id.
     func delete(id: UUID) {
         delete(ids: [id])
