@@ -219,11 +219,11 @@ struct PasteView: View {
                 clearSelection()
                 triggerFuriganaRefreshIfNeeded(reason: "editing toggled on", recomputeSpans: true)
             } else {
-//                if suppressNextEditingRefresh {
-//                    suppressNextEditingRefresh = false
-//                    Self.logFurigana("Skipping refresh: editing toggle was programmatic.")
-//                    return
-//                }
+                if suppressNextEditingRefresh {
+                    suppressNextEditingRefresh = false
+                    Self.logFurigana("Skipping refresh: editing toggle was programmatic.")
+                    return
+                }
                 triggerFuriganaRefreshIfNeeded(reason: "editing toggled off", recomputeSpans: true)
             }
         }
