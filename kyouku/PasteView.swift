@@ -43,6 +43,7 @@ struct PasteView: View {
     @State private var customizedRanges: [NSRange] = []
     @State private var showTokensPopover: Bool = false
     @State private var pendingRouterResetNoteID: UUID? = nil
+    @State private var skipNextInitialFuriganaEnsure: Bool = false
 
     private var tokenSelection: TokenSelectionContext? {
         get { selectionController.tokenSelection }
@@ -79,6 +80,15 @@ struct PasteView: View {
         nonmutating set { selectionController.tokenPanelFrame = newValue }
     }
 
+    private var inlineContextMenuState: RubyContextMenuState? {
+        guard let selection = tokenSelection else { return nil }
+        return RubyContextMenuState(
+            canMergeLeft: canMergeSelection(.previous),
+            canMergeRight: canMergeSelection(.next),
+            canSplit: selection.range.length > 1
+        )
+    }
+
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
@@ -105,11 +115,13 @@ struct PasteView: View {
     private static let selectionLogger = DiagnosticsLogging.logger(.pasteSelection)
     private static let coordinateSpaceName = "PasteViewRootSpace"
     private static let inlineDictionaryPanelEnabledFlag = false
+    private static let dictionaryPopupEnabledFlag = false // Temporary debug switch so highlight behavior can be isolated without showing the popup.
     private static let sheetMaxHeightFraction: CGFloat = 0.8
     private static let sheetExtraPadding: CGFloat = 36
     private let furiganaPipeline = FuriganaPipelineService()
-    private var inlineDictionaryPanelEnabled: Bool { Self.inlineDictionaryPanelEnabledFlag }
-    private var sheetDictionaryPanelEnabled: Bool { inlineDictionaryPanelEnabled == false }
+    private var dictionaryPopupEnabled: Bool { Self.dictionaryPopupEnabledFlag }
+    private var inlineDictionaryPanelEnabled: Bool { Self.inlineDictionaryPanelEnabledFlag && dictionaryPopupEnabled }
+    private var sheetDictionaryPanelEnabled: Bool { dictionaryPopupEnabled && inlineDictionaryPanelEnabled == false }
     private var pasteAreaDictionaryEnabled: Bool { false }
     private var tokenSpansAlwaysOn: Bool { true }
     private var spanConsumersActive: Bool { showFurigana || tokenHighlightsEnabled || tokenSpansAlwaysOn }
@@ -178,6 +190,16 @@ struct PasteView: View {
         }
     }
 
+    private var resetSpansButton: some View {
+        Button {
+            // Intentionally reuse the global reset path shared with NotesView to keep behavior consistent.
+            resetAllCustomSpans()
+        } label: {
+            Image(systemName: "arrow.counterclockwise")
+        }
+        .accessibilityLabel("Reset Spans")
+    }
+
     private var coreContent: some View {
         ZStack(alignment: .bottom) {
             editorColumn
@@ -188,7 +210,10 @@ struct PasteView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                tokenListButton
+                HStack(spacing: 12) {
+                    resetSpansButton
+                    tokenListButton
+                }
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -202,6 +227,7 @@ struct PasteView: View {
             furiganaTaskHandle?.cancel()
         }
         .onChange(of: inputText) { _, newValue in
+            skipNextInitialFuriganaEnsure = false
             clearSelection()
             DispatchQueue.main.async {
                 syncNoteForInputChange(newValue)
@@ -346,7 +372,10 @@ struct PasteView: View {
                 unknownTokenColor: unknownTokenColor,
                 selectedRangeHighlight: persistentSelectionRange,
                 customizedRanges: customizedRanges,
-                enableTapInspection: true
+                enableTapInspection: true,
+                onSpanSelection: handleInlineSpanSelection,
+                contextMenuStateProvider: { inlineContextMenuState },
+                onContextMenuAction: handleContextMenuAction
             )
             .padding(.vertical, 16)
             .padding(.horizontal, 16)
@@ -592,7 +621,7 @@ struct PasteView: View {
     private func onAppearHandler() {
         if let note = router.noteToOpen {
             currentNote = note
-            inputText = note.text
+            assignInputTextFromExternalSource(note.text)
             noteTitleInput = note.title ?? ""
             hasManuallyEditedTitle = (note.title?.isEmpty == false)
             if router.pasteShouldBeginEditing {
@@ -616,7 +645,7 @@ struct PasteView: View {
         if currentNote == nil && inputText.isEmpty {
             let persisted = PasteBufferStore.load()
             if !persisted.isEmpty {
-                inputText = persisted
+                assignInputTextFromExternalSource(persisted)
                 setEditing(false, suppressRefresh: true)
             }
             noteTitleInput = ""
@@ -669,6 +698,31 @@ struct PasteView: View {
             inlineLookup.errorMessage = nil
             inlineLookup.isLoading = false
         }
+    }
+
+    private func handleInlineSpanSelection(_ selection: RubySpanSelection?) {
+        guard let selection else {
+            clearSelection()
+            return
+        }
+        presentDictionaryForSpan(at: selection.spanIndex, focusSplitMenu: false)
+        persistentSelectionRange = selection.highlightRange
+    }
+
+    private func handleContextMenuAction(_ action: RubyContextMenuAction) {
+        switch action {
+        case .mergeLeft:
+            mergeSelection(.previous)
+        case .mergeRight:
+            mergeSelection(.next)
+        case .split:
+            focusSplitMenuForCurrentSelection()
+        }
+    }
+
+    private func focusSplitMenuForCurrentSelection() {
+        guard let selection = tokenSelection else { return }
+        startSplitFlow(for: selection.spanIndex)
     }
 
     @MainActor
@@ -1178,6 +1232,9 @@ struct PasteView: View {
     }
 
     private func ensureInitialFuriganaReady(reason: String) {
+        if skipNextInitialFuriganaEnsure {
+            return
+        }
         guard furiganaSpans == nil || furiganaAttributedText == nil else { return }
         guard inputText.isEmpty == false else { return }
         triggerFuriganaRefreshIfNeeded(reason: reason, recomputeSpans: true)
@@ -1191,6 +1248,12 @@ struct PasteView: View {
         furiganaRefreshToken &+= 1
         Self.logFurigana("Queued refresh token \(furiganaRefreshToken) for text length \(inputText.count). Reason: \(reason)")
         startFuriganaTask(token: furiganaRefreshToken, recomputeSpans: recomputeSpans)
+    }
+
+    private func assignInputTextFromExternalSource(_ text: String) {
+        guard inputText != text else { return }
+        skipNextInitialFuriganaEnsure = true
+        inputText = text
     }
 
     private func startFuriganaTask(token: Int, recomputeSpans: Bool) {

@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 struct RubyAnnotationSegment {
     let range: NSRange
@@ -147,7 +148,13 @@ enum FuriganaRubyProjector {
             finalEnd = min(reading.count, readingIndex + 1)
         }
 
-        let chunk = String(reading[readingIndex..<finalEnd])
+        var chunk = String(reading[readingIndex..<finalEnd])
+        let trimCount = kanaSuffixTrimCount(in: chunk, nextKana: nextKana)
+        if trimCount > 0, chunk.count > trimCount {
+            chunk.removeLast(trimCount)
+            finalEnd -= trimCount
+        }
+
         readingIndex = finalEnd
         return chunk
     }
@@ -214,5 +221,24 @@ enum FuriganaRubyProjector {
 
     private static func isKana(_ character: Character) -> Bool {
         character.unicodeScalars.allSatisfy { kanaCharacterSet.contains($0) }
+    }
+
+    private static func kanaSuffixTrimCount(in chunk: String, nextKana: [Character]) -> Int {
+        guard chunk.isEmpty == false else { return 0 }
+        guard nextKana.isEmpty == false else { return 0 }
+        let suffix = String(nextKana)
+        guard suffix.isEmpty == false else { return 0 }
+        let normalizedChunk = normalizedKana(chunk)
+        let normalizedSuffix = normalizedKana(suffix)
+        guard normalizedChunk.count > normalizedSuffix.count else { return 0 }
+        guard normalizedChunk.hasSuffix(normalizedSuffix) else { return 0 }
+        return suffix.count
+    }
+
+    private static func normalizedKana(_ text: String) -> String {
+        guard text.isEmpty == false else { return text }
+        let mutable = NSMutableString(string: text) as CFMutableString
+        CFStringTransform(mutable, nil, kCFStringTransformHiraganaKatakana, true)
+        return mutable as String
     }
 }

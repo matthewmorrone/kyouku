@@ -181,6 +181,9 @@ struct TokenActionPanel: View {
 
     private func toggleSplitMenu() {
         guard selectionCharacters.count > 1 else { return }
+        if handleTwoCharacterSplitIfNeeded() {
+            return
+        }
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
             if isSplitMenuVisible {
                 isSplitMenuVisible = false
@@ -195,6 +198,9 @@ struct TokenActionPanel: View {
         guard shouldFocus else { return }
         defer { onSplitFocusConsumed() }
         guard selectionCharacters.count > 1 else { return }
+        if handleTwoCharacterSplitIfNeeded() {
+            return
+        }
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
             leftBucketCount = selectionCharacters.count
             isSplitMenuVisible = true
@@ -204,6 +210,19 @@ struct TokenActionPanel: View {
     private func resetSplitControls() {
         leftBucketCount = selectionCharacters.count
         isSplitMenuVisible = false
+    }
+
+    private func handleTwoCharacterSplitIfNeeded() -> Bool {
+        guard selectionCharacters.count == 2 else { return false }
+        let offset = utf16LengthOfFirstCharacter()
+        guard offset > 0 else { return false }
+        onSplit(offset)
+        return true
+    }
+
+    private func utf16LengthOfFirstCharacter() -> Int {
+        guard let first = selectionCharacters.first else { return 0 }
+        return String(first).utf16.count
     }
 
     private func closeSplitMenu(animated: Bool) {

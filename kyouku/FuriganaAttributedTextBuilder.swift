@@ -54,7 +54,7 @@ enum FuriganaAttributedTextBuilder {
         var spanDump = segmented
             .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
             .joined(separator: ", ")
-        log("[\(context)] segmented spans: [\(spanDump)]")
+        // log("[\(context)] segmented spans: [\(spanDump)]")
         let adjustedSpans = applySpanOverrides(
             spans: segmented,
             overrides: overrides,
@@ -63,7 +63,15 @@ enum FuriganaAttributedTextBuilder {
         spanDump = adjustedSpans
             .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
             .joined(separator: ", ")
-        log("[\(context)] adjusted spans: [\(spanDump)]")
+        // log("[\(context)] adjusted spans: [\(spanDump)]")
+
+        let removedSpans = segmented.filter { original in adjustedSpans.contains(original) == false }
+        let addedSpans = adjustedSpans.filter { candidate in segmented.contains(candidate) == false }
+        if removedSpans.isEmpty == false || addedSpans.isEmpty == false {
+            let removedDescription = removedSpans.isEmpty ? "none" : describe(spans: removedSpans)
+            let addedDescription = addedSpans.isEmpty ? "none" : describe(spans: addedSpans)
+            log("[\(context)] override diff removed=[\(removedDescription)] added=[\(addedDescription)]")
+        }
 
         let segmentationDuration = elapsedMilliseconds(since: segmentationStart)
         log("[\(context)] Segmentation spans found: \(adjustedSpans.count) in \(segmentationDuration) ms.")
@@ -135,11 +143,17 @@ enum FuriganaAttributedTextBuilder {
         let attributes = [kCTFontAttributeName as NSAttributedString.Key: rubyFont] as CFDictionary
         return CTRubyAnnotationCreateWithAttributes(
             .center,
-            .auto,
+            .none,
             .before,
             text as CFString,
             attributes
         )
+    }
+
+    private static func describe(spans: [TextSpan]) -> String {
+        spans
+            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+            .joined(separator: ", ")
     }
 }
 
@@ -152,23 +166,28 @@ private extension FuriganaAttributedTextBuilder {
         guard overrides.isEmpty == false else { return spans }
         let nsText = text as NSString
         var boundedOverrides: [TextSpan] = []
+        var boundedRanges: [NSRange] = []
+        let textLength = nsText.length
         for override in overrides {
             let rawRange = override.nsRange
             guard rawRange.location != NSNotFound, rawRange.length > 0 else { continue }
-            guard NSMaxRange(rawRange) <= nsText.length else { continue }
-            guard let trimmed = Self.trimmedRange(from: rawRange, in: nsText) else { continue }
+            guard rawRange.location < textLength else { continue }
+            let cappedEnd = min(NSMaxRange(rawRange), textLength)
+            guard cappedEnd > rawRange.location else { continue }
+            let normalized = NSRange(location: rawRange.location, length: cappedEnd - rawRange.location)
+            guard let trimmed = Self.trimmedRange(from: normalized, in: nsText) else { continue }
             let newlineSegments = Self.splitRangeByNewlines(trimmed, in: nsText)
             for segment in newlineSegments {
                 guard let clamped = Self.trimmedRange(from: segment, in: nsText) else { continue }
                 guard clamped.length > 0 else { continue }
                 let surface = nsText.substring(with: clamped)
                 boundedOverrides.append(TextSpan(range: clamped, surface: surface))
+                boundedRanges.append(clamped)
             }
         }
         guard boundedOverrides.isEmpty == false else { return spans }
         var filtered = spans.filter { span in
-            overrides.contains { $0.overlaps(span.range) }
-                == false
+            boundedRanges.contains { NSIntersectionRange($0, span.range).length > 0 } == false
         }
         filtered.append(contentsOf: boundedOverrides)
         filtered.sort { lhs, rhs in

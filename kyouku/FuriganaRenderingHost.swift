@@ -16,6 +16,9 @@ struct FuriganaRenderingHost: View {
     var selectedRangeHighlight: NSRange?
     var customizedRanges: [NSRange]
     var enableTapInspection: Bool = true
+    var onSpanSelection: ((RubySpanSelection?) -> Void)? = nil
+    var contextMenuStateProvider: (() -> RubyContextMenuState?)? = nil
+    var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
 
     var body: some View {
         Group {
@@ -85,7 +88,10 @@ struct FuriganaRenderingHost: View {
             annotatedSpans: furiganaSpans ?? [],
             selectedRange: selectedRangeHighlight,
             customizedRanges: customizedRanges,
-            enableTapInspection: enableTapInspection
+            enableTapInspection: enableTapInspection,
+            onSpanSelection: onSpanSelection,
+            contextMenuStateProvider: contextMenuStateProvider,
+            onContextMenuAction: onContextMenuAction
         )
     }
 
