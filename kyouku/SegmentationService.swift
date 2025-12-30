@@ -63,13 +63,13 @@ actor SegmentationService {
 
         let mapInterval = signposter.beginInterval("MapRangesToSpans")
         let mapStart = CFAbsoluteTimeGetCurrent()
-        let spans = ranges.flatMap { range -> [TextSpan] in
-            guard let trimmedRange = Self.trimmedRange(from: range, in: nsText) else { return [] }
+        let spans = ranges.flatMap { segmented -> [TextSpan] in
+            guard let trimmedRange = Self.trimmedRange(from: segmented.range, in: nsText) else { return [] }
             let newlineSeparated = Self.splitRangeByNewlines(trimmedRange, in: nsText)
-            return newlineSeparated.compactMap { segment in
+            return newlineSeparated.compactMap { segment -> TextSpan? in
                 guard let clamped = Self.trimmedRange(from: segment, in: nsText) else { return nil }
                 let surface = nsText.substring(with: clamped)
-                return TextSpan(range: clamped, surface: surface)
+                return TextSpan(range: clamped, surface: surface, isLexiconMatch: segmented.isLexiconMatch)
             }
         }
         let mapMs = (CFAbsoluteTimeGetCurrent() - mapStart) * 1000
@@ -99,21 +99,21 @@ actor SegmentationService {
         return hasher.finalize()
     }
 
-    private func flushPendingNonKanji(start: inout Int?, kind: inout ScriptKind?, cursor: Int, text: NSString, trie: LexiconTrie, into ranges: inout [NSRange]) async -> Bool {
+    private func flushPendingNonKanji(start: inout Int?, kind: inout ScriptKind?, cursor: Int, text: NSString, trie: LexiconTrie, into ranges: inout [SegmentedRange]) async -> Bool {
         guard let pending = start, pending < cursor else { return false }
         let pendingRange = NSRange(location: pending, length: cursor - pending)
         if let scriptKind = kind, await ScriptKind.equals(scriptKind, .katakana) {
             ranges.append(contentsOf: await Self.splitKatakana(range: pendingRange, text: text, trie: trie))
         } else {
-            ranges.append(pendingRange)
+            ranges.append(SegmentedRange(range: pendingRange, isLexiconMatch: false))
         }
         start = nil
         kind = nil
         return true
     }
 
-    private static func splitKatakana(range: NSRange, text: NSString, trie: LexiconTrie) async -> [NSRange] {
-        var results: [NSRange] = []
+    private static func splitKatakana(range: NSRange, text: NSString, trie: LexiconTrie) async -> [SegmentedRange] {
+        var results: [SegmentedRange] = []
         let swiftText: String = text as String
         let end = NSMaxRange(range)
         var cursor = range.location
@@ -124,11 +124,11 @@ actor SegmentationService {
                 return trie.longestMatchEnd(in: ns, from: current, requireKanji: false)
             }
             if let matchEnd, matchEnd <= end, matchEnd > cursor {
-                results.append(NSRange(location: cursor, length: matchEnd - cursor))
+                results.append(SegmentedRange(range: NSRange(location: cursor, length: matchEnd - cursor), isLexiconMatch: true))
                 cursor = matchEnd
                 continue
             }
-            results.append(NSRange(location: cursor, length: 1))
+            results.append(SegmentedRange(range: NSRange(location: cursor, length: 1), isLexiconMatch: false))
             cursor += 1
         }
         return results
@@ -201,13 +201,13 @@ actor SegmentationService {
         return t
     }
 
-    private func segmentRanges(using trie: LexiconTrie, text: NSString) async -> [NSRange] {
+    private func segmentRanges(using trie: LexiconTrie, text: NSString) async -> [SegmentedRange] {
         let length = text.length
         guard length > 0 else { return [] }
 
         await debug("segmentRanges: starting scan length=\(length)")
 
-        var ranges: [NSRange] = []
+        var ranges: [SegmentedRange] = []
         ranges.reserveCapacity(max(1, length / 2))
 
         var kanjiCount = 0
@@ -255,7 +255,7 @@ actor SegmentationService {
                 sumMatchLen += len
                 if len > maxMatchLen { maxMatchLen = len }
                 let range = NSRange(location: cursor, length: len)
-                ranges.append(range)
+                ranges.append(SegmentedRange(range: range, isLexiconMatch: true))
                 matchesFound += 1
                 cursor = extendedEnd
                 continue
@@ -272,19 +272,19 @@ actor SegmentationService {
                 _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
                 kanjiCount += 1
                 singletonKanji += 1
-                ranges.append(NSRange(location: cursor, length: 1))
+                ranges.append(SegmentedRange(range: NSRange(location: cursor, length: 1), isLexiconMatch: false))
             } else {
                 nonKanjiCount += 1
                 if Self.isWhitespaceOrNewline(scalar) || Self.isPunctuation(scalar) {
                     _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
-                    ranges.append(NSRange(location: cursor, length: 1))
+                    ranges.append(SegmentedRange(range: NSRange(location: cursor, length: 1), isLexiconMatch: false))
                     cursor += 1
                     continue
                 }
 
                 if Self.isStandaloneParticle(at: cursor, scalar: scalar, text: text, totalLength: length) {
                     _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
-                    ranges.append(NSRange(location: cursor, length: 1))
+                    ranges.append(SegmentedRange(range: NSRange(location: cursor, length: 1), isLexiconMatch: false))
                     cursor += 1
                     continue
                 }
@@ -556,6 +556,11 @@ private enum ScriptKind {
     case latin
     case numeric
     case other
+}
+
+private struct SegmentedRange: Sendable {
+    let range: NSRange
+    let isLexiconMatch: Bool
 }
 
 private extension ScriptKind {

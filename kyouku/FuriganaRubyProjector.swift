@@ -32,13 +32,19 @@ enum FuriganaRubyProjector {
     static func project(spanText: String, reading: String, spanRange: NSRange) -> [RubyAnnotationSegment] {
         guard reading.isEmpty == false else { return [] }
 
+        // Normalize kana so surface-kana (often hiragana) can be matched against
+        // MeCab readings (often katakana). Without this, spans like "時の" with
+        // reading "トキノ" won't split at the "の" boundary and the full reading
+        // gets applied over the kanji cluster.
+        let normalizedReadingChars = Array(normalizedKana(reading))
+
         let charInfos = makeCharInfos(for: spanText)
         guard charInfos.contains(where: { $0.isKanji }) else { return [] }
 
         let clusters = makeClusters(from: charInfos)
         guard clusters.isEmpty == false else { return [] }
 
-        let readingChars = Array(reading)
+        let readingChars = normalizedReadingChars
         var readingIndex = 0
         var segments: [RubyAnnotationSegment] = []
 
@@ -46,13 +52,13 @@ enum FuriganaRubyProjector {
         var preIndex = 0
         while preIndex < charInfos.count, charInfos[preIndex].isKanji == false {
             if charInfos[preIndex].isKana {
-                readingIndex = consumeKanaSequence([charInfos[preIndex].character], in: readingChars, from: readingIndex)
+                readingIndex = consumeKanaSequence(normalizedKanaSequence([charInfos[preIndex].character]), in: readingChars, from: readingIndex)
             }
             preIndex += 1
         }
 
         for (clusterIndex, cluster) in clusters.enumerated() {
-            let nextKana = nextKanaSequence(startingAt: cluster.charEndIndex, chars: charInfos)
+            let nextKana = normalizedKanaSequence(nextKanaSequence(startingAt: cluster.charEndIndex, chars: charInfos))
             var chunk = extractReadingChunk(from: readingChars, readingIndex: &readingIndex, nextKana: nextKana, remainingClusters: clusters.count - clusterIndex - 1)
 
             if chunk.isEmpty {
@@ -240,5 +246,10 @@ enum FuriganaRubyProjector {
         let mutable = NSMutableString(string: text) as CFMutableString
         CFStringTransform(mutable, nil, kCFStringTransformHiraganaKatakana, true)
         return mutable as String
+    }
+
+    private static func normalizedKanaSequence(_ sequence: [Character]) -> [Character] {
+        guard sequence.isEmpty == false else { return [] }
+        return Array(normalizedKana(String(sequence)))
     }
 }

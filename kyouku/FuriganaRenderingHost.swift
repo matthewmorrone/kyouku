@@ -16,6 +16,7 @@ struct FuriganaRenderingHost: View {
     var selectedRangeHighlight: NSRange?
     var customizedRanges: [NSRange]
     var enableTapInspection: Bool = true
+    var bottomOverscrollPadding: CGFloat = 0
     var onSpanSelection: ((RubySpanSelection?) -> Void)? = nil
     var contextMenuStateProvider: (() -> RubyContextMenuState?)? = nil
     var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
@@ -73,6 +74,7 @@ struct FuriganaRenderingHost: View {
             .font(.system(size: textSize))
             .frame(maxWidth: .infinity, alignment: .leading)
             .multilineTextAlignment(.leading)
+            .padding(.bottom, bottomOverscrollPadding)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -175,7 +177,13 @@ struct FuriganaRenderingHost: View {
         guard textStorage.length > 0 else { return [] }
         var overlays: [RubyText.TokenOverlay] = []
         overlays.reserveCapacity(spans.count)
-        for span in spans where span.readingKana == nil {
+        // "Unknown" should mean we failed to get any lexical signal for the span.
+        // `readingKana` is intentionally nil for kana-only spans (no kanji), so using it
+        // here incorrectly marks common words like 「なる」/「なりたくて」 as unknown.
+        // MeCab/IPADic coverage does not perfectly overlap with the JMdict-based SQLite dictionary
+        // used by lookups, so we also treat trie-derived lexicon matches as known even if MeCab
+        // couldn't provide lemmas.
+        for span in spans where span.lemmaCandidates.isEmpty && span.span.isLexiconMatch == false {
             guard let clamped = Self.clampRange(span.span.range, length: textStorage.length) else { continue }
             if containsNonWhitespace(in: clamped, textStorage: textStorage) == false { continue }
             overlays.append(RubyText.TokenOverlay(range: clamped, color: color))

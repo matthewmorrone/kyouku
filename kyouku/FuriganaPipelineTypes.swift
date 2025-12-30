@@ -6,17 +6,22 @@ import Foundation
 struct TextSpan: Equatable, Hashable {
     let range: NSRange
     let surface: String
+    /// True when the span boundary came from a JMdict surface-form trie match.
+    /// This is intentionally independent from MeCab/IPADic coverage.
+    var isLexiconMatch: Bool = false
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(range.location)
         hasher.combine(range.length)
         hasher.combine(surface)
+        hasher.combine(isLexiconMatch)
     }
 
     static func == (lhs: TextSpan, rhs: TextSpan) -> Bool {
         lhs.range.location == rhs.range.location &&
         lhs.range.length == rhs.range.length &&
-        lhs.surface == rhs.surface
+        lhs.surface == rhs.surface &&
+        lhs.isLexiconMatch == rhs.isLexiconMatch
     }
 }
 

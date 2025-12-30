@@ -51,18 +51,18 @@ enum FuriganaAttributedTextBuilder {
 
         let segmentationStart = CFAbsoluteTimeGetCurrent()
         let segmented = try await SegmentationService.shared.segment(text: text)
-        var spanDump = segmented
-            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
-            .joined(separator: ", ")
+        // var spanDump = segmented
+        //     .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+        //     .joined(separator: ", ")
         // log("[\(context)] segmented spans: [\(spanDump)]")
         let adjustedSpans = applySpanOverrides(
             spans: segmented,
             overrides: overrides,
             text: text
         )
-        spanDump = adjustedSpans
-            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
-            .joined(separator: ", ")
+        // spanDump = adjustedSpans
+        //     .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+        //     .joined(separator: ", ")
         // log("[\(context)] adjusted spans: [\(spanDump)]")
 
         let removedSpans = segmented.filter { original in adjustedSpans.contains(original) == false }
@@ -100,7 +100,8 @@ enum FuriganaAttributedTextBuilder {
         guard text.isEmpty == false else { return NSAttributedString(string: text) }
 
         let mutable = NSMutableAttributedString(string: text)
-        let rubyKey = NSAttributedString.Key(rawValue: kCTRubyAnnotationAttributeName as String)
+        let rubyReadingKey = NSAttributedString.Key("RubyReadingText")
+        let rubySizeKey = NSAttributedString.Key("RubyReadingFontSize")
         let nsText = text as NSString
         var appliedCount = 0
         let projectionStart = CFAbsoluteTimeGetCurrent()
@@ -109,18 +110,37 @@ enum FuriganaAttributedTextBuilder {
             guard let reading = annotatedSpan.readingKana, annotatedSpan.span.range.location != NSNotFound else { continue }
             guard annotatedSpan.span.range.length > 0 else { continue }
             guard containsKanji(in: annotatedSpan.span.surface) else { continue }
-            let range = annotatedSpan.span.range
-            guard NSMaxRange(range) <= nsText.length else { continue }
-            let spanText = nsText.substring(with: range)
 
-            let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: range)
+            // Some segmentation outputs isolate the kanji and exclude the following okurigana.
+            // If we only project within that kanji-only range, the projector cannot split readings
+            // like "だかれ" against the surface "抱かれ" and ends up attaching the full reading
+            // to a single glyph, which is prone to CoreText clamping/shift.
+            //
+            // Expand the projection window to include immediate trailing kana so the projector can
+            // properly consume/trim the okurigana portion.
+            let originalRange = annotatedSpan.span.range
+            guard NSMaxRange(originalRange) <= nsText.length else { continue }
+            let projectionRange = extendRangeForwardOverKana(originalRange, in: nsText)
+            guard NSMaxRange(projectionRange) <= nsText.length else { continue }
+            let spanText = nsText.substring(with: projectionRange)
+
+            let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: projectionRange)
 
             for segment in segments {
-                if let annotation = makeRubyAnnotation(text: segment.reading, textSize: textSize, furiganaSize: furiganaSize) {
-                    mutable.addAttribute(rubyKey, value: annotation, range: segment.range)
-                    mutable.addAttribute(.rubyAnnotation, value: true, range: segment.range)
-                    appliedCount += 1
-                }
+                guard segment.reading.isEmpty == false else { continue }
+                mutable.addAttribute(.rubyAnnotation, value: true, range: segment.range)
+                mutable.addAttribute(rubyReadingKey, value: segment.reading, range: segment.range)
+                mutable.addAttribute(rubySizeKey, value: furiganaSize, range: segment.range)
+
+                applyIntercharacterSpacingIfNeeded(
+                    attributedText: mutable,
+                    fullText: nsText,
+                    baseRange: segment.range,
+                    reading: segment.reading,
+                    textSize: textSize,
+                    furiganaSize: furiganaSize
+                )
+                appliedCount += 1
             }
         }
 
@@ -133,6 +153,41 @@ enum FuriganaAttributedTextBuilder {
         text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
     }
 
+    private static func extendRangeForwardOverKana(_ range: NSRange, in text: NSString) -> NSRange {
+        guard range.location != NSNotFound, range.length > 0 else { return range }
+        let textLength = text.length
+        var end = NSMaxRange(range)
+        guard end <= textLength else { return range }
+
+        // Keep this conservative to avoid accidentally pulling in the next token.
+        let maxAdditionalComposedChars = 8
+        var added = 0
+
+        while end < textLength, added < maxAdditionalComposedChars {
+            let composed = text.rangeOfComposedCharacterSequence(at: end)
+            guard composed.location != NSNotFound, composed.length > 0 else { break }
+            guard NSMaxRange(composed) <= textLength else { break }
+
+            let s = text.substring(with: composed)
+            guard let ch = s.first else { break }
+            if ch.isWhitespace || ch.isNewline { break }
+            if isKana(ch) {
+                end = NSMaxRange(composed)
+                added += 1
+            } else {
+                break
+            }
+        }
+
+        return NSRange(location: range.location, length: end - range.location)
+    }
+
+    private static func isKana(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy {
+            (0x3040...0x309F).contains($0.value) || (0x30A0...0x30FF).contains($0.value)
+        }
+    }
+
     private static func elapsedMilliseconds(since start: CFAbsoluteTime) -> Double {
         (CFAbsoluteTimeGetCurrent() - start) * 1000
     }
@@ -141,13 +196,93 @@ enum FuriganaAttributedTextBuilder {
         guard text.isEmpty == false else { return nil }
         let rubyFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, furiganaSize)))
         let attributes = [kCTFontAttributeName as NSAttributedString.Key: rubyFont] as CFDictionary
+        log("[ruby] attributes: \(String(describing: attributes))")
         return CTRubyAnnotationCreateWithAttributes(
             .center,
+            // Prefer expanding the base rather than allowing ruby to overhang the base.
             .none,
             .before,
             text as CFString,
             attributes
         )
+    }
+
+    private static func applyIntercharacterSpacingIfNeeded(
+        attributedText: NSMutableAttributedString,
+        fullText: NSString,
+        baseRange: NSRange,
+        reading: String,
+        textSize: Double,
+        furiganaSize: Double
+    ) {
+        guard baseRange.location != NSNotFound, baseRange.length > 0 else { return }
+        guard NSMaxRange(baseRange) <= fullText.length else { return }
+
+        let baseString = fullText.substring(with: baseRange)
+        guard containsKanji(in: baseString) else { return }
+
+        // Approximate traditional furigana handling: when ruby is wider than the base,
+        // widen the space around the base (without inserting actual characters).
+        // We do this by adding kerning between the base and its neighbors.
+        let baseFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, textSize)))
+        let rubyFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, furiganaSize)))
+
+        let baseWidth = (baseString as NSString).size(withAttributes: [.font: baseFont]).width
+        let rubyWidth = (reading as NSString).size(withAttributes: [.font: rubyFont]).width
+        let rawExtra = rubyWidth - baseWidth
+        guard rawExtra > 0.5 else { return }
+
+        // Avoid creating huge gaps for very long readings.
+        let cappedExtra = min(rawExtra, baseFont.pointSize * 1.75)
+
+        let prevIndex = baseRange.location - 1
+        let nextIndex = NSMaxRange(baseRange)
+        let lastBaseIndex = NSMaxRange(baseRange) - 1
+        guard lastBaseIndex >= 0 else { return }
+
+        let canAddBefore: Bool = {
+            guard prevIndex >= 0, prevIndex < fullText.length else { return false }
+            let prevChar = fullText.character(at: prevIndex)
+            return Character(UnicodeScalar(prevChar)!).isNewline == false
+        }()
+
+        let canAddAfter: Bool = {
+            // If the base ends at the end of the string, we can still add trailing kern.
+            guard nextIndex <= fullText.length else { return false }
+            if nextIndex == fullText.length { return true }
+            let nextChar = fullText.character(at: nextIndex)
+            return Character(UnicodeScalar(nextChar)!).isNewline == false
+        }()
+
+        // Distribute the extra width as "space" before and after the headword.
+        // (Implemented via kerning so we don't insert characters and shift ranges.)
+        let beforeAmount: Double
+        let afterAmount: Double
+        switch (canAddBefore, canAddAfter) {
+        case (true, true):
+            beforeAmount = cappedExtra / 2.0
+            afterAmount = cappedExtra / 2.0
+        case (true, false):
+            beforeAmount = cappedExtra
+            afterAmount = 0
+        case (false, true):
+            beforeAmount = 0
+            afterAmount = cappedExtra
+        case (false, false):
+            return
+        }
+
+        if beforeAmount > 0, canAddBefore {
+            // Space before headword: add kerning after the previous character.
+            let existingPrevKern = (attributedText.attribute(.kern, at: prevIndex, effectiveRange: nil) as? NSNumber)?.doubleValue ?? 0
+            attributedText.addAttribute(.kern, value: NSNumber(value: existingPrevKern + beforeAmount), range: NSRange(location: prevIndex, length: 1))
+        }
+
+        if afterAmount > 0, canAddAfter {
+            // Space after headword: add kerning after the last character in the base range.
+            let existingLastKern = (attributedText.attribute(.kern, at: lastBaseIndex, effectiveRange: nil) as? NSNumber)?.doubleValue ?? 0
+            attributedText.addAttribute(.kern, value: NSNumber(value: existingLastKern + afterAmount), range: NSRange(location: lastBaseIndex, length: 1))
+        }
     }
 
     private static func describe(spans: [TextSpan]) -> String {

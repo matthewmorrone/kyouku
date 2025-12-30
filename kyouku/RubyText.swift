@@ -16,6 +16,8 @@ func Log(_ message: @autoclosure () -> String,
 
 extension NSAttributedString.Key {
     static let rubyAnnotation = NSAttributedString.Key("RubyAnnotation")
+    static let rubyReadingText = NSAttributedString.Key("RubyReadingText")
+    static let rubyReadingFontSize = NSAttributedString.Key("RubyReadingFontSize")
 }
 
 enum RubyAnnotationVisibility {
@@ -72,7 +74,7 @@ struct RubyText: UIViewRepresentable {
     func makeUIView(context: Context) -> TokenOverlayTextView {
         let textView = TokenOverlayTextView()
         textView.isEditable = false
-        textView.isSelectable = false
+        textView.isSelectable = true
         textView.isScrollEnabled = false
         textView.backgroundColor = .clear
         textView.textContainer.lineFragmentPadding = 0
@@ -81,7 +83,7 @@ struct RubyText: UIViewRepresentable {
         textView.clipsToBounds = false
         textView.layer.masksToBounds = false
         textView.textColor = .label
-        textView.tintColor = .clear
+        textView.tintColor = .systemBlue
         textView.font = UIFont.systemFont(ofSize: fontSize)
         textView.setContentCompressionResistancePriority(.required, for: .vertical)
         textView.setContentHuggingPriority(.defaultHigh, for: .vertical)
@@ -90,22 +92,42 @@ struct RubyText: UIViewRepresentable {
         textView.spanSelectionHandler = onSpanSelection
         textView.contextMenuStateProvider = contextMenuStateProvider
         textView.contextMenuActionHandler = onContextMenuAction
+        textView.delegate = context.coordinator
         return textView
     }
 
     func updateUIView(_ uiView: TokenOverlayTextView, context: Context) {
         uiView.font = UIFont.systemFont(ofSize: fontSize)
         uiView.textColor = .label
-        uiView.tintColor = .clear
+        uiView.tintColor = .systemBlue
+        uiView.rubyAnnotationVisibility = annotationVisibility
+        uiView.isEditable = false
+
+        // Gap between ruby and headword. Keep it small and stable so ruby feels anchored.
+        // (Previously this was a bit too large, making ruby feel "detached".)
+        let rubyBaselineGap = max(0.5, extraGap * 0.12)
 
         // Compute extra headroom for ruby above the baseline.
-        // Tune the multiplier as needed; 0.6 is a reasonable starting point.
-        let rubyHeadroom = max(0, fontSize * 0.6 + extraGap)
+        // We reserve enough vertical space for the *largest* ruby run so that
+        // changing furigana size doesn't make ruby appear to "grow downward".
+        let defaultRubyFontSize = max(1, fontSize * 0.6)
+        let rubyHeadroom = max(
+            0,
+            max(
+                fontSize * 0.6 + extraGap,
+                RubyText.requiredVerticalHeadroomForRuby(
+                    in: attributed,
+                    baseFont: UIFont.systemFont(ofSize: fontSize),
+                    defaultRubyFontSize: defaultRubyFontSize,
+                    rubyBaselineGap: rubyBaselineGap
+                )
+            )
+        )
 
         var insets = textInsets
         insets.top = max(insets.top, rubyHeadroom)
-        uiView.textContainerInset = insets
         uiView.rubyHighlightHeadroom = rubyHeadroom
+        uiView.rubyBaselineGap = rubyBaselineGap
 
         let mutable = NSMutableAttributedString(attributedString: attributed)
         let fullRange = NSRange(location: 0, length: mutable.length)
@@ -128,6 +150,22 @@ struct RubyText: UIViewRepresentable {
         }
 
         let processed = RubyText.applyAnnotationVisibility(annotationVisibility, to: mutable)
+
+        // CoreText clamps ruby overhang at line edges. For long readings (especially at the
+        // start of a wrapped line), this can make ruby look "right-aligned". We compensate
+        // by adding a small symmetric horizontal inset large enough to contain the maximum
+        // ruby overhang, so centering remains visually consistent.
+        let requiredOverhangInset = RubyText.requiredHorizontalInsetForRubyOverhang(
+            in: processed,
+            baseFont: baseFont,
+            defaultRubyFontSize: max(1, fontSize * 0.6)
+        )
+        if requiredOverhangInset > 0 {
+            insets.left = max(insets.left, textInsets.left + requiredOverhangInset)
+            insets.right = max(insets.right, textInsets.right + requiredOverhangInset)
+        }
+        uiView.textContainerInset = insets
+
         uiView.applyAttributedText(processed)
         uiView.annotatedSpans = annotatedSpans
         uiView.selectionHighlightRange = selectedRange
@@ -136,10 +174,92 @@ struct RubyText: UIViewRepresentable {
         uiView.contextMenuStateProvider = contextMenuStateProvider
         uiView.contextMenuActionHandler = onContextMenuAction
 
+        context.coordinator.stateProvider = contextMenuStateProvider
+        context.coordinator.actionHandler = onContextMenuAction
+
         // Help the view expand vertically rather than compress
         uiView.setContentCompressionResistancePriority(.required, for: .vertical)
         uiView.setContentHuggingPriority(.defaultLow, for: .horizontal)
         uiView.setContentHuggingPriority(.defaultHigh, for: .vertical)
+    }
+
+    private static func requiredHorizontalInsetForRubyOverhang(
+        in attributedString: NSAttributedString,
+        baseFont: UIFont,
+        defaultRubyFontSize: CGFloat
+    ) -> CGFloat {
+        guard attributedString.length > 0 else { return 0 }
+
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        let nsText = attributedString.string as NSString
+        var maxOverhang: CGFloat = 0
+
+        attributedString.enumerateAttribute(.rubyReadingText, in: fullRange, options: []) { value, range, _ in
+            guard let reading = value as? String, reading.isEmpty == false else { return }
+            guard range.location != NSNotFound, range.length > 0 else { return }
+            guard NSMaxRange(range) <= attributedString.length else { return }
+
+            let baseText = nsText.substring(with: range)
+            guard baseText.isEmpty == false else { return }
+
+            let rubyFontSize: CGFloat
+            if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? Double {
+                rubyFontSize = CGFloat(max(1.0, stored))
+            } else if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? CGFloat {
+                rubyFontSize = max(1.0, stored)
+            } else if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? NSNumber {
+                rubyFontSize = CGFloat(max(1.0, stored.doubleValue))
+            } else {
+                rubyFontSize = max(1.0, defaultRubyFontSize)
+            }
+
+            let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
+
+            let baseWidth = (baseText as NSString).size(withAttributes: [.font: baseFont]).width
+            let rubyWidth = (reading as NSString).size(withAttributes: [.font: rubyFont]).width
+            let overhang = max(0, (rubyWidth - baseWidth) / 2.0)
+            maxOverhang = max(maxOverhang, overhang)
+        }
+
+        guard maxOverhang > 0 else { return 0 }
+        // Small cushion to avoid pixel-snapping making it look slightly off.
+        return ceil(maxOverhang + 1.0)
+    }
+
+    private static func requiredVerticalHeadroomForRuby(
+        in attributedString: NSAttributedString,
+        baseFont: UIFont,
+        defaultRubyFontSize: CGFloat,
+        rubyBaselineGap: CGFloat
+    ) -> CGFloat {
+        guard attributedString.length > 0 else { return 0 }
+
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        var maxRubyHeight: CGFloat = 0
+
+        attributedString.enumerateAttribute(.rubyReadingText, in: fullRange, options: []) { value, range, _ in
+            guard let reading = value as? String, reading.isEmpty == false else { return }
+            guard range.location != NSNotFound, range.length > 0 else { return }
+            guard NSMaxRange(range) <= attributedString.length else { return }
+
+            let rubyFontSize: CGFloat
+            if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? Double {
+                rubyFontSize = CGFloat(max(1.0, stored))
+            } else if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? CGFloat {
+                rubyFontSize = max(1.0, stored)
+            } else if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? NSNumber {
+                rubyFontSize = CGFloat(max(1.0, stored.doubleValue))
+            } else {
+                rubyFontSize = max(1.0, defaultRubyFontSize)
+            }
+
+            let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
+            maxRubyHeight = max(maxRubyHeight, rubyFont.lineHeight)
+        }
+
+        guard maxRubyHeight > 0 else { return 0 }
+
+        return ceil(maxRubyHeight + max(0, rubyBaselineGap))
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: TokenOverlayTextView, context: Context) -> CGSize {
@@ -152,6 +272,58 @@ struct RubyText: UIViewRepresentable {
         let measured = uiView.sizeThatFits(targetSize)
         let measuredHeight = measured.height > 0 ? measured.height : targetSize.height
         return CGSize(width: baseWidth, height: measuredHeight)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    class Coordinator: NSObject, UITextViewDelegate {
+        var stateProvider: (() -> RubyContextMenuState?)?
+        var actionHandler: ((RubyContextMenuAction) -> Void)?
+
+        @available(iOS 16.0, *)
+        func textView(_ textView: UITextView,
+                      editMenuForTextIn range: NSRange,
+                      suggestedActions: [UIMenuElement]) -> UIMenu? {
+            // Query the current state to decide availability
+            let state = stateProvider?()
+
+            var actions: [UIAction] = []
+
+            let mergeLeft = UIAction(title: "Merge Left", image: UIImage(systemName: "arrow.left.to.line")) { [weak self] _ in
+                self?.actionHandler?(.mergeLeft)
+            }
+            mergeLeft.attributes = (state?.canMergeLeft ?? false) ? [] : [.disabled]
+            actions.append(mergeLeft)
+
+            let mergeRight = UIAction(title: "Merge Right", image: UIImage(systemName: "arrow.right.to.line")) { [weak self] _ in
+                self?.actionHandler?(.mergeRight)
+            }
+            mergeRight.attributes = (state?.canMergeRight ?? false) ? [] : [.disabled]
+            actions.append(mergeRight)
+
+            let split = UIAction(title: "Split", image: UIImage(systemName: "scissors")) { [weak self] _ in
+                self?.actionHandler?(.split)
+            }
+            split.attributes = (state?.canSplit ?? false) ? [] : [.disabled]
+            actions.append(split)
+
+            let custom = UIMenu(title: "", options: .displayInline, children: actions)
+            // Preserve system actions like Look Up by appending suggestedActions
+            return UIMenu(children: [custom] + suggestedActions)
+        }
+
+        @available(iOS 16.0, *)
+        func textView(_ textView: UITextView,
+                      targetRectForEditMenuForTextIn range: NSRange) -> CGRect {
+            guard let start = textView.position(from: textView.beginningOfDocument, offset: range.location),
+                  let end = textView.position(from: start, offset: range.length),
+                  let tr = textView.textRange(from: start, to: end) else {
+                return .zero
+            }
+            return textView.firstRect(for: tr)
+        }
     }
 
     private func selectionHighlightInsets(for font: UIFont) -> UIEdgeInsets {
@@ -172,7 +344,8 @@ struct RubyText: UIViewRepresentable {
         case .visible:
             return attributedString
         case .hiddenKeepMetrics:
-            hideAnnotationRuns(in: attributedString)
+            // Ruby is drawn manually from `.rubyReadingText`. Keep attributes to preserve
+            // selection + layout behavior; drawing is gated by the view-level visibility flag.
             return attributedString
         case .removed:
             return removeAnnotationRuns(from: attributedString)
@@ -192,18 +365,14 @@ struct RubyText: UIViewRepresentable {
         return ranges
     }
 
-    private static func hideAnnotationRuns(in attributedString: NSMutableAttributedString) {
-        for range in annotationRanges(in: attributedString) {
-            attributedString.removeAttribute(coreTextRubyAttribute, range: range)
-        }
-    }
-
     private static func removeAnnotationRuns(from attributedString: NSMutableAttributedString) -> NSAttributedString {
         let ranges = annotationRanges(in: attributedString)
         guard ranges.isEmpty == false else { return attributedString }
         for range in ranges {
             attributedString.removeAttribute(coreTextRubyAttribute, range: range)
             attributedString.removeAttribute(.rubyAnnotation, range: range)
+            attributedString.removeAttribute(.rubyReadingText, range: range)
+            attributedString.removeAttribute(.rubyReadingFontSize, range: range)
         }
         return attributedString
     }
@@ -245,6 +414,18 @@ struct RubyText: UIViewRepresentable {
 
 final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     var annotatedSpans: [AnnotatedSpan] = []
+
+    // Vertical gap between the headword and ruby text.
+    var rubyBaselineGap: CGFloat = 1.0
+
+    var rubyAnnotationVisibility: RubyAnnotationVisibility = .visible {
+        didSet {
+            guard oldValue != rubyAnnotationVisibility else { return }
+            needsHighlightUpdate = true
+            setNeedsLayout()
+            setNeedsDisplay()
+        }
+    }
 
     var selectionHighlightRange: NSRange? {
         didSet {
@@ -325,7 +506,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         Self.installTextKit1AccessGuardsIfNeeded()
 #endif
         isEditable = false
-        isSelectable = false
+        isSelectable = true
         isScrollEnabled = false
         backgroundColor = .clear
         textContainer.lineFragmentPadding = 0
@@ -339,7 +520,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         needsHighlightUpdate = true
     }
 
-    override var canBecomeFirstResponder: Bool { false }
+    override var canBecomeFirstResponder: Bool { true }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -373,10 +554,127 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             ctx?.restoreGState()
         }
         super.draw(rect)
+
+        if rubyAnnotationVisibility == .visible {
+            drawRubyReadings()
+        }
+    }
+
+    private func drawRubyReadings() {
+        guard let attributedText, attributedText.length > 0 else { return }
+        let fullRange = NSRange(location: 0, length: attributedText.length)
+
+        attributedText.enumerateAttribute(.rubyReadingText, in: fullRange, options: []) { value, range, _ in
+            guard let reading = value as? String, reading.isEmpty == false else { return }
+            guard range.location != NSNotFound, range.length > 0 else { return }
+            guard NSMaxRange(range) <= attributedText.length else { return }
+            guard let uiRange = self.textRange(for: range) else { return }
+
+            let rawRects = self.selectionRects(for: uiRange)
+                .map { $0.rect }
+                .filter { $0.isNull == false && $0.isEmpty == false }
+            guard rawRects.isEmpty == false else { return }
+
+            let rubyFontSize: CGFloat
+            if let stored = attributedText.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? Double {
+                rubyFontSize = CGFloat(max(1.0, stored))
+            } else if let stored = attributedText.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? CGFloat {
+                rubyFontSize = max(1.0, stored)
+            } else if let stored = attributedText.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? NSNumber {
+                rubyFontSize = CGFloat(max(1.0, stored.doubleValue))
+            } else {
+                rubyFontSize = CGFloat(max(1.0, (self.font?.pointSize ?? 17.0) * 0.6))
+            }
+
+            let clampedRects: [CGRect] = rawRects.compactMap { rect in
+                var baseRect = rect
+                let lineHeight = self.font?.lineHeight ?? rect.height
+                baseRect.origin.y = rect.maxY - lineHeight
+                baseRect.size.height = lineHeight
+                return (baseRect.isNull || baseRect.isEmpty) ? nil : baseRect
+            }
+            guard clampedRects.isEmpty == false else { return }
+
+            let unions = self.unionRectsByLine(clampedRects)
+            guard unions.isEmpty == false else { return }
+
+            let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
+            let baseColor = (attributedText.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? UIColor) ?? UIColor.label
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: rubyFont,
+                .foregroundColor: baseColor
+            ]
+
+            for baseUnion in unions {
+                let headroom = max(0, self.rubyHighlightHeadroom)
+                guard headroom > 0 else { continue }
+
+                let rubyRect = CGRect(
+                    x: baseUnion.minX,
+                    y: baseUnion.minY - headroom,
+                    width: baseUnion.width,
+                    height: headroom
+                )
+
+                let size = (reading as NSString).size(withAttributes: attrs)
+                let x = rubyRect.midX - (size.width / 2.0)
+
+                // Bottom-anchor ruby near the headword: keep a small consistent gap and let
+                // the top edge move when ruby size changes.
+                let gap = max(1.0, self.rubyBaselineGap)
+                let y = (baseUnion.minY - gap) - size.height
+                (reading as NSString).draw(at: CGPoint(x: x, y: y), withAttributes: attrs)
+            }
+        }
+    }
+
+    private func unionRectsByLine(_ rects: [CGRect]) -> [CGRect] {
+        let sorted = rects.sorted {
+            if abs($0.midY - $1.midY) > 0.5 {
+                return $0.midY < $1.midY
+            }
+            return $0.minX < $1.minX
+        }
+
+        var unions: [CGRect] = []
+        var current: CGRect? = nil
+        let yTolerance: CGFloat = 1.0
+
+        for rect in sorted {
+            if var cur = current {
+                if abs(cur.midY - rect.midY) <= yTolerance {
+                    cur = cur.union(rect)
+                    current = cur
+                } else {
+                    unions.append(cur)
+                    current = rect
+                }
+            } else {
+                current = rect
+            }
+        }
+
+        if let cur = current {
+            unions.append(cur)
+        }
+        return unions
     }
 
     func applyAttributedText(_ text: NSAttributedString) {
+        if let current = attributedText, current.isEqual(to: text) {
+            // No change; avoid resetting attributedText which would dismiss menus.
+            return
+        }
+        let wasFirstResponder = isFirstResponder
+        let oldSelectedRange = selectedRange
         attributedText = text
+        if wasFirstResponder {
+            _ = becomeFirstResponder()
+            let newLength = attributedText?.length ?? 0
+            if oldSelectedRange.location != NSNotFound, NSMaxRange(oldSelectedRange) <= newLength {
+                selectedRange = oldSelectedRange
+            }
+        }
         needsHighlightUpdate = true
         setNeedsLayout()
         Self.logGeometry("applyAttributedText -> setNeedsLayout")
@@ -466,11 +764,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         guard selectionRange.location != NSNotFound, selectionRange.length > 0 else { return [] }
         guard NSMaxRange(selectionRange) <= attributedText.length else { return [] }
 
+        guard rubyAnnotationVisibility == .visible else { return [] }
+
         // Gather ruby-bearing subranges inside the selected span.
-        let coreRubyKey = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
         var rubyRanges: [NSRange] = []
-        attributedText.enumerateAttribute(coreRubyKey, in: selectionRange, options: []) { value, range, _ in
-            guard value != nil else { return }
+        attributedText.enumerateAttribute(.rubyReadingText, in: selectionRange, options: []) { value, range, _ in
+            guard let s = value as? String, s.isEmpty == false else { return }
             guard range.location != NSNotFound, range.length > 0 else { return }
             rubyRanges.append(range)
         }
@@ -489,7 +788,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard baseRects.isEmpty == false else { continue }
 
             // iOS 16+: Prefer measured line fragment geometry for vertical bounds
-            if #available(iOS 16.0, *), let tlm = textLayoutManager {
+            if let tlm = textLayoutManager {
                 let inset = textContainerInset
                 // Build an array of line rects in view coordinates
                 var lineRects: [CGRect] = []
@@ -585,16 +884,14 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     private func selectionHasRuby(for range: NSRange) -> Bool {
         // We intentionally do NOT derive geometry from ruby ranges; we only use this to
         // decide whether a ruby highlight should exist at all.
+        guard rubyAnnotationVisibility == .visible else { return false }
         guard let attributedText else { return false }
         guard range.location != NSNotFound, range.length > 0 else { return false }
         guard NSMaxRange(range) <= attributedText.length else { return false }
 
-        // Gate on the presence of the actual CoreText ruby attribute so the highlight
-        // matches what is rendered (e.g. hidden/removed ruby should not highlight).
-        let coreRubyKey = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
         var hasRuby = false
-        attributedText.enumerateAttribute(coreRubyKey, in: range, options: []) { value, _, stop in
-            if value != nil {
+        attributedText.enumerateAttribute(.rubyReadingText, in: range, options: []) { value, _, stop in
+            if let s = value as? String, s.isEmpty == false {
                 hasRuby = true
                 stop.pointee = true
             }
@@ -730,8 +1027,19 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }
 
         guard pointHitsRenderedText(point, attributedLength: attributedLength) else { return nil }
-        guard let textRange = textRangeNearPoint(point) else { return nil }
-        let offset = offset(from: beginningOfDocument, to: textRange.start)
+        guard let textRange = textRangeNearPoint(point),
+              let closestPosition = textRange.start as UITextPosition? else { return nil }
+
+        // `closestPosition(to:)` can snap to the previous line when tapping on an empty/blank line.
+        // Gate the fallback hit-test so taps clearly below a line don't select its last glyph.
+        let caret = caretRect(for: closestPosition)
+        let upTolerance = max(6, rubyHighlightHeadroom + caret.height * 0.35)
+        let downTolerance = max(6, caret.height * 0.35)
+        if point.y < (caret.minY - upTolerance) || point.y > (caret.maxY + downTolerance) {
+            return nil
+        }
+
+        let offset = offset(from: beginningOfDocument, to: closestPosition)
         guard offset >= 0, offset < attributedLength else { return nil }
 
         return offset
@@ -780,9 +1088,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         var cursor = index
         while cursor > text.startIndex {
             cursor = text.index(before: cursor)
-            if isInspectableCharacter(text[cursor]) {
-                return cursor
-            }
+            let character = text[cursor]
+            if character.isNewline { break }
+            if isInspectableCharacter(character) { return cursor }
         }
         return nil
     }
@@ -792,9 +1100,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         while cursor < text.endIndex {
             let next = text.index(after: cursor)
             guard next < text.endIndex else { break }
-            if isInspectableCharacter(text[next]) {
-                return next
-            }
+            let character = text[next]
+            if character.isNewline { break }
+            if isInspectableCharacter(character) { return next }
             cursor = next
         }
         return nil
@@ -806,7 +1114,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     }
 
     private func isInspectableCharacter(_ character: Character) -> Bool {
-        character.isNewline == false
+        character.isNewline == false && character.isWhitespace == false
     }
 
     private func pointHitsRenderedText(_ point: CGPoint, attributedLength: Int) -> Bool {

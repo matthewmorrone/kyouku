@@ -12,7 +12,7 @@ struct WordsView: View {
         NavigationStack {
             VStack {
                 searchField
-                List {
+                List(selection: $selectedWordIDs) {
                     if hasActiveSearch {
                         Section("Dictionary Results") {
                             dictionarySection
@@ -23,6 +23,7 @@ struct WordsView: View {
                         }
                     }
                 }
+                .environment(\.editMode, $editModeState)
                 .listStyle(.insetGrouped)
             }
             .navigationTitle("Dictionary")
@@ -30,12 +31,11 @@ struct WordsView: View {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if canEditSavedWords {
                         Button {
-                            showDeleteAllConfirmation = true
+                            editModeState = editModeState.isEditing ? .inactive : .active
                         } label: {
-                            Image(systemName: "trash")
+                            Image(systemName: "pencil")
                         }
-                        .accessibilityLabel("Delete all saved entries")
-                        EditButton()
+                        .accessibilityLabel(editModeState.isEditing ? "Done" : "Edit")
                     }
                 }
                 ToolbarItem(placement: .bottomBar) {
@@ -48,18 +48,27 @@ struct WordsView: View {
                         .disabled(selectedWordIDs.isEmpty)
                     }
                 }
+                ToolbarItem(placement: .bottomBar) {
+                    if isEditing && canEditSavedWords {
+                        Button(role: .destructive) {
+                            showDeleteAllConfirmation = true
+                        } label: {
+                            Label("Delete All", systemImage: "trash")
+                        }
+                        .accessibilityLabel("Delete all saved entries")
+                    }
+                }
             }
         }
-        .environment(\.editMode, $editModeState)
         .task(id: searchText) {
             await performLookup()
         }
-        .onChange(of: editModeState) { newValue in
+        .onChange(of: editModeState) { oldValue, newValue in
             if newValue.isEditing == false {
                 selectedWordIDs.removeAll()
             }
         }
-        .onChange(of: trimmedSearchText) { trimmed in
+        .onChange(of: trimmedSearchText) { untrimmed, trimmed in
             if trimmed.isEmpty == false {
                 editModeState = .inactive
             }
@@ -139,40 +148,34 @@ struct WordsView: View {
                 .foregroundStyle(.secondary)
         } else {
             ForEach(sortedWords) { word in
-                HStack(alignment: .top, spacing: 12) {
-                    if isEditing {
-                        Image(systemName: selectedWordIDs.contains(word.id) ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(selectedWordIDs.contains(word.id) ? Color.accentColor : Color.secondary)
-                            .accessibilityHidden(true)
-                    }
-                    VStack(alignment: .leading) {
-                        Text(word.surface)
-                            .font(.headline)
-                        if let kana = word.kana, kana.isEmpty == false, kana != word.surface {
-                            Text(kana)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        if word.meaning.isEmpty == false {
-                            Text(word.meaning)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                savedRow(word)
+                    .tag(word.id)
+            }
+        }
+    }
+
+    private func savedRow(_ word: Word) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading) {
+                Text(word.surface)
+                    .font(.headline)
+                if let kana = word.kana, kana.isEmpty == false, kana != word.surface {
+                    Text(kana)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if isEditing {
-                        toggleSelection(for: word)
-                    }
+                if word.meaning.isEmpty == false {
+                    Text(word.meaning)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button(role: .destructive) {
-                        store.delete(id: word.id)
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                }
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                store.delete(id: word.id)
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }
@@ -244,6 +247,6 @@ struct WordsView: View {
 
 private extension EditMode {
     var isEditing: Bool {
-        self == .active
+        self != .inactive
     }
 }

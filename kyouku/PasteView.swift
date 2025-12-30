@@ -44,6 +44,8 @@ struct PasteView: View {
     @State private var showTokensPopover: Bool = false
     @State private var pendingRouterResetNoteID: UUID? = nil
     @State private var skipNextInitialFuriganaEnsure: Bool = false
+    @State private var isDictionarySheetPresented: Bool = false
+    @State private var measuredSheetHeight: CGFloat = 0
 
     private var tokenSelection: TokenSelectionContext? {
         get { selectionController.tokenSelection }
@@ -115,7 +117,7 @@ struct PasteView: View {
     private static let selectionLogger = DiagnosticsLogging.logger(.pasteSelection)
     private static let coordinateSpaceName = "PasteViewRootSpace"
     private static let inlineDictionaryPanelEnabledFlag = false
-    private static let dictionaryPopupEnabledFlag = false // Temporary debug switch so highlight behavior can be isolated without showing the popup.
+    private static let dictionaryPopupEnabledFlag = true // Temporary debug switch so highlight behavior can be isolated without showing the popup.
     private static let sheetMaxHeightFraction: CGFloat = 0.8
     private static let sheetExtraPadding: CGFloat = 36
     private let furiganaPipeline = FuriganaPipelineService()
@@ -146,6 +148,20 @@ struct PasteView: View {
     }
     private var commonParticleSet: Set<String> {
         Set(CommonParticleSettings.decodeList(from: commonParticlesRaw))
+    }
+    
+    private var preferredOverscrollPadding: CGFloat {
+        guard isDictionarySheetPresented else { return 0 }
+        let screenHeight: CGFloat = {
+            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                return scene.screen.bounds.height
+            }
+            return 480
+        }()
+        let halfScreen = screenHeight * 0.5
+        let measured = max(0, measuredSheetHeight + 50) // add some breathing room
+        let basePadding = max(measured, halfScreen)
+        return basePadding * 0.75
     }
 
     var body: some View {
@@ -273,8 +289,49 @@ struct PasteView: View {
         .onChange(of: readingFuriganaSize) { _, _ in
             triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
         }
-        .onChange(of: selectionController.tokenSelection) { _, newSelection in
+        .onChange(of: selectionController.tokenSelection) { oldSelection, newSelection in
+            if newSelection == nil {
+                if isDictionarySheetPresented {
+                    isDictionarySheetPresented = false
+                }
+            }
+            if dictionaryPopupEnabled {
+                switch (oldSelection, newSelection) {
+                case (nil, .some(let newCtx)):
+                    let r = newCtx.range
+                    Self.selectionLogger.debug("Dictionary popup shown (selection change) spanIndex=\(newCtx.spanIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(newCtx.surface, privacy: .public) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
+                case (.some(_), nil):
+                    Self.selectionLogger.debug("Dictionary popup hidden (selection cleared)")
+                case (.some(let oldCtx), .some(let newCtx)):
+                    if oldCtx.id != newCtx.id {
+                        let oldR = oldCtx.range
+                        let newR = newCtx.range
+                        Self.selectionLogger.debug("Dictionary popup replaced oldSpanIndex=\(oldCtx.spanIndex) oldRange=\(oldR.location)-\(NSMaxRange(oldR)) -> newSpanIndex=\(newCtx.spanIndex) newRange=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface, privacy: .public)")
+                    } else if oldCtx.range.location != newCtx.range.location || oldCtx.range.length != newCtx.range.length || oldCtx.surface != newCtx.surface {
+                        let newR = newCtx.range
+                        Self.selectionLogger.debug("Dictionary popup updated spanIndex=\(newCtx.spanIndex) range=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface, privacy: .public)")
+                    }
+                default:
+                    break
+                }
+            }
             handleSelectionLookup(for: newSelection?.surface ?? "")
+        }
+        .onChange(of: sheetSelection?.id) { oldID, newID in
+            guard dictionaryPopupEnabled else { return }
+            if oldID == nil, let _ = newID {
+                if let ctx = sheetSelection {
+                    let r = ctx.range
+                    Self.selectionLogger.debug("Dictionary popup shown (sheet binding) spanIndex=\(ctx.spanIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface, privacy: .public)")
+                } else {
+                    Self.selectionLogger.debug("Dictionary popup shown (sheet binding)")
+                }
+            } else if let _ = oldID, newID == nil {
+                Self.selectionLogger.debug("Dictionary popup hidden (sheet binding cleared)")
+            } else if let _ = oldID, let _ = newID, let ctx = sheetSelection {
+                let r = ctx.range
+                Self.selectionLogger.debug("Dictionary popup replaced (sheet binding) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface, privacy: .public)")
+            }
         }
         .onChange(of: currentNote?.id) { _, _ in
             clearSelection()
@@ -292,6 +349,13 @@ struct PasteView: View {
         .onChange(of: tokenSelection == nil) { _, isNil in
             if isNil {
                 tokenPanelFrame = nil
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isDictionarySheetPresented {
+                isDictionarySheetPresented = false
+                clearSelection(resetPersistent: true)
             }
         }
     }
@@ -373,6 +437,7 @@ struct PasteView: View {
                 selectedRangeHighlight: persistentSelectionRange,
                 customizedRanges: customizedRanges,
                 enableTapInspection: true,
+                bottomOverscrollPadding: preferredOverscrollPadding,
                 onSpanSelection: handleInlineSpanSelection,
                 contextMenuStateProvider: { inlineContextMenuState },
                 onContextMenuAction: handleContextMenuAction
@@ -692,11 +757,16 @@ struct PasteView: View {
 
     private func clearSelection(resetPersistent: Bool = true) {
         Self.selectionLogger.debug("Clearing selection resetPersistent=\(resetPersistent)")
+        let hadSelection = selectionController.tokenSelection != nil
         selectionController.clearSelection(resetPersistent: resetPersistent)
+        isDictionarySheetPresented = false
         Task { @MainActor in
             inlineLookup.results = []
             inlineLookup.errorMessage = nil
             inlineLookup.isLoading = false
+        }
+        if dictionaryPopupEnabled && hadSelection {
+            Self.selectionLogger.debug("Dictionary popup hidden")
         }
     }
 
@@ -774,30 +844,42 @@ struct PasteView: View {
     private func applyDictionarySheet<Content: View>(to view: Content) -> AnyView {
         if sheetDictionaryPanelEnabled {
             return AnyView(
-                view.sheet(item: sheetSelectionBinding, onDismiss: { clearSelection(resetPersistent: false) }) { selection in
-                    let sheetPanel = dictionaryPanel(
-                        for: selection,
-                        enableDragToDismiss: false,
-                        embedInMaterialBackground: false
-                    )
-
-                    sheetPanel
-                        .overlay(
-                            GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: SheetPanelHeightPreferenceKey.self,
-                                    value: proxy.size.height
-                                )
-                            }
+                view.sheet(isPresented: $isDictionarySheetPresented, onDismiss: {
+                    if dictionaryPopupEnabled {
+                        Self.selectionLogger.debug("Dictionary popup dismissed by user")
+                    }
+                    clearSelection(resetPersistent: true)
+                }) {
+                    if let selection = sheetSelection {
+                        let sheetPanel = dictionaryPanel(
+                            for: selection,
+                            enableDragToDismiss: false,
+                            embedInMaterialBackground: false
                         )
-                        .onPreferenceChange(SheetPanelHeightPreferenceKey.self) { newValue in
-                            sheetPanelHeight = newValue
-                        }
-                        .presentationDragIndicator(.visible)
-                        .presentationDetents([
-                            .height(max(sheetPanelHeight + 50, 300))
-                        ])
-                        .presentationBackgroundInteraction(.enabled)
+
+                        sheetPanel
+                            .overlay(
+                                GeometryReader { proxy in
+                                    Color.clear.preference(
+                                        key: SheetPanelHeightPreferenceKey.self,
+                                        value: proxy.size.height
+                                    )
+                                }
+                            )
+                            .onPreferenceChange(SheetPanelHeightPreferenceKey.self) { newValue in
+                                sheetPanelHeight = newValue
+                                measuredSheetHeight = newValue
+                            }
+                            .presentationDragIndicator(.visible)
+                            .presentationDetents([
+                                .height(max(sheetPanelHeight + 50, 300))
+                            ])
+                            .presentationBackgroundInteraction(.enabled)
+                    } else {
+                        // If the selection is nil while presented, close the sheet.
+                        EmptyView()
+                            .onAppear { isDictionarySheetPresented = false }
+                    }
                 }
             )
         } else {
@@ -896,6 +978,11 @@ struct PasteView: View {
         tokenSelection = context
         if sheetDictionaryPanelEnabled {
             sheetSelection = context
+            isDictionarySheetPresented = true
+        }
+        if dictionaryPopupEnabled {
+            let r = context.range
+            Self.selectionLogger.debug("Dictionary popup shown spanIndex=\(index) range=\(r.location)-\(NSMaxRange(r)) surface=\(context.surface, privacy: .public) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
         }
         pendingSplitFocusSelectionID = focusSplitMenu ? context.id : nil
     }
@@ -917,7 +1004,18 @@ struct PasteView: View {
         guard spans.indices.contains(index) else { return }
         guard let context = selectionContext(forSpanAt: index) else { return }
         let reading = normalizedReading(spans[index].readingKana)
-        guard hasSavedWord(surface: context.surface, reading: reading) == false else { return }
+        let surface = context.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Toggle behavior: if already saved, delete; otherwise add
+        if hasSavedWord(surface: surface, reading: reading) {
+            let matches = words.words.filter { $0.surface == surface && $0.kana == reading }
+            let ids = Set(matches.map { $0.id })
+            if ids.isEmpty == false {
+                words.delete(ids: ids)
+            }
+            return
+        }
+
         Task {
             let entry = await lookupPreferredDictionaryEntry(surface: context.surface, reading: reading)
             await MainActor.run {
@@ -1489,7 +1587,7 @@ private struct TokenListPanel: View {
                 }
                 .font(.title3)
                 .buttonStyle(.plain)
-                .disabled(item.isAlreadySaved)
+                .accessibilityLabel(item.isAlreadySaved ? "Remove from saved" : "Save")
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 12)

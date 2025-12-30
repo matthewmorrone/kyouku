@@ -21,6 +21,7 @@ struct SettingsView: View {
     @State private var previewAttributedText = NSAttributedString(string: SettingsView.previewSampleTextValue)
     @State private var previewRebuildTask: Task<Void, Never>? = nil
     @State private var previewSpans: [AnnotatedSpan]? = nil
+    @State private var previewSpansText: String? = nil
     @State private var previewValuesInitialized = false
     @State private var pendingReadingTextSize: Double = 17
     @State private var pendingReadingFuriganaSize: Double = 9
@@ -30,7 +31,9 @@ struct SettingsView: View {
     private static let previewFuriganaLine = "京都で日本語を勉強しています。"
     private static let previewSampleTextValue = "\(previewPlainLine)\n\(previewFuriganaLine)"
 
-    private var previewSampleText: String { Self.previewSampleTextValue }
+    private var previewText: String {
+        Self.previewSampleTextValue
+    }
 
     var body: some View {
         NavigationStack {
@@ -87,7 +90,8 @@ struct SettingsView: View {
                 attributed: previewAttributedText,
                 fontSize: CGFloat(pendingReadingTextSize),
                 lineHeightMultiple: 1.0,
-                extraGap: CGFloat(pendingReadingLineSpacing)
+                extraGap: CGFloat(pendingReadingLineSpacing),
+                enableTapInspection: false
             )
             .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
             .padding(.vertical, 8)
@@ -223,10 +227,11 @@ struct SettingsView: View {
     private func initializePreviewValuesIfNeeded() async {
         guard previewValuesInitialized == false else { return }
         previewValuesInitialized = true
+
         pendingReadingTextSize = readingTextSize
         pendingReadingFuriganaSize = readingFuriganaSize
         pendingReadingLineSpacing = readingLineSpacing
-        _ = await ensurePreviewSpans()
+        _ = await ensurePreviewSpans(for: previewText)
         schedulePreviewRebuild()
     }
 
@@ -276,19 +281,21 @@ struct SettingsView: View {
     }
 
     private func schedulePreviewRebuild() {
+        let text = previewText
         let textSize = pendingReadingTextSize
         let furiganaSize = pendingReadingFuriganaSize
+
         previewRebuildTask?.cancel()
         previewRebuildTask = Task {
-            await rebuildPreviewAttributedText(textSize: textSize, furiganaSize: furiganaSize)
+            await rebuildPreviewAttributedText(text: text, textSize: textSize, furiganaSize: furiganaSize)
         }
     }
 
-    private func rebuildPreviewAttributedText(textSize: Double, furiganaSize: Double) async {
-        let spans = await ensurePreviewSpans()
+    private func rebuildPreviewAttributedText(text: String, textSize: Double, furiganaSize: Double) async {
+        let spans = await ensurePreviewSpans(for: text)
         if Task.isCancelled { return }
         let attributed = FuriganaAttributedTextBuilder.project(
-            text: previewSampleText,
+            text: text,
             annotatedSpans: spans,
             textSize: textSize,
             furiganaSize: furiganaSize,
@@ -300,21 +307,30 @@ struct SettingsView: View {
         }
     }
 
-    private func ensurePreviewSpans() async -> [AnnotatedSpan] {
-        if let cached = await MainActor.run(body: { () -> [AnnotatedSpan]? in previewSpans }) {
-            return cached
+    private func ensurePreviewSpans(for text: String) async -> [AnnotatedSpan] {
+        let cached = await MainActor.run(body: { () -> (String?, [AnnotatedSpan]?) in
+            (previewSpansText, previewSpans)
+        })
+        if cached.0 == text, let spans = cached.1 {
+            return spans
         }
 
         do {
             let spans = try await FuriganaAttributedTextBuilder.computeAnnotatedSpans(
-                text: previewSampleText,
+                text: text,
                 context: "SettingsPreview",
                 overrides: []
             )
-            await MainActor.run { previewSpans = spans }
+            await MainActor.run {
+                previewSpans = spans
+                previewSpansText = text
+            }
             return spans
         } catch {
-            await MainActor.run { previewSpans = [] }
+            await MainActor.run {
+                previewSpans = []
+                previewSpansText = text
+            }
             return []
         }
     }

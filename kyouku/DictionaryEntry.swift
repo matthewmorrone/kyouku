@@ -83,14 +83,22 @@ actor DictionarySQLiteStore {
         var results = try queryExactMatches(for: normalized, limit: limit)
         if !results.isEmpty { return results }
 
-        // 2) If input looks like Latin (romaji), try converting to kana and match kana_forms
-        let allowedLatin = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '-")
-        if normalized.rangeOfCharacter(from: allowedLatin.inverted) == nil {
+        // 2) If input looks like Latin (romaji/English), try converting to kana and match kana/kanji.
+        //    This enables searching by romaji even when the user types a partial reading.
+        if looksLikeLatinQuery(normalized) {
             let kanaCandidates = latinToKanaCandidates(for: normalized)
             for cand in kanaCandidates where !cand.isEmpty {
                 results = try queryExactMatches(for: cand, limit: limit)
                 if !results.isEmpty { return results }
+
+                // Try substring match on kana tokens too (surface_index indexes kana as well).
+                results = try selectEntriesBySurfaceToken(matching: cand, limit: limit)
+                if !results.isEmpty { return results }
             }
+
+            // English gloss search via FTS (works for both English and romaji-like Latin strings).
+            results = try selectEntriesByGloss(matching: normalized, limit: limit)
+            return results
         }
 
         // 2b) Surface substring match via indexed tokens if no hits yet
@@ -100,6 +108,53 @@ actor DictionarySQLiteStore {
         // 3) English gloss search via FTS
         results = try selectEntriesByGloss(matching: normalized, limit: limit)
         return results
+    }
+
+    private func looksLikeLatinQuery(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return false }
+        guard containsJapaneseScript(trimmed) == false else { return false }
+
+        var hasLatinLetter = false
+        for scalar in trimmed.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) { continue }
+            if scalar == "'" || scalar == "-" { continue }
+
+            // Common macron vowels used in romaji.
+            if scalar == "ā" || scalar == "ī" || scalar == "ū" || scalar == "ē" || scalar == "ō" {
+                hasLatinLetter = true
+                continue
+            }
+            if scalar == "Ā" || scalar == "Ī" || scalar == "Ū" || scalar == "Ē" || scalar == "Ō" {
+                hasLatinLetter = true
+                continue
+            }
+
+            if (0x0041...0x005A).contains(scalar.value) || (0x0061...0x007A).contains(scalar.value) {
+                hasLatinLetter = true
+                continue
+            }
+
+            // Allow ASCII digits (e.g., "jlpt5") and basic punctuation without rejecting the query.
+            if (0x0030...0x0039).contains(scalar.value) { continue }
+        }
+        return hasLatinLetter
+    }
+
+    private func containsJapaneseScript(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x3040...0x309F, // Hiragana
+                 0x30A0...0x30FF, // Katakana
+                 0xFF66...0xFF9F, // Half-width katakana
+                 0x3400...0x4DBF, // CJK Ext A
+                 0x4E00...0x9FFF: // CJK Unified
+                return true
+            default:
+                continue
+            }
+        }
+        return false
     }
 
     /// Public async API used by the rest of the app.
