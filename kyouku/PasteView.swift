@@ -42,6 +42,7 @@ struct PasteView: View {
     @State private var overrideSignature: Int = 0
     @State private var customizedRanges: [NSRange] = []
     @State private var showTokensPopover: Bool = false
+    @State private var showAdjustedSpansPopover: Bool = false
     @State private var pendingRouterResetNoteID: UUID? = nil
     @State private var skipNextInitialFuriganaEnsure: Bool = false
     @State private var isDictionarySheetPresented: Bool = false
@@ -100,6 +101,7 @@ struct PasteView: View {
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage("pasteViewScratchNoteID") private var scratchNoteIDRaw: String = ""
+    @AppStorage("pasteViewLastOpenedNoteID") private var lastOpenedNoteIDRaw: String = ""
     @AppStorage("extractHideDuplicateTokens") private var hideDuplicateTokens: Bool = false
     @AppStorage("extractHideCommonParticles") private var hideCommonParticles: Bool = false
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
@@ -111,6 +113,11 @@ struct PasteView: View {
         let newID = UUID()
         scratchNoteIDRaw = newID.uuidString
         return newID
+    }
+
+    private var lastOpenedNoteID: UUID? {
+        guard lastOpenedNoteIDRaw.isEmpty == false else { return nil }
+        return UUID(uuidString: lastOpenedNoteIDRaw)
     }
 
     private static let furiganaLogger = DiagnosticsLogging.logger(.furigana)
@@ -216,6 +223,32 @@ struct PasteView: View {
         .accessibilityLabel("Reset Spans")
     }
 
+    private var adjustedSpansButton: some View {
+        Button {
+            showAdjustedSpansPopover = true
+        } label: {
+            Image(systemName: "list.bullet")
+        }
+        .accessibilityLabel("Show Adjusted Spans")
+        .popover(isPresented: $showAdjustedSpansPopover) {
+            ScrollView {
+                Text(adjustedSpansDebugText)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .frame(minWidth: 320, idealWidth: 420, maxWidth: 520, minHeight: 220, idealHeight: 320, maxHeight: 520)
+        }
+    }
+
+    private var adjustedSpansDebugText: String {
+        guard let spans = furiganaSpans, spans.isEmpty == false else {
+            return "(No spans yet)"
+        }
+        return SegmentationService.describe(spans: spans.map(\.span))
+    }
+
     private var coreContent: some View {
         ZStack(alignment: .bottom) {
             editorColumn
@@ -225,6 +258,9 @@ struct PasteView: View {
         .navigationTitle(noteTitleInput.isEmpty ? "Paste" : noteTitleInput)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                adjustedSpansButton
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 12) {
                     resetSpansButton
@@ -333,7 +369,8 @@ struct PasteView: View {
                 Self.selectionLogger.debug("Dictionary popup replaced (sheet binding) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface, privacy: .public)")
             }
         }
-        .onChange(of: currentNote?.id) { _, _ in
+        .onChange(of: currentNote?.id) { _, newValue in
+            lastOpenedNoteIDRaw = newValue?.uuidString ?? ""
             clearSelection()
             overrideSignature = computeOverrideSignature()
             updateCustomizedRanges()
@@ -697,6 +734,15 @@ struct PasteView: View {
             }
             router.pasteShouldBeginEditing = false
             router.noteToOpen = nil
+        } else if currentNote == nil,
+                  inputText.isEmpty,
+                  let lastID = lastOpenedNoteID,
+                  let note = notes.notes.first(where: { $0.id == lastID }) {
+            currentNote = note
+            assignInputTextFromExternalSource(note.text)
+            noteTitleInput = note.title ?? ""
+            hasManuallyEditedTitle = (note.title?.isEmpty == false)
+            setEditing(false, suppressRefresh: true)
         } else if let existingNote = currentNote, noteTitleInput.isEmpty {
             noteTitleInput = existingNote.title ?? ""
             hasManuallyEditedTitle = (existingNote.title?.isEmpty == false)

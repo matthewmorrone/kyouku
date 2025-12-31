@@ -131,11 +131,27 @@ struct SpanReadingAttacher {
                 let normalized = Self.toHiragana(trimmed)
                 readingResult = normalized.isEmpty ? nil : normalized
             } else if let token = coveringToken {
-                let tokenReadingKatakana = Self.toKatakana(token.reading.isEmpty ? token.surface : token.reading)
-                if let stripped = Self.kanjiReadingFromToken(tokenSurface: token.surface, tokenReadingKatakana: tokenReadingKatakana) {
+                let tokenReadingSource: String
+                if token.reading.isEmpty == false {
+                    tokenReadingSource = token.reading
+                } else if let retokenized = readingByRetokenizingSurface(token.surface, tokenizer: tokenizer)?.reading, retokenized.isEmpty == false {
+                    tokenReadingSource = retokenized
+                } else {
+                    tokenReadingSource = token.surface
+                }
+
+                let tokenReadingKatakana = Self.toKatakana(tokenReadingSource)
+                if containsKanji(tokenReadingKatakana) == false,
+                   let stripped = Self.kanjiReadingFromToken(tokenSurface: token.surface, tokenReadingKatakana: tokenReadingKatakana) {
                     let normalizedFallback = Self.toHiragana(stripped)
-//                    Self.debug("[SpanReadingAttacher] Fallback token surface=\(token.surface) strippedReading=\(normalizedFallback) for span=\(span.surface).")
                     readingResult = normalizedFallback.isEmpty ? nil : normalizedFallback
+                }
+
+                if readingResult == nil,
+                   let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
+                    let trimmed = Self.trimDictionaryOkurigana(surface: span.surface, reading: retokenized.reading)
+                    let normalized = Self.toHiragana(trimmed)
+                    readingResult = normalized.isEmpty ? nil : normalized
                 }
             } else if let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
                 let trimmed = Self.trimDictionaryOkurigana(surface: span.surface, reading: retokenized.reading)
@@ -215,9 +231,13 @@ struct SpanReadingAttacher {
     private static func trimDictionaryOkurigana(surface: String, reading: String) -> String {
         guard reading.isEmpty == false else { return reading }
         guard let suffix = trailingKanaRun(in: surface), suffix.isEmpty == false else { return reading }
-        guard reading.hasSuffix(suffix) else { return reading }
-        let endIndex = reading.index(reading.endIndex, offsetBy: -suffix.count)
-        return String(reading[..<endIndex])
+
+        // MeCab readings are typically katakana, while the surface okurigana is usually hiragana.
+        // Normalize both before suffix matching so we reliably trim duplicated okurigana.
+        let normalizedReading = toHiragana(reading)
+        let normalizedSuffix = toHiragana(suffix)
+        guard normalizedReading.hasSuffix(normalizedSuffix) else { return reading }
+        return String(normalizedReading.dropLast(normalizedSuffix.count))
     }
 
     private static func trailingKanaRun(in surface: String) -> String? {

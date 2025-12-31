@@ -70,7 +70,7 @@ class NotesStore: ObservableObject {
             let archive = NotesArchive(
                 version: 1,
                 notes: notes,
-                overrides: overridesStore?.allOverrides() ?? []
+                overrides: []
             )
             let data = try JSONEncoder().encode(archive)
             try data.write(to: saveURL, options: .atomic)
@@ -88,8 +88,10 @@ class NotesStore: ObservableObject {
             let decoder = JSONDecoder()
             if let archive = try? decoder.decode(NotesArchive.self, from: data) {
                 notes = archive.notes
-                if archive.overrides.isEmpty == false {
+                if archive.overrides.isEmpty == false,
+                   (overridesStore?.allOverrides().isEmpty ?? true) {
                     overridesStore?.replaceAll(with: archive.overrides)
+                    needsUpgrade = true
                 }
                 Self.logger.debug("Loaded archive with \(archive.notes.count) notes and \(archive.overrides.count) overrides")
             } else {

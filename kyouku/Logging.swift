@@ -12,6 +12,7 @@ enum DiagnosticsLogging {
         static var furigana: Area { area(enabled: true) }
         static var notesStore: Area { area(enabled: true) }
         static var readingOverrides: Area { area(enabled: true) }
+        static var tokenBoundaries: Area { area(enabled: true) }
 
         private static func area(enabled: Bool = false, name: String = #function) -> Area {
             let cleanName = name.replacingOccurrences(of: ".getter", with: "")

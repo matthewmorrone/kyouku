@@ -10,6 +10,7 @@ import SwiftUI
 @main
 struct KyoukuApp: App {
     @StateObject private var readingOverrides: ReadingOverridesStore
+    @StateObject private var tokenBoundaries: TokenBoundariesStore
     @StateObject private var notes: NotesStore
     @StateObject private var store: WordsStore
     @StateObject private var router: AppRouter
@@ -17,6 +18,7 @@ struct KyoukuApp: App {
     init() {
         let overrides = ReadingOverridesStore()
         _readingOverrides = StateObject(wrappedValue: overrides)
+        _tokenBoundaries = StateObject(wrappedValue: TokenBoundariesStore())
         _notes = StateObject(wrappedValue: NotesStore(readingOverrides: overrides))
         _store = StateObject(wrappedValue: WordsStore())
         _router = StateObject(wrappedValue: AppRouter())
@@ -29,6 +31,7 @@ struct KyoukuApp: App {
                 .environmentObject(store)
                 .environmentObject(router)
                 .environmentObject(readingOverrides)
+                .environmentObject(tokenBoundaries)
                 .onOpenURL { url in
                     // Expect kyouku://inbox to route to Paste tab; PasteView will ingest on appear/activation
                     if url.scheme == "kyouku" && url.host == "inbox" {

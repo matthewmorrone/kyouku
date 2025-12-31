@@ -115,6 +115,15 @@ final class ReadingOverridesStore: ObservableObject {
         notifyChange()
     }
 
+    func removeBoundaryOverrides(for noteID: UUID) {
+        let before = overrides.count
+        overrides.removeAll { $0.noteID == noteID && $0.userKana == nil }
+        guard overrides.count != before else { return }
+        save()
+        Self.logger.debug("Removed boundary-only overrides for note=\(noteID) remaining=\(self.overrides.count)")
+        notifyChange()
+    }
+
     func deleteOverride(id: UUID) {
         let before = overrides.count
         overrides.removeAll { $0.id == id }

@@ -7,6 +7,12 @@ import OSLog
 actor SegmentationService {
     static let shared = SegmentationService()
 
+    static func describe(spans: [TextSpan]) -> String {
+        spans
+            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+            .joined(separator: ", ")
+    }
+
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SegmentationService")
 
     private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) async {
