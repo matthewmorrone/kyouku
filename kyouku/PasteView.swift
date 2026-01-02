@@ -24,6 +24,7 @@ struct PasteView: View {
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var words: WordsStore
     @EnvironmentObject var readingOverrides: ReadingOverridesStore
+    @EnvironmentObject var tokenBoundaries: TokenBoundariesStore
     @Environment(\.undoManager) private var undoManager
 
     @State private var inputText: String = ""
@@ -47,6 +48,10 @@ struct PasteView: View {
     @State private var skipNextInitialFuriganaEnsure: Bool = false
     @State private var isDictionarySheetPresented: Bool = false
     @State private var measuredSheetHeight: CGFloat = 0
+
+    @State private var showWordDefinitionsSheet: Bool = false
+    @State private var wordDefinitionsSurface: String = ""
+    @State private var wordDefinitionsKana: String? = nil
 
     private var tokenSelection: TokenSelectionContext? {
         get { selectionController.tokenSelection }
@@ -175,6 +180,11 @@ struct PasteView: View {
         NavigationStack {
             contentView
         }
+        .sheet(isPresented: $showWordDefinitionsSheet) {
+            NavigationStack {
+                WordDefinitionsView(surface: wordDefinitionsSurface, kana: wordDefinitionsKana)
+            }
+        }
     }
 
     @ViewBuilder
@@ -213,6 +223,18 @@ struct PasteView: View {
         }
     }
 
+    private var transformPasteTextButton: some View {
+        Button {
+            let transformed = PasteTextTransforms.transform(inputText)
+            if transformed != inputText {
+                inputText = transformed
+            }
+        } label: {
+            Image(systemName: "character.cursor.ibeam")
+        }
+        .accessibilityLabel("Transform Paste Text")
+    }
+
     private var resetSpansButton: some View {
         Button {
             // Intentionally reuse the global reset path shared with NotesView to keep behavior consistent.
@@ -235,10 +257,21 @@ struct PasteView: View {
                 Text(adjustedSpansDebugText)
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
+                    .contextMenu {
+                        Button {
+                            UIPasteboard.general.string = adjustedSpansDebugText
+                        } label: {
+                            Label("Copy All", systemImage: "doc.on.doc")
+                        }
+                        if #available(iOS 16.0, *) {
+                            ShareLink(item: adjustedSpansDebugText) {
+                                Label("Share…", systemImage: "square.and.arrow.up")
+                            }
+                        }
+                    }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
             }
-            .frame(minWidth: 320, idealWidth: 420, maxWidth: 520, minHeight: 220, idealHeight: 320, maxHeight: 520)
         }
     }
 
@@ -263,6 +296,7 @@ struct PasteView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 12) {
+                    transformPasteTextButton
                     resetSpansButton
                     tokenListButton
                 }
@@ -459,6 +493,10 @@ struct PasteView: View {
 
     private var editorColumn: some View {
         VStack(spacing: 0) {
+            // Debug/forcing wrap: a fixed logical width (points), not pixels.
+            // This is intentionally hard-coded to prove wrapping is possible even
+            // if the surrounding SwiftUI layout ends up unconstrained.
+            let forcedWrapWidth: CGFloat = 390
             FuriganaRenderingHost(
                 text: $inputText,
                 furiganaText: furiganaAttributedText,
@@ -479,8 +517,8 @@ struct PasteView: View {
                 contextMenuStateProvider: { inlineContextMenuState },
                 onContextMenuAction: handleContextMenuAction
             )
+            .frame(width: forcedWrapWidth, alignment: .topLeading)
             .padding(.vertical, 16)
-            .padding(.horizontal, 16)
             Divider()
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
@@ -635,11 +673,17 @@ struct PasteView: View {
                 canMergePrevious: canMergeSelection(.previous),
                 canMergeNext: canMergeSelection(.next),
                 onDismiss: { clearSelection(resetPersistent: false) },
-                onDefine: { entry in
-                    defineWord(using: entry)
+                onSaveWord: { entry in
+                    toggleSavedWord(surface: selection.surface, entry: entry)
                 },
-                onUseReading: { entry in
+                onApplyReading: { entry in
                     applyDictionaryReading(entry)
+                },
+                onApplyCustomReading: { kana in
+                    applyCustomReading(kana)
+                },
+                isWordSaved: { entry in
+                    isSavedWord(for: selection.surface, entry: entry)
                 },
                 onMergePrevious: { mergeSelection(.previous) },
                 onMergeNext: { mergeSelection(.next) },
@@ -764,9 +808,64 @@ struct PasteView: View {
         }
         overrideSignature = computeOverrideSignature()
         updateCustomizedRanges()
+        migrateBoundaryOverridesIfNeeded()
         pendingRouterResetNoteID = router.pendingResetNoteID
         processPendingRouterResetRequest()
         ensureInitialFuriganaReady(reason: "onAppear initialization")
+    }
+
+    private func migrateBoundaryOverridesIfNeeded() {
+        let noteID = activeNoteID
+        let boundaryOverrides = readingOverrides.overrides(for: noteID).filter { $0.userKana == nil }
+        if tokenBoundaries.hasCustomSpans(for: noteID) {
+            if boundaryOverrides.isEmpty == false {
+                readingOverrides.removeBoundaryOverrides(for: noteID)
+                overrideSignature = computeOverrideSignature()
+                updateCustomizedRanges()
+            }
+            return
+        }
+        guard boundaryOverrides.isEmpty == false else { return }
+        guard inputText.isEmpty == false else { return }
+
+        Task {
+            let text = inputText
+            let nsText = text as NSString
+            let length = nsText.length
+            guard length > 0 else { return }
+            do {
+                let base = try await SegmentationService.shared.segment(text: text)
+                let overrideSpans: [TextSpan] = boundaryOverrides.compactMap { override in
+                    let r = override.nsRange
+                    guard r.location != NSNotFound, r.length > 0 else { return nil }
+                    guard r.location < length else { return nil }
+                    let end = min(NSMaxRange(r), length)
+                    guard end > r.location else { return nil }
+                    let range = NSRange(location: r.location, length: end - r.location)
+                    let surface = nsText.substring(with: range)
+                    return TextSpan(range: range, surface: surface, isLexiconMatch: false)
+                }
+                guard overrideSpans.isEmpty == false else { return }
+                let overrideRanges = overrideSpans.map(\.range)
+                var amended = base.filter { baseSpan in
+                    overrideRanges.contains { NSIntersectionRange($0, baseSpan.range).length > 0 } == false
+                }
+                amended.append(contentsOf: overrideSpans)
+                amended.sort { lhs, rhs in
+                    if lhs.range.location == rhs.range.location { return lhs.range.length < rhs.range.length }
+                    return lhs.range.location < rhs.range.location
+                }
+                await MainActor.run {
+                    tokenBoundaries.setSpans(noteID: noteID, spans: amended, text: text)
+                    readingOverrides.removeBoundaryOverrides(for: noteID)
+                    overrideSignature = computeOverrideSignature()
+                    updateCustomizedRanges()
+                    triggerFuriganaRefreshIfNeeded(reason: "migrated legacy token edits", recomputeSpans: true)
+                }
+            } catch {
+                return
+            }
+        }
     }
 
     private func syncNoteForInputChange(_ newValue: String) {
@@ -868,12 +967,21 @@ struct PasteView: View {
             preferredReading: selection.annotatedSpan.readingKana,
             canMergePrevious: canMergeSelection(.previous),
             canMergeNext: canMergeSelection(.next),
-            onDismiss: { clearSelection(resetPersistent: false) },
-            onDefine: { entry in
-                defineWord(using: entry)
+            onShowDefinitions: {
+                presentWordDefinitions(for: selection)
             },
-            onUseReading: { entry in
+            onDismiss: { clearSelection(resetPersistent: false) },
+            onSaveWord: { entry in
+                toggleSavedWord(surface: selection.surface, entry: entry)
+            },
+            onApplyReading: { entry in
                 applyDictionaryReading(entry)
+            },
+            onApplyCustomReading: { kana in
+                applyCustomReading(kana)
+            },
+            isWordSaved: { entry in
+                isSavedWord(for: selection.surface, entry: entry)
             },
             onMergePrevious: { mergeSelection(.previous) },
             onMergeNext: { mergeSelection(.next) },
@@ -885,6 +993,39 @@ struct PasteView: View {
             focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
             onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
         )
+    }
+
+    private func isSavedWord(for surface: String, entry: DictionaryEntry) -> Bool {
+        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let k = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kana = (k?.isEmpty == false) ? k : nil
+        guard s.isEmpty == false else { return false }
+        return words.words.contains { $0.surface == s && $0.kana == kana }
+    }
+
+    private func toggleSavedWord(surface: String, entry: DictionaryEntry) {
+        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let k = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kana = (k?.isEmpty == false) ? k : nil
+        guard s.isEmpty == false else { return }
+
+        let matchingIDs = Set(
+            words.words
+                .filter { $0.surface == s && $0.kana == kana }
+                .map(\.id)
+        )
+
+        if matchingIDs.isEmpty {
+            defineWord(using: entry)
+        } else {
+            words.delete(ids: matchingIDs)
+        }
+    }
+
+    private func presentWordDefinitions(for selection: TokenSelectionContext) {
+        wordDefinitionsSurface = selection.surface
+        wordDefinitionsKana = normalizedReading(selection.annotatedSpan.readingKana)
+        showWordDefinitionsSheet = true
     }
 
     private func applyDictionarySheet<Content: View>(to view: Content) -> AnyView {
@@ -1173,25 +1314,25 @@ struct PasteView: View {
     }
 
     private func mergeSpan(at index: Int, direction: MergeDirection) {
+        let wasShowingTokensPopover = showTokensPopover
         guard let spans = furiganaSpans else { return }
         guard spans.indices.contains(index) else { return }
         guard let neighborIndex = neighborIndex(for: index, direction: direction), spans.indices.contains(neighborIndex) else { return }
-        let currentRange = spans[index].span.range
-        let neighborRange = spans[neighborIndex].span.range
-        let union = NSUnionRange(currentRange, neighborRange)
-        let override = ReadingOverride(
-            noteID: activeNoteID,
-            rangeStart: union.location,
-            rangeLength: union.length,
-            userKana: nil
-        )
-        applyOverridesChange(range: union, newOverrides: [override], actionName: "Merge Tokens")
+        guard let union = applySpanMerge(primaryIndex: index, neighborIndex: neighborIndex, actionName: "Merge Tokens") else { return }
         persistentSelectionRange = union
-        pendingSelectionRange = nil
-        tokenSelection = nil
+        pendingSelectionRange = union
+        let mergedIndex = min(index, neighborIndex)
+        let textStorage = inputText as NSString
+        guard NSMaxRange(union) <= textStorage.length else { return }
+        let surface = textStorage.substring(with: union)
+        let ephemeral = AnnotatedSpan(span: TextSpan(range: union, surface: surface, isLexiconMatch: false), readingKana: nil, lemmaCandidates: [])
+        let ctx = TokenSelectionContext(spanIndex: mergedIndex, range: union, surface: surface, annotatedSpan: ephemeral)
+        tokenSelection = ctx
         if sheetDictionaryPanelEnabled {
-            sheetSelection = nil
+            sheetSelection = ctx
+            isDictionarySheetPresented = true
         }
+        showTokensPopover = wasShowingTokensPopover
     }
 
     private func startSplitFlow(for index: Int) {
@@ -1220,7 +1361,7 @@ struct PasteView: View {
     }
 
     private func computeOverrideSignature() -> Int {
-        let overrides = readingOverrides.overrides(for: activeNoteID).sorted { lhs, rhs in
+        let overrides = readingOverrides.overrides(for: activeNoteID).filter { $0.userKana != nil }.sorted { lhs, rhs in
             if lhs.rangeStart == rhs.rangeStart {
                 return lhs.rangeLength < rhs.rangeLength
             }
@@ -1237,8 +1378,13 @@ struct PasteView: View {
     }
 
     private func updateCustomizedRanges() {
-        let overrides = readingOverrides.overrides(for: activeNoteID)
-        customizedRanges = overrides.map { $0.nsRange }
+        var ranges = readingOverrides.overrides(for: activeNoteID).filter { $0.userKana != nil }.map { $0.nsRange }
+
+        if tokenBoundaries.hasCustomSpans(for: activeNoteID) {
+            ranges.append(contentsOf: tokenBoundaries.storedRanges(for: activeNoteID))
+        }
+
+        customizedRanges = ranges
     }
 
     private func defineWord(using entry: DictionaryEntry) {
@@ -1263,55 +1409,194 @@ struct PasteView: View {
         applyOverridesChange(range: selection.range, newOverrides: [override], actionName: "Apply Reading")
     }
 
+    private func applyCustomReading(_ kana: String) {
+        guard let selection = tokenSelection else { return }
+        let trimmed = kana.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+        let normalized = normalizeOverrideKana(trimmed)
+        guard normalized.isEmpty == false else { return }
+
+        let override = ReadingOverride(
+            noteID: activeNoteID,
+            rangeStart: selection.range.location,
+            rangeLength: selection.range.length,
+            userKana: normalized
+        )
+        applyOverridesChange(range: selection.range, newOverrides: [override], actionName: "Apply Custom Reading")
+    }
+
+    private func normalizeOverrideKana(_ text: String) -> String {
+        let mutable = NSMutableString(string: text)
+        CFStringTransform(mutable, nil, kCFStringTransformHiraganaKatakana, true)
+        return (mutable as String).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func mergeSelection(_ direction: MergeDirection) {
+        let wasShowingTokensPopover = showTokensPopover
         guard let selection = tokenSelection else { return }
         guard let spans = furiganaSpans else { return }
         guard let neighborIndex = neighborIndex(for: selection.spanIndex, direction: direction), spans.indices.contains(neighborIndex) else { return }
-        let currentRange = spans[selection.spanIndex].span.range
-        let neighborRange = spans[neighborIndex].span.range
-        let union = NSUnionRange(currentRange, neighborRange)
-        let override = ReadingOverride(
-            noteID: activeNoteID,
-            rangeStart: union.location,
-            rangeLength: union.length,
-            userKana: nil
-        )
-        applyOverridesChange(range: union, newOverrides: [override], actionName: "Merge Tokens")
-        clearSelection(resetPersistent: false)
-        beginPendingSelectionRestoration(for: union)
+        guard let union = applySpanMerge(primaryIndex: selection.spanIndex, neighborIndex: neighborIndex, actionName: "Merge Tokens") else { return }
+        persistentSelectionRange = union
+        pendingSelectionRange = union
+        pendingSplitFocusSelectionID = nil
+
+        let mergedIndex = min(selection.spanIndex, neighborIndex)
+        let textStorage = inputText as NSString
+        guard NSMaxRange(union) <= textStorage.length else { return }
+        let surface = textStorage.substring(with: union)
+        let ephemeral = AnnotatedSpan(span: TextSpan(range: union, surface: surface, isLexiconMatch: false), readingKana: nil, lemmaCandidates: [])
+        let ctx = TokenSelectionContext(spanIndex: mergedIndex, range: union, surface: surface, annotatedSpan: ephemeral)
+        tokenSelection = ctx
+        if sheetDictionaryPanelEnabled {
+            sheetSelection = ctx
+            isDictionarySheetPresented = true
+        }
+        showTokensPopover = wasShowingTokensPopover
     }
 
     private func splitSelection(at offset: Int) {
         guard let selection = tokenSelection else { return }
         guard selection.range.length > 1 else { return }
         guard offset > 0, offset < selection.range.length else { return }
-        let leftRange = NSRange(location: selection.range.location, length: offset)
-        let rightRange = NSRange(location: selection.range.location + offset, length: selection.range.length - offset)
-        let overridesToInsert = [leftRange, rightRange].map { subRange in
-            ReadingOverride(
-                noteID: activeNoteID,
-                rangeStart: subRange.location,
-                rangeLength: subRange.length,
-                userKana: nil
-            )
-        }
-        applyOverridesChange(range: selection.range, newOverrides: overridesToInsert, actionName: "Split Token")
+        applySpanSplit(spanIndex: selection.spanIndex, range: selection.range, offset: offset, actionName: "Split Token")
         clearSelection(resetPersistent: false)
     }
 
     private func resetSelectionOverrides() {
         guard let selection = tokenSelection else { return }
         applyOverridesChange(range: selection.range, newOverrides: [], actionName: "Reset Token")
+        resetSpanEdits(in: selection.range, actionName: "Reset Token")
         clearSelection(resetPersistent: false)
     }
 
     private func resetAllCustomSpans() {
         let noteID = activeNoteID
+        let previousAllOverrides = readingOverrides.allOverrides()
+        let previousSpanSnapshot = tokenBoundaries.snapshot(for: noteID)
+
         readingOverrides.removeAll(for: noteID)
+        tokenBoundaries.removeAll(for: noteID)
         overrideSignature = computeOverrideSignature()
         updateCustomizedRanges()
         clearSelection()
         triggerFuriganaRefreshIfNeeded(reason: "reset all overrides", recomputeSpans: true)
+
+        registerResetAllUndo(previousAllOverrides: previousAllOverrides, previousSpanSnapshot: previousSpanSnapshot, noteID: noteID)
+    }
+
+    private func applySpanMerge(primaryIndex: Int, neighborIndex: Int, actionName: String) -> NSRange? {
+        guard let spans = furiganaSpans else { return nil }
+        let indices = [primaryIndex, neighborIndex].sorted()
+        guard spans.indices.contains(indices[0]), spans.indices.contains(indices[1]) else { return nil }
+
+        let union = NSUnionRange(spans[indices[0]].span.range, spans[indices[1]].span.range)
+        let nsText = inputText as NSString
+        guard union.location != NSNotFound, union.length > 0 else { return nil }
+        guard NSMaxRange(union) <= nsText.length else { return nil }
+        let mergedSurface = nsText.substring(with: union)
+
+        var newSpans = spans.map(\.span)
+        newSpans.remove(at: indices[1])
+        newSpans.remove(at: indices[0])
+        newSpans.insert(TextSpan(range: union, surface: mergedSurface, isLexiconMatch: false), at: indices[0])
+
+        replaceSpans(newSpans, actionName: actionName)
+        return union
+    }
+
+    private func applySpanSplit(spanIndex: Int, range: NSRange, offset: Int, actionName: String) {
+        guard let spans = furiganaSpans else { return }
+        guard spans.indices.contains(spanIndex) else { return }
+        guard range.length > 1 else { return }
+        guard offset > 0, offset < range.length else { return }
+
+        let leftRange = NSRange(location: range.location, length: offset)
+        let rightRange = NSRange(location: range.location + offset, length: range.length - offset)
+        let nsText = inputText as NSString
+        guard NSMaxRange(rightRange) <= nsText.length else { return }
+
+        let leftSurface = nsText.substring(with: leftRange)
+        let rightSurface = nsText.substring(with: rightRange)
+
+        var newSpans = spans.map(\.span)
+        newSpans.remove(at: spanIndex)
+        newSpans.insert(TextSpan(range: rightRange, surface: rightSurface, isLexiconMatch: false), at: spanIndex)
+        newSpans.insert(TextSpan(range: leftRange, surface: leftSurface, isLexiconMatch: false), at: spanIndex)
+        replaceSpans(newSpans, actionName: actionName)
+    }
+
+    private func resetSpanEdits(in range: NSRange, actionName: String) {
+        guard inputText.isEmpty == false else { return }
+        let noteID = activeNoteID
+        guard tokenBoundaries.hasCustomSpans(for: noteID) else { return }
+        let text = inputText
+        let previousSnapshot = tokenBoundaries.snapshot(for: noteID)
+        registerSpanUndo(previousSnapshot: previousSnapshot, noteID: noteID, actionName: actionName)
+
+        Task {
+            do {
+                let base = try await SegmentationService.shared.segment(text: text)
+                let replacement = base.filter { NSIntersectionRange($0.range, range).length > 0 }
+                await MainActor.run {
+                    replaceSpans(in: range, with: replacement, actionName: actionName)
+                }
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func replaceSpans(_ spans: [TextSpan], actionName: String) {
+        let noteID = activeNoteID
+        let previousSnapshot = tokenBoundaries.snapshot(for: noteID)
+        registerSpanUndo(previousSnapshot: previousSnapshot, noteID: noteID, actionName: actionName)
+        tokenBoundaries.setSpans(noteID: noteID, spans: spans, text: inputText)
+        updateCustomizedRanges()
+        triggerFuriganaRefreshIfNeeded(reason: actionName, recomputeSpans: true)
+    }
+
+    private func replaceSpans(in range: NSRange, with replacement: [TextSpan], actionName: String) {
+        let noteID = activeNoteID
+        let text = inputText
+        var base = tokenBoundaries.spans(for: noteID, text: text) ?? furiganaSpans?.map(\.span) ?? []
+        base.removeAll { NSIntersectionRange($0.range, range).length > 0 }
+        base.append(contentsOf: replacement)
+        base.sort { lhs, rhs in
+            if lhs.range.location == rhs.range.location { return lhs.range.length < rhs.range.length }
+            return lhs.range.location < rhs.range.location
+        }
+        tokenBoundaries.setSpans(noteID: noteID, spans: base, text: text)
+        updateCustomizedRanges()
+        triggerFuriganaRefreshIfNeeded(reason: actionName, recomputeSpans: true)
+    }
+
+    private func registerSpanUndo(previousSnapshot: [TokenBoundariesStore.StoredSpan]?, noteID: UUID, actionName: String) {
+        guard let undoManager else { return }
+        let token = OverrideUndoToken { [self] in
+            tokenBoundaries.restore(noteID: noteID, snapshot: previousSnapshot)
+            updateCustomizedRanges()
+            triggerFuriganaRefreshIfNeeded(reason: "undo: \(actionName)", recomputeSpans: true)
+        }
+        undoManager.registerUndo(withTarget: token) { target in
+            target.perform()
+        }
+        undoManager.setActionName(actionName)
+    }
+
+    private func registerResetAllUndo(previousAllOverrides: [ReadingOverride], previousSpanSnapshot: [TokenBoundariesStore.StoredSpan]?, noteID: UUID) {
+        guard let undoManager else { return }
+        let token = OverrideUndoToken { [self] in
+            readingOverrides.replaceAll(with: previousAllOverrides)
+            tokenBoundaries.restore(noteID: noteID, snapshot: previousSpanSnapshot)
+            overrideSignature = computeOverrideSignature()
+            updateCustomizedRanges()
+            triggerFuriganaRefreshIfNeeded(reason: "undo: reset all", recomputeSpans: true)
+        }
+        undoManager.registerUndo(withTarget: token) { target in
+            target.perform()
+        }
+        undoManager.setActionName("Reset All")
     }
 
     private func processPendingRouterResetRequest() {
@@ -1416,13 +1701,12 @@ struct PasteView: View {
         // Capture current values by value to avoid capturing self
         let currentText = inputText
         let currentShowFurigana = showFurigana
-        let currentAlternateTokenColors = alternateTokenColors
-        let currentHighlightUnknownTokens = highlightUnknownTokens
         let currentSpanConsumersActive = spanConsumersActive
         let currentTextSize = readingTextSize
         let currentFuriganaSize = readingFuriganaSize
         let currentSpans = furiganaSpans
-        let currentOverrides = readingOverrides.overrides(for: activeNoteID)
+        let currentOverrides = readingOverrides.overrides(for: activeNoteID).filter { $0.userKana != nil }
+        let currentAmendedSpans = tokenBoundaries.spans(for: activeNoteID, text: currentText)
         let pipelineInput = FuriganaPipelineService.Input(
             text: currentText,
             showFurigana: currentShowFurigana,
@@ -1431,7 +1715,8 @@ struct PasteView: View {
             furiganaSize: currentFuriganaSize,
             recomputeSpans: recomputeSpans,
             existingSpans: currentSpans,
-            overrides: currentOverrides,
+            amendedSpans: currentAmendedSpans,
+            readingOverrides: currentOverrides,
             context: "PasteView"
         )
         let service = furiganaPipeline

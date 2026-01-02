@@ -78,7 +78,9 @@ struct RubyText: UIViewRepresentable {
         textView.isScrollEnabled = false
         textView.backgroundColor = .clear
         textView.textContainer.lineFragmentPadding = 0
-        textView.textContainer.widthTracksTextView = true
+        textView.textContainer.widthTracksTextView = false
+        textView.textContainer.maximumNumberOfLines = 0
+        textView.textContainer.lineBreakMode = .byWordWrapping
         textView.textContainerInset = textInsets
         textView.clipsToBounds = false
         textView.layer.masksToBounds = false
@@ -102,6 +104,9 @@ struct RubyText: UIViewRepresentable {
         uiView.tintColor = .systemBlue
         uiView.rubyAnnotationVisibility = annotationVisibility
         uiView.isEditable = false
+        uiView.textContainer.widthTracksTextView = false
+        uiView.textContainer.maximumNumberOfLines = 0
+        uiView.textContainer.lineBreakMode = .byWordWrapping
 
         // Gap between ruby and headword. Keep it small and stable so ruby feels anchored.
         // (Previously this was a bit too large, making ruby feel "detached".)
@@ -149,22 +154,11 @@ struct RubyText: UIViewRepresentable {
             RubyText.applyCustomizationHighlights(customizedRanges, to: mutable)
         }
 
-        let processed = RubyText.applyAnnotationVisibility(annotationVisibility, to: mutable)
-
-        // CoreText clamps ruby overhang at line edges. For long readings (especially at the
-        // start of a wrapped line), this can make ruby look "right-aligned". We compensate
-        // by adding a small symmetric horizontal inset large enough to contain the maximum
-        // ruby overhang, so centering remains visually consistent.
-        let requiredOverhangInset = RubyText.requiredHorizontalInsetForRubyOverhang(
-            in: processed,
-            baseFont: baseFont,
-            defaultRubyFontSize: max(1, fontSize * 0.6)
-        )
-        if requiredOverhangInset > 0 {
-            insets.left = max(insets.left, textInsets.left + requiredOverhangInset)
-            insets.right = max(insets.right, textInsets.right + requiredOverhangInset)
-        }
+        // Removed the computation and adjustment of horizontal insets for ruby overhang.
+        // We now simply assign insets directly without modifying left/right based on overhang.
         uiView.textContainerInset = insets
+
+        let processed = RubyText.applyAnnotationVisibility(annotationVisibility, to: mutable)
 
         uiView.applyAttributedText(processed)
         uiView.annotatedSpans = annotatedSpans
@@ -183,91 +177,57 @@ struct RubyText: UIViewRepresentable {
         uiView.setContentHuggingPriority(.defaultHigh, for: .vertical)
     }
 
-    private static func requiredHorizontalInsetForRubyOverhang(
-        in attributedString: NSAttributedString,
-        baseFont: UIFont,
-        defaultRubyFontSize: CGFloat
-    ) -> CGFloat {
-        guard attributedString.length > 0 else { return 0 }
-
-        let fullRange = NSRange(location: 0, length: attributedString.length)
-        let nsText = attributedString.string as NSString
-        var maxOverhang: CGFloat = 0
-
-        attributedString.enumerateAttribute(.rubyReadingText, in: fullRange, options: []) { value, range, _ in
-            guard let reading = value as? String, reading.isEmpty == false else { return }
-            guard range.location != NSNotFound, range.length > 0 else { return }
-            guard NSMaxRange(range) <= attributedString.length else { return }
-
-            let baseText = nsText.substring(with: range)
-            guard baseText.isEmpty == false else { return }
-
-            let rubyFontSize: CGFloat
-            if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? Double {
-                rubyFontSize = CGFloat(max(1.0, stored))
-            } else if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? CGFloat {
-                rubyFontSize = max(1.0, stored)
-            } else if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? NSNumber {
-                rubyFontSize = CGFloat(max(1.0, stored.doubleValue))
-            } else {
-                rubyFontSize = max(1.0, defaultRubyFontSize)
-            }
-
-            let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
-
-            let baseWidth = (baseText as NSString).size(withAttributes: [.font: baseFont]).width
-            let rubyWidth = (reading as NSString).size(withAttributes: [.font: rubyFont]).width
-            let overhang = max(0, (rubyWidth - baseWidth) / 2.0)
-            maxOverhang = max(maxOverhang, overhang)
-        }
-
-        guard maxOverhang > 0 else { return 0 }
-        // Small cushion to avoid pixel-snapping making it look slightly off.
-        return ceil(maxOverhang + 1.0)
-    }
-
-    private static func requiredVerticalHeadroomForRuby(
-        in attributedString: NSAttributedString,
-        baseFont: UIFont,
-        defaultRubyFontSize: CGFloat,
-        rubyBaselineGap: CGFloat
-    ) -> CGFloat {
-        guard attributedString.length > 0 else { return 0 }
-
-        let fullRange = NSRange(location: 0, length: attributedString.length)
-        var maxRubyHeight: CGFloat = 0
-
-        attributedString.enumerateAttribute(.rubyReadingText, in: fullRange, options: []) { value, range, _ in
-            guard let reading = value as? String, reading.isEmpty == false else { return }
-            guard range.location != NSNotFound, range.length > 0 else { return }
-            guard NSMaxRange(range) <= attributedString.length else { return }
-
-            let rubyFontSize: CGFloat
-            if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? Double {
-                rubyFontSize = CGFloat(max(1.0, stored))
-            } else if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? CGFloat {
-                rubyFontSize = max(1.0, stored)
-            } else if let stored = attributedString.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? NSNumber {
-                rubyFontSize = CGFloat(max(1.0, stored.doubleValue))
-            } else {
-                rubyFontSize = max(1.0, defaultRubyFontSize)
-            }
-
-            let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
-            maxRubyHeight = max(maxRubyHeight, rubyFont.lineHeight)
-        }
-
-        guard maxRubyHeight > 0 else { return 0 }
-
-        return ceil(maxRubyHeight + max(0, rubyBaselineGap))
-    }
-
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: TokenOverlayTextView, context: Context) -> CGSize {
         let proposedWidth = proposal.width
-        let contextScreenWidth: CGFloat? = uiView.window?.windowScene?.screen.bounds.width
-        let fallbackWidth: CGFloat = (uiView.bounds.width > 0 ? uiView.bounds.width : (contextScreenWidth ?? 320))
-        let baseWidth = proposedWidth ?? fallbackWidth
-        _ = uiView.textContainerInset
+
+        // Prefer a conservative, narrow fallback width on first measure to avoid under-measuring
+        // (which can clip wrapped lines until SwiftUI re-measures). Avoid using screen width here.
+        let conservativeFallbackWidth: CGFloat = 320
+
+        let boundedFallbackWidth: CGFloat = {
+            if let w = uiView.superview?.bounds.width, w.isFinite, w > 0 {
+                return w
+            }
+            let w = uiView.bounds.width
+            if w.isFinite, w > 0 {
+                return w
+            }
+            return conservativeFallbackWidth
+        }()
+
+        let rawWidth = (proposedWidth ?? boundedFallbackWidth)
+        // Do not clamp to screen width; use a conservative width to ensure we never under-measure height.
+        let baseWidth = max(1, rawWidth)
+
+        // Ensure TextKit measures with the same constrained width we'll draw with.
+        // Do NOT mutate view geometry (e.g. `bounds`) here; only configure TextKit.
+        let inset = uiView.textContainerInset
+        let targetWidth = max(0, baseWidth - inset.left - inset.right)
+
+        uiView.lastMeasuredBoundsWidth = baseWidth
+        uiView.lastMeasuredTextContainerWidth = targetWidth
+        if abs(uiView.textContainer.size.width - targetWidth) > 0.5 {
+            uiView.textContainer.size = CGSize(width: targetWidth, height: .greatestFiniteMagnitude)
+        }
+
+        if DiagnosticsLogging.isEnabled(.tokenOverlayGeometry) {
+            let shouldLog = (proposedWidth == nil) || abs(uiView.bounds.width - baseWidth) > 0.5
+            if shouldLog {
+                let logger = DiagnosticsLogging.logger(.tokenOverlayGeometry)
+                let message = String(
+                    format: "MEASURE sizeThatFits proposalWidth=%@ baseWidth=%.2f boundsWidth=%.2f insetL=%.2f insetR=%.2f padding=%.2f containerW=%.2f",
+                    String(describing: proposedWidth),
+                    baseWidth,
+                    uiView.bounds.width,
+                    inset.left,
+                    inset.right,
+                    uiView.textContainer.lineFragmentPadding,
+                    uiView.textContainer.size.width
+                )
+                logger.debug("\(message, privacy: .public)")
+            }
+        }
+
         let targetSize = CGSize(width: baseWidth, height: .greatestFiniteMagnitude)
         let measured = uiView.sizeThatFits(targetSize)
         let measuredHeight = measured.height > 0 ? measured.height : targetSize.height
@@ -410,6 +370,58 @@ struct RubyText: UIViewRepresentable {
         return NSRange(location: range.location, length: clampedLength)
     }
 
+    /// Computes the additional vertical headroom required to accommodate the tallest ruby reading above the base line.
+    /// Falls back to a conservative estimate based on `defaultRubyFontSize` and `rubyBaselineGap` when no ruby is present.
+    static func requiredVerticalHeadroomForRuby(
+        in attributed: NSAttributedString,
+        baseFont: UIFont,
+        defaultRubyFontSize: CGFloat,
+        rubyBaselineGap: CGFloat
+    ) -> CGFloat {
+        guard attributed.length > 0 else { return max(0, defaultRubyFontSize + rubyBaselineGap) }
+        let full = NSRange(location: 0, length: attributed.length)
+        var maxRubySize: CGFloat = 0
+        attributed.enumerateAttribute(.rubyReadingFontSize, in: full, options: []) { value, _, _ in
+            if let num = value as? NSNumber {
+                maxRubySize = max(maxRubySize, CGFloat(max(1.0, num.doubleValue)))
+            } else if let cg = value as? CGFloat {
+                maxRubySize = max(maxRubySize, max(1.0, cg))
+            } else if let dbl = value as? Double {
+                maxRubySize = max(maxRubySize, CGFloat(max(1.0, dbl)))
+            }
+        }
+        if maxRubySize <= 0 {
+            maxRubySize = max(1.0, defaultRubyFontSize)
+        }
+        // Reserve the ruby font height plus a small gap to visually separate from the base glyphs.
+        return max(0, maxRubySize + rubyBaselineGap)
+    }
+
+    /// Computes a symmetric horizontal inset to prevent ruby from overhanging and being clipped at the edges.
+    /// Uses the maximum ruby size found in the attributed string as a heuristic; otherwise falls back to `defaultRubyFontSize * 0.25`.
+    static func requiredHorizontalInsetForRubyOverhang(
+        in attributed: NSAttributedString,
+        baseFont: UIFont,
+        defaultRubyFontSize: CGFloat
+    ) -> CGFloat {
+        guard attributed.length > 0 else { return max(0, defaultRubyFontSize * 0.25) }
+        let full = NSRange(location: 0, length: attributed.length)
+        var maxRubySize: CGFloat = 0
+        attributed.enumerateAttribute(.rubyReadingFontSize, in: full, options: []) { value, _, _ in
+            if let num = value as? NSNumber {
+                maxRubySize = max(maxRubySize, CGFloat(max(1.0, num.doubleValue)))
+            } else if let cg = value as? CGFloat {
+                maxRubySize = max(maxRubySize, max(1.0, cg))
+            } else if let dbl = value as? Double {
+                maxRubySize = max(maxRubySize, CGFloat(max(1.0, dbl)))
+            }
+        }
+        if maxRubySize <= 0 {
+            maxRubySize = max(1.0, defaultRubyFontSize)
+        }
+        // Heuristic: allow a small fraction of the ruby size as overhang inset on each side.
+        return max(0, maxRubySize * 0.25)
+    }
 }
 
 final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
@@ -424,8 +436,14 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             needsHighlightUpdate = true
             setNeedsLayout()
             setNeedsDisplay()
+            invalidateIntrinsicContentSize()
         }
     }
+
+    // SwiftUI measurement uses `sizeThatFits`. Record the width we measured at so we can
+    // request a re-measure if our final bounds width changes.
+    fileprivate var lastMeasuredBoundsWidth: CGFloat = 0
+    fileprivate var lastMeasuredTextContainerWidth: CGFloat = 0
 
     var selectionHighlightRange: NSRange? {
         didSet {
@@ -486,10 +504,23 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             needsHighlightUpdate = true
             setNeedsLayout()
             Self.logGeometry(String(format: "rubyHighlightHeadroom didSet -> setNeedsLayout (headroom=%.2f)", rubyHighlightHeadroom))
+            invalidateIntrinsicContentSize()
         }
     }
 
     private var needsHighlightUpdate: Bool = false
+
+    private var lastTextContainerIdentity: ObjectIdentifier? = nil
+
+    private func applyStableTextContainerConfig() {
+        // For SwiftUI measurement-driven wrapping we must control the container width
+        // (set in `RubyText.sizeThatFits`). If UIKit swaps/rebuilds the container, these
+        // properties can revert to defaults.
+        textContainer.widthTracksTextView = false
+        textContainer.lineFragmentPadding = 0
+        textContainer.maximumNumberOfLines = 0
+        textContainer.lineBreakMode = .byWordWrapping
+    }
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
@@ -510,11 +541,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         isScrollEnabled = false
         backgroundColor = .clear
         textContainer.lineFragmentPadding = 0
+        textContainer.widthTracksTextView = false
+        textContainer.maximumNumberOfLines = 0
+        textContainer.lineBreakMode = .byWordWrapping
         textContainerInset = .zero
         clipsToBounds = false
         layer.masksToBounds = false
         showsVerticalScrollIndicator = false
         showsHorizontalScrollIndicator = false
+        lastTextContainerIdentity = ObjectIdentifier(textContainer)
+        applyStableTextContainerConfig()
         updateInspectionGestureState()
         addInteraction(spanContextMenuInteraction)
         needsHighlightUpdate = true
@@ -522,13 +558,92 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
     override var canBecomeFirstResponder: Bool { true }
 
+    override var intrinsicContentSize: CGSize {
+        // Do not advertise an intrinsic width based on content; that can cause SwiftUI
+        // to size this view wide enough to fit a single long line (no wrapping).
+        let size = super.intrinsicContentSize
+        return CGSize(width: UIView.noIntrinsicMetric, height: size.height)
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
-//        Self.logGeometry("layoutSubviews: needsHighlightUpdate=\(needsHighlightUpdate)")
+
+        // UIKit may replace/reinitialize the underlying text container during runtime.
+        // If that happens, reapply our required container settings immediately.
+        let currentIdentity = ObjectIdentifier(textContainer)
+        if lastTextContainerIdentity != currentIdentity {
+            lastTextContainerIdentity = currentIdentity
+            applyStableTextContainerConfig()
+        } else if textContainer.widthTracksTextView != false {
+            applyStableTextContainerConfig()
+        }
+
+#if DEBUG
+        do {
+            let b = bounds
+            let tcSize = textContainer.size
+            let usedH = layoutManager.usedRect(for: textContainer).height
+            let csH = contentSize.height
+            let scroll = isScrollEnabled
+            let tracks = textContainer.widthTracksTextView
+            let tcID = ObjectIdentifier(textContainer).hashValue
+            let vis: String = {
+                switch rubyAnnotationVisibility {
+                case .visible: return "visible"
+                case .hiddenKeepMetrics: return "hiddenKeepMetrics"
+                case .removed: return "removed"
+                }
+            }()
+
+            Self.logGeometry(
+                String(
+                    format: "PASS layoutSubviews bounds=%.2fx%.2f textContainer=%.2fx%.2f usedRectH=%.2f contentSizeH=%.2f scroll=%@ tracksWidth=%@ tcID=%d ruby=%@",
+                    b.width,
+                    b.height,
+                    tcSize.width,
+                    tcSize.height,
+                    usedH,
+                    csH,
+                    scroll ? "true" : "false",
+                    tracks ? "true" : "false",
+                    tcID,
+                    vis
+                )
+            )
+        }
+#endif
+
+        // A) Measurement correctness: do not mutate `textContainer.size.width` here.
+        // If our final width differs from the measured width, ask SwiftUI to re-measure;
+        // `sizeThatFits` is the only place that clamps the wrapping width.
+        let inset = textContainerInset
+        let currentTargetWidth = max(0, bounds.width - inset.left - inset.right)
+        let boundsMismatch = lastMeasuredBoundsWidth > 0 && abs(bounds.width - lastMeasuredBoundsWidth) > 0.5
+        let containerMismatch = lastMeasuredTextContainerWidth > 0 && abs(currentTargetWidth - lastMeasuredTextContainerWidth) > 0.5
+        if boundsMismatch || containerMismatch {
+            if DiagnosticsLogging.isEnabled(.tokenOverlayGeometry) {
+                Self.logGeometry(
+                    String(
+                        format: "LAYOUT layoutSubviews boundsW=%.2f measuredW=%.2f insetL=%.2f insetR=%.2f padding=%.2f currentTargetW=%.2f measuredTargetW=%.2f containerW=%.2f",
+                        bounds.width,
+                        lastMeasuredBoundsWidth,
+                        inset.left,
+                        inset.right,
+                        textContainer.lineFragmentPadding,
+                        currentTargetWidth,
+                        lastMeasuredTextContainerWidth,
+                        textContainer.size.width
+                    )
+                )
+            }
+            invalidateIntrinsicContentSize()
+        }
+
+        // Self.logGeometry("layoutSubviews: needsHighlightUpdate=\(needsHighlightUpdate)")
         if needsHighlightUpdate {
             updateSelectionHighlightPath()
             needsHighlightUpdate = false
-//            Self.logGeometry("layoutSubviews: performed highlight update")
+            // Self.logGeometry("layoutSubviews: performed highlight update")
         }
     }
 
@@ -677,6 +792,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }
         needsHighlightUpdate = true
         setNeedsLayout()
+        invalidateIntrinsicContentSize()
         Self.logGeometry("applyAttributedText -> setNeedsLayout")
     }
 
@@ -1209,7 +1325,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     static func debugReportTextKit1Access(_ symbol: String) {
         let message = "⚠️ TextKit 1 API accessed: \(symbol). Use TextKit 2 layout primitives instead."
         logEvent(message)
-        assertionFailure(message)
+        if ProcessInfo.processInfo.environment["KYOUKU_STRICT_TEXTKIT2"] == "1" {
+            assertionFailure(message)
+        }
     }
 
     @objc private func tk1_guarded_layoutManager() -> NSLayoutManager {

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UserNotifications
 
 @main
 struct KyoukuApp: App {
@@ -40,6 +41,7 @@ struct KyoukuApp: App {
                 }
                 .task {
                     await ReadingOverridePolicy.shared.warmUp()
+                    await LegacyNotificationCleanup.runIfNeeded()
                 }
         }
     }

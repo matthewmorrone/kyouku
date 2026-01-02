@@ -7,9 +7,12 @@ struct TokenActionPanel: View {
     let preferredReading: String?
     let canMergePrevious: Bool
     let canMergeNext: Bool
+    let onShowDefinitions: (() -> Void)?
     let onDismiss: () -> Void
-    let onDefine: (DictionaryEntry) -> Void
-    let onUseReading: (DictionaryEntry) -> Void
+    let onSaveWord: (DictionaryEntry) -> Void
+    let onApplyReading: (DictionaryEntry) -> Void
+    let onApplyCustomReading: ((String) -> Void)?
+    let isWordSaved: ((DictionaryEntry) -> Bool)?
     let onMergePrevious: () -> Void
     let onMergeNext: () -> Void
     let onSplit: (Int) -> Void
@@ -33,9 +36,12 @@ struct TokenActionPanel: View {
         preferredReading: String?,
         canMergePrevious: Bool,
         canMergeNext: Bool,
+        onShowDefinitions: (() -> Void)? = nil,
         onDismiss: @escaping () -> Void,
-        onDefine: @escaping (DictionaryEntry) -> Void,
-        onUseReading: @escaping (DictionaryEntry) -> Void,
+        onSaveWord: @escaping (DictionaryEntry) -> Void,
+        onApplyReading: @escaping (DictionaryEntry) -> Void,
+        onApplyCustomReading: ((String) -> Void)? = nil,
+        isWordSaved: ((DictionaryEntry) -> Bool)? = nil,
         onMergePrevious: @escaping () -> Void,
         onMergeNext: @escaping () -> Void,
         onSplit: @escaping (Int) -> Void,
@@ -51,9 +57,12 @@ struct TokenActionPanel: View {
         self.preferredReading = preferredReading
         self.canMergePrevious = canMergePrevious
         self.canMergeNext = canMergeNext
+        self.onShowDefinitions = onShowDefinitions
         self.onDismiss = onDismiss
-        self.onDefine = onDefine
-        self.onUseReading = onUseReading
+        self.onSaveWord = onSaveWord
+        self.onApplyReading = onApplyReading
+        self.onApplyCustomReading = onApplyCustomReading
+        self.isWordSaved = isWordSaved
         self.onMergePrevious = onMergePrevious
         self.onMergeNext = onMergeNext
         self.onSplit = onSplit
@@ -133,6 +142,9 @@ struct TokenActionPanel: View {
         HStack(spacing: 12) {
             actionIconButton(label: "Merge with previous token", systemImage: "arrow.left.to.line.square", enabled: canMergePrevious, action: onMergePrevious)
             actionIconButton(label: "Merge with next token", systemImage: "arrow.right.to.line.square", enabled: canMergeNext, action: onMergeNext)
+            if let onShowDefinitions {
+                actionIconButton(label: "Show all definitions", systemImage: "book", enabled: true, action: onShowDefinitions)
+            }
             actionIconButton(
                 label: "Adjust split",
                 systemImage: "scissors",
@@ -258,9 +270,12 @@ struct TokenActionPanel: View {
         let measuredResults = LookupResultsView(
             lookup: lookup,
             selection: selection,
+            preferredReading: preferredReading,
             highlightedResultIndex: $highlightedResultIndex,
-            onUseReading: onUseReading,
-            onDefine: onDefine
+            onApplyReading: onApplyReading,
+            onApplyCustomReading: onApplyCustomReading,
+            onSaveWord: onSaveWord,
+            isWordSaved: isWordSaved
         )
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
@@ -434,9 +449,15 @@ private struct SplitMenuView: View {
 private struct LookupResultsView: View {
     @ObservedObject var lookup: DictionaryLookupViewModel
     let selection: TokenSelectionContext
+    let preferredReading: String?
     @Binding var highlightedResultIndex: Int
-    let onUseReading: (DictionaryEntry) -> Void
-    let onDefine: (DictionaryEntry) -> Void
+    let onApplyReading: (DictionaryEntry) -> Void
+    let onApplyCustomReading: ((String) -> Void)?
+    let onSaveWord: (DictionaryEntry) -> Void
+    let isWordSaved: ((DictionaryEntry) -> Bool)?
+
+    @State private var isCustomReadingPromptPresented = false
+    @State private var customReadingText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -471,6 +492,20 @@ private struct LookupResultsView: View {
                     }
                 }
             }
+        }
+        .alert("Custom reading", isPresented: $isCustomReadingPromptPresented) {
+            TextField("", text: $customReadingText)
+            Button("Cancel", role: .cancel) {
+                customReadingText = ""
+            }
+            Button("Apply") {
+                let trimmed = customReadingText.trimmingCharacters(in: .whitespacesAndNewlines)
+                customReadingText = ""
+                guard trimmed.isEmpty == false else { return }
+                onApplyCustomReading?(trimmed)
+            }
+        } message: {
+            Text(selection.surface)
         }
     }
 
@@ -540,6 +575,17 @@ private struct LookupResultsView: View {
             return kana == primaryText ? nil : kana
         }()
 
+        let isSaved = isWordSaved?(entry) ?? false
+        let activeReading = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let entryReading = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
+        let isActiveDictionaryReading = activeReading.isEmpty == false && entryReading.isEmpty == false && activeReading == entryReading
+        let hasAnyDictionaryReadingMatch = activeReading.isEmpty == false && lookup.results.contains {
+            let candidate = ($0.kana ?? $0.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
+            return candidate.isEmpty == false && candidate == activeReading
+        }
+        let isActiveCustomReading = activeReading.isEmpty == false && hasAnyDictionaryReadingMatch == false
+        let shouldShowApplyReadingButton = lookup.results.count > 1
+
         return VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(primaryText)
@@ -559,21 +605,34 @@ private struct LookupResultsView: View {
             }
 
             HStack(spacing: 12) {
-                iconActionButton(
-                    systemImage: "character.book.closed.fill",
-                    tint: .accentColor,
-                    accessibilityLabel: "Apply dictionary reading"
-                ) {
-                    onUseReading(entry)
+                if shouldShowApplyReadingButton {
+                    iconActionButton(
+                        systemImage: isActiveDictionaryReading ? "checkmark.circle.fill" : "checkmark.circle",
+                        tint: isActiveDictionaryReading ? .accentColor : .secondary,
+                        accessibilityLabel: isActiveDictionaryReading ? "Active dictionary reading" : "Apply dictionary reading"
+                    ) {
+                        onApplyReading(entry)
+                    }
+                    .disabled(canUseReading(entry) == false)
                 }
-                .disabled(canUseReading(entry) == false)
+
+                if onApplyCustomReading != nil {
+                    iconActionButton(
+                        systemImage: isActiveCustomReading ? "pencil.circle.fill" : "pencil.circle",
+                        tint: isActiveCustomReading ? .accentColor : .secondary,
+                        accessibilityLabel: isActiveCustomReading ? "Active custom reading" : "Apply custom reading"
+                    ) {
+                        customReadingText = ""
+                        isCustomReadingPromptPresented = true
+                    }
+                }
 
                 iconActionButton(
-                    systemImage: "bookmark.fill",
-                    tint: .secondary,
-                    accessibilityLabel: "Save entry to note"
+                    systemImage: isSaved ? "bookmark.fill" : "bookmark",
+                    tint: isSaved ? .accentColor : .secondary,
+                    accessibilityLabel: isSaved ? "Saved to words list" : "Save to words list"
                 ) {
-                    onDefine(entry)
+                    onSaveWord(entry)
                 }
             }
         }
@@ -632,8 +691,8 @@ private struct DictionaryContentHeightPreferenceKey: PreferenceKey {
         canMergePrevious: false,
         canMergeNext: true,
         onDismiss: {},
-        onDefine: { _ in },
-        onUseReading: { _ in },
+        onSaveWord: { _ in },
+        onApplyReading: { _ in },
         onMergePrevious: {},
         onMergeNext: {},
         onSplit: { _ in },

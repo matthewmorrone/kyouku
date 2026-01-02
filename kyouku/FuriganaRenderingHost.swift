@@ -32,7 +32,6 @@ struct FuriganaRenderingHost: View {
             else if showFurigana {
                 displayShell {
                     rubyBlock(annotationVisibility: .visible)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             else {
@@ -41,7 +40,7 @@ struct FuriganaRenderingHost: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
         .cornerRadius(12)
         .roundedBorder(Color(.white), cornerRadius: 12)
@@ -49,42 +48,78 @@ struct FuriganaRenderingHost: View {
 
     private var editorContent: some View {
         VStack(spacing: 0) {
-            TextEditor(text: $text)
-                .font(.system(size: textSize))
-                .lineSpacing(lineSpacing)
-                .scrollContentBackground(.hidden)
-                .background(Color.clear)
-                .foregroundColor(.primary)
-                .padding(editorInsets)
+            EditingTextView(
+                text: $text,
+                fontSize: CGFloat(textSize),
+                lineSpacing: CGFloat(lineSpacing),
+                insets: UIEdgeInsets(
+                    top: editorInsets.top,
+                    left: editorInsets.leading,
+                    bottom: editorInsets.bottom,
+                    right: editorInsets.trailing
+                )
+            )
+            .padding(0)
         }
     }
 
     private var editorInsets: EdgeInsets {
         let rubyHeadroom = max(0.0, textSize * 0.6 + lineSpacing)
         let topInset = max(8.0, rubyHeadroom)
-        return EdgeInsets(top: CGFloat(topInset), leading: 11, bottom: 12, trailing: 12)
+
+        // Compute symmetric horizontal overhang to match view mode ruby behavior.
+        // Use the same helper RubyText uses so edit/view modes align.
+        let attributed = furiganaText ?? NSAttributedString(string: text)
+        let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
+        let defaultRubyFontSize = max(1.0, CGFloat(textSize) * 0.6)
+        let rawOverhang = RubyText.requiredHorizontalInsetForRubyOverhang(
+            in: attributed,
+            baseFont: baseFont,
+            defaultRubyFontSize: defaultRubyFontSize
+        )
+        let insetOverhang = max(ceil(rawOverhang), 2)
+        let left = 12 + insetOverhang
+        let right = 12 + insetOverhang
+        return EdgeInsets(top: CGFloat(topInset), leading: CGFloat(left), bottom: 12, trailing: CGFloat(right))
     }
 
-    private func displayShell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                content()
-                    .padding(8)
+    private func displayShell<Content: View>(@ViewBuilder content: @escaping () -> Content) -> some View {
+        GeometryReader { proxy in
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 8) {
+                    content()
+                        // Force a real width constraint so ruby can wrap, even if
+                        // the underlying view has an aggressive intrinsic size.
+                        // IMPORTANT: apply the width constraint *before* fixedSize so SwiftUI
+                        // measures the representable at the same width it will be laid out.
+                        .frame(width: proxy.size.width, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.system(size: textSize))
+                .multilineTextAlignment(.leading)
+                .padding(.bottom, bottomOverscrollPadding)
             }
-            .font(.system(size: textSize))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .multilineTextAlignment(.leading)
-            .padding(.bottom, bottomOverscrollPadding)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func rubyBlock(annotationVisibility: RubyAnnotationVisibility) -> some View {
+        let attributed = resolvedAttributedText
+        let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
+        let defaultRubyFontSize = max(1, CGFloat(textSize) * 0.6)
+        let rawOverhang = RubyText.requiredHorizontalInsetForRubyOverhang(
+            in: attributed,
+            baseFont: baseFont,
+            defaultRubyFontSize: defaultRubyFontSize
+        )
+        let insetOverhang = max(ceil(rawOverhang), 2)
+        let insets = UIEdgeInsets(top: 8, left: 12 + insetOverhang, bottom: 12, right: 12 + insetOverhang)
+
         return RubyText(
             attributed: resolvedAttributedText,
             fontSize: CGFloat(textSize),
             lineHeightMultiple: 1.0,
             extraGap: CGFloat(max(0, lineSpacing)),
+            textInsets: insets,
             annotationVisibility: annotationVisibility,
             tokenOverlays: tokenColorOverlays,
             annotatedSpans: furiganaSpans ?? [],
@@ -95,6 +130,15 @@ struct FuriganaRenderingHost: View {
             contextMenuStateProvider: contextMenuStateProvider,
             onContextMenuAction: onContextMenuAction
         )
+        .id(rubyViewIdentity(for: annotationVisibility))
+    }
+
+    private func rubyViewIdentity(for visibility: RubyAnnotationVisibility) -> Int {
+        switch visibility {
+        case .visible: return 1
+        case .hiddenKeepMetrics: return 2
+        case .removed: return 3
+        }
     }
 
     private var resolvedAttributedText: NSAttributedString {
@@ -191,3 +235,154 @@ struct FuriganaRenderingHost: View {
         return overlays
     }
 }
+
+private struct EditingTextView: UIViewRepresentable {
+    @Binding var text: String
+    let fontSize: CGFloat
+    let lineSpacing: CGFloat
+    let insets: UIEdgeInsets
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.backgroundColor = .clear
+        view.isEditable = true
+        view.isSelectable = true
+        view.isScrollEnabled = true
+        view.alwaysBounceVertical = true
+        view.alwaysBounceHorizontal = false
+        view.showsHorizontalScrollIndicator = false
+        view.textContainer.widthTracksTextView = true
+        view.textContainer.maximumNumberOfLines = 0
+        view.textContainer.lineBreakMode = .byWordWrapping
+        view.textContainer.lineFragmentPadding = 0
+        view.textContainerInset = insets
+        view.keyboardDismissMode = .interactive
+        view.autocorrectionType = .no
+        view.autocapitalizationType = .none
+        view.delegate = context.coordinator
+        view.font = UIFont.systemFont(ofSize: fontSize)
+        view.textColor = UIColor.label
+        view.text = text
+
+        // Apply paragraph style immediately so the first layout matches view mode metrics.
+        let initialLength = view.textStorage.length
+        if initialLength > 0 {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.lineHeightMultiple = max(0.8, 1.0)
+            paragraph.lineSpacing = max(0, lineSpacing)
+            view.textStorage.addAttributes([
+                .paragraphStyle: paragraph,
+                .foregroundColor: UIColor.label,
+                .font: UIFont.systemFont(ofSize: fontSize)
+            ], range: NSRange(location: 0, length: initialLength))
+        }
+
+        view.contentInset = .zero
+        view.verticalScrollIndicatorInsets = .zero
+        view.horizontalScrollIndicatorInsets = .zero
+        if #available(iOS 11.0, *) {
+            view.contentInsetAdjustmentBehavior = .never
+        }
+
+        applyTypingAttributes(to: view)
+        return view
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        if uiView.text != text {
+            uiView.text = text
+        }
+        uiView.font = UIFont.systemFont(ofSize: fontSize)
+        uiView.textColor = UIColor.label
+        uiView.textContainerInset = insets
+        uiView.alwaysBounceHorizontal = false
+        uiView.showsHorizontalScrollIndicator = false
+        uiView.textContainer.widthTracksTextView = true
+        uiView.textContainer.maximumNumberOfLines = 0
+        uiView.textContainer.lineBreakMode = .byWordWrapping
+        uiView.textContainer.lineFragmentPadding = 0
+
+        uiView.contentInset = .zero
+        uiView.verticalScrollIndicatorInsets = .zero
+        uiView.horizontalScrollIndicatorInsets = .zero
+        if #available(iOS 11.0, *) {
+            uiView.contentInsetAdjustmentBehavior = .never
+        }
+
+        // Apply paragraph style to the full text to ensure wrapping/spacing match view mode.
+        let fullLength = uiView.textStorage.length
+        if fullLength > 0 {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.lineHeightMultiple = max(0.8, 1.0)
+            paragraph.lineSpacing = max(0, lineSpacing)
+            uiView.textStorage.addAttributes([
+                .paragraphStyle: paragraph,
+                .foregroundColor: UIColor.label,
+                .font: UIFont.systemFont(ofSize: fontSize)
+            ], range: NSRange(location: 0, length: fullLength))
+        }
+
+        applyTypingAttributes(to: uiView)
+    }
+
+    static func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize {
+        let resolvedWidth: CGFloat = {
+            if let width = proposal.width, width.isFinite, width > 0 {
+                return width
+            }
+            if uiView.bounds.width.isFinite, uiView.bounds.width > 0 {
+                return uiView.bounds.width
+            }
+            if let screen = uiView.window?.windowScene?.screen {
+                return screen.bounds.width
+            }
+            return 320 // reasonable fallback width when no context is available
+        }()
+
+        let resolvedHeight: CGFloat = {
+            if let height = proposal.height, height.isFinite, height > 0 {
+                return height
+            }
+            if uiView.bounds.height.isFinite, uiView.bounds.height > 0 {
+                return uiView.bounds.height
+            }
+            if let screen = uiView.window?.windowScene?.screen {
+                // Use a small default height relative to screen to avoid zero sizing
+                return max(10, screen.bounds.height * 0.1)
+            }
+            return 10
+        }()
+
+        return CGSize(width: resolvedWidth, height: resolvedHeight)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    private func applyTypingAttributes(to textView: UITextView) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.lineSpacing = max(0, lineSpacing)
+        textView.typingAttributes = [
+            .font: UIFont.systemFont(ofSize: fontSize),
+            .foregroundColor: UIColor.label,
+            .paragraphStyle: paragraph
+        ]
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        @Binding var text: String
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            text = textView.text
+        }
+    }
+}
+

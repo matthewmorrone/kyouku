@@ -4,6 +4,7 @@ import CoreFoundation
 struct RubyAnnotationSegment {
     let range: NSRange
     let reading: String
+    let commonKanaRemoved: String
 }
 
 enum FuriganaRubyProjector {
@@ -58,22 +59,55 @@ enum FuriganaRubyProjector {
         }
 
         for (clusterIndex, cluster) in clusters.enumerated() {
-            let nextKana = normalizedKanaSequence(nextKanaSequence(startingAt: cluster.charEndIndex, chars: charInfos))
-            var chunk = extractReadingChunk(from: readingChars, readingIndex: &readingIndex, nextKana: nextKana, remainingClusters: clusters.count - clusterIndex - 1)
+            let nextKanaRaw = nextKanaSequence(startingAt: cluster.charEndIndex, chars: charInfos)
+            let limited = limitNextKanaSequence(nextKanaRaw, in: readingChars, from: readingIndex)
+            let nextKana = limited.normalized
+            var extracted = extractReadingChunk(from: readingChars, readingIndex: &readingIndex, nextKana: nextKana, remainingClusters: clusters.count - clusterIndex - 1)
+            var chunk = extracted.chunk
 
             if chunk.isEmpty {
-                chunk = fallbackChunk(from: readingChars, readingIndex: &readingIndex)
+                if extracted.removedKanaSuffix.isEmpty {
+                    extracted = fallbackChunk(from: readingChars, readingIndex: &readingIndex)
+                    chunk = extracted.chunk
+                }
             }
+
+            defer {
+                readingIndex = consumeKanaSequence(nextKana, in: readingChars, from: readingIndex)
+            }
+
+            // Record the kana that were removed from the reading because they already exist as
+            // visible surface kana immediately following this kanji cluster.
+            let commonKanaRemoved = limited.rawUsed
 
             guard chunk.isEmpty == false else { continue }
 
             let range = NSRange(location: spanRange.location + cluster.utf16Location, length: cluster.utf16Length)
-            segments.append(RubyAnnotationSegment(range: range, reading: chunk))
-
-            readingIndex = consumeKanaSequence(nextKana, in: readingChars, from: readingIndex)
+            segments.append(RubyAnnotationSegment(range: range, reading: chunk, commonKanaRemoved: commonKanaRemoved))
         }
 
         return segments
+    }
+
+    /// The surface may contain kana that are not part of the reading (e.g. following particles).
+    /// To avoid blocking okurigana trimming/splitting, only keep the longest prefix of the
+    /// surface-kana sequence that actually appears in the remaining reading.
+    private static func limitNextKanaSequence(_ raw: [Character], in reading: [Character], from startIndex: Int) -> (rawUsed: String, normalized: [Character]) {
+        guard raw.isEmpty == false else { return (rawUsed: "", normalized: []) }
+        let normalizedRaw = normalizedKanaSequence(raw)
+        guard normalizedRaw.isEmpty == false else { return (rawUsed: "", normalized: []) }
+        guard startIndex < reading.count else { return (rawUsed: "", normalized: []) }
+
+        // Try longest prefix first.
+        for len in stride(from: normalizedRaw.count, through: 1, by: -1) {
+            let candidate = Array(normalizedRaw.prefix(len))
+            if let _ = findNextSequence(candidate, in: reading, start: startIndex) {
+                let rawUsed = String(raw.prefix(len))
+                return (rawUsed: rawUsed, normalized: candidate)
+            }
+        }
+
+        return (rawUsed: "", normalized: [])
     }
 
     private static func makeCharInfos(for text: String) -> [CharInfo] {
@@ -133,8 +167,8 @@ enum FuriganaRubyProjector {
         return sequence
     }
 
-    private static func extractReadingChunk(from reading: [Character], readingIndex: inout Int, nextKana: [Character], remainingClusters: Int) -> String {
-        guard readingIndex < reading.count else { return "" }
+    private static func extractReadingChunk(from reading: [Character], readingIndex: inout Int, nextKana: [Character], remainingClusters: Int) -> (chunk: String, removedKanaSuffix: String) {
+        guard readingIndex < reading.count else { return (chunk: "", removedKanaSuffix: "") }
 
         var endIndex: Int?
         if let boundary = findNextSequence(nextKana, in: reading, start: readingIndex), boundary > readingIndex {
@@ -156,21 +190,23 @@ enum FuriganaRubyProjector {
 
         var chunk = String(reading[readingIndex..<finalEnd])
         let trimCount = kanaSuffixTrimCount(in: chunk, nextKana: nextKana)
-        if trimCount > 0, chunk.count > trimCount {
+        var removed = ""
+        if trimCount > 0, chunk.count >= trimCount {
+            removed = String(chunk.suffix(trimCount))
             chunk.removeLast(trimCount)
             finalEnd -= trimCount
         }
 
         readingIndex = finalEnd
-        return chunk
+        return (chunk: chunk, removedKanaSuffix: removed)
     }
 
-    private static func fallbackChunk(from reading: [Character], readingIndex: inout Int) -> String {
-        guard readingIndex < reading.count else { return "" }
+    private static func fallbackChunk(from reading: [Character], readingIndex: inout Int) -> (chunk: String, removedKanaSuffix: String) {
+        guard readingIndex < reading.count else { return (chunk: "", removedKanaSuffix: "") }
         let next = min(reading.count, readingIndex + 1)
         let chunk = String(reading[readingIndex..<next])
         readingIndex = next
-        return chunk
+        return (chunk: chunk, removedKanaSuffix: "")
     }
 
     private static func consumeKanaSequence(_ sequence: [Character], in reading: [Character], from startIndex: Int) -> Int {
@@ -236,7 +272,7 @@ enum FuriganaRubyProjector {
         guard suffix.isEmpty == false else { return 0 }
         let normalizedChunk = normalizedKana(chunk)
         let normalizedSuffix = normalizedKana(suffix)
-        guard normalizedChunk.count > normalizedSuffix.count else { return 0 }
+        guard normalizedChunk.count >= normalizedSuffix.count else { return 0 }
         guard normalizedChunk.hasSuffix(normalizedSuffix) else { return 0 }
         return suffix.count
     }

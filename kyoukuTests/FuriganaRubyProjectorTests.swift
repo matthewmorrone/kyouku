@@ -26,6 +26,7 @@ final class FuriganaRubyProjectorTests: XCTestCase {
         XCTAssertEqual(segments.count, 1)
         XCTAssertEqual(segments.first?.reading, "とき")
         XCTAssertEqual(segments.first?.range, NSRange(location: 0, length: 1))
+        XCTAssertEqual(segments.first?.commonKanaRemoved, "の")
     }
 
     func testKatakanaReadingIsNormalizedForKanaBoundaryMatching() {
@@ -35,5 +36,45 @@ final class FuriganaRubyProjectorTests: XCTestCase {
         XCTAssertEqual(segments.count, 1)
         XCTAssertEqual(segments.first?.reading, "とき")
         XCTAssertEqual(segments.first?.range, NSRange(location: 0, length: 1))
+        XCTAssertEqual(segments.first?.commonKanaRemoved, "の")
+    }
+
+    func testKanaInSurfaceIsRemovedFromRuby() {
+        let spanText = "香り"
+        let reading = "かおり"
+        let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: NSRange(location: 0, length: (spanText as NSString).length))
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments.first?.range, NSRange(location: 0, length: 1))
+        XCTAssertEqual(segments.first?.reading, "かお")
+        XCTAssertEqual(segments.first?.commonKanaRemoved, "り")
+    }
+
+    func testReadingFullyMatchesTrailingKanaProducesNoRuby() {
+        let spanText = "行く"
+        let reading = "く"
+        let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: NSRange(location: 0, length: (spanText as NSString).length))
+        XCTAssertEqual(segments.count, 0)
+    }
+
+    func testKanjiPlusOkuriganaKeepsLeadingReading() {
+        // Regression: ruby should still appear over 言 in "言いた".
+        let spanText = "言いた"
+        let reading = "いいた"
+        let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: NSRange(location: 0, length: (spanText as NSString).length))
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments.first?.range, NSRange(location: 0, length: 1))
+        XCTAssertEqual(segments.first?.reading, "い")
+        XCTAssertEqual(segments.first?.commonKanaRemoved, "いた")
+    }
+
+    func testDoesNotDropSharedKanaThatIsNotOkurigana() {
+        // Regression: in "何気なく" the leading な must not be removed from ruby.
+        let spanText = "何気なく"
+        let reading = "なにげなく"
+        let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: NSRange(location: 0, length: (spanText as NSString).length))
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments.first?.range, NSRange(location: 0, length: 2))
+        XCTAssertEqual(segments.first?.reading, "なにげ")
+        XCTAssertEqual(segments.first?.commonKanaRemoved, "なく")
     }
 }

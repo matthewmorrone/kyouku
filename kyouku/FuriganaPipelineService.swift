@@ -10,7 +10,7 @@ struct FuriganaPipelineService {
         let furiganaSize: Double
         let recomputeSpans: Bool
         let existingSpans: [AnnotatedSpan]?
-        let tokenBoundaries: [Int]
+        let amendedSpans: [TextSpan]?
         let readingOverrides: [ReadingOverride]
         let context: String
     }
@@ -38,8 +38,9 @@ struct FuriganaPipelineService {
                 spans = try await FuriganaAttributedTextBuilder.computeAnnotatedSpans(
                     text: input.text,
                     context: input.context,
-                    tokenBoundaries: input.tokenBoundaries,
-                    readingOverrides: input.readingOverrides
+                    tokenBoundaries: [],
+                    readingOverrides: input.readingOverrides,
+                    baseSpans: input.amendedSpans
                 )
             } catch {
                 Self.logger.error("\(input.context, privacy: .public) span computation failed: \(String(describing: error), privacy: .public)")

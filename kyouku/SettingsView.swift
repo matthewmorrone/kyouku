@@ -319,7 +319,8 @@ struct SettingsView: View {
             let spans = try await FuriganaAttributedTextBuilder.computeAnnotatedSpans(
                 text: text,
                 context: "SettingsPreview",
-                overrides: []
+                tokenBoundaries: [],
+                readingOverrides: []
             )
             await MainActor.run {
                 previewSpans = spans

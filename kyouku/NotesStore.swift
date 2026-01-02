@@ -65,6 +65,11 @@ class NotesStore: ObservableObject {
         save()
     }
 
+    func moveNotes(fromOffsets source: IndexSet, toOffset destination: Int) {
+        notes.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
     func save() {
         do {
             let archive = NotesArchive(

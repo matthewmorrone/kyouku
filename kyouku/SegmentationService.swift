@@ -240,23 +240,30 @@ actor SegmentationService {
             trieLookups += 1
             let lookupStart = CFAbsoluteTimeGetCurrent()
             let current = cursor
-            let matchEnd: Int? = await MainActor.run { [current, swiftText] in
+            let currentUnit = text.character(at: cursor)
+            let requireKanjiMatch = (Self.isHiragana(currentUnit) == false && Self.isKatakana(currentUnit) == false)
+            let matchEnd: Int? = await MainActor.run { [current, swiftText, requireKanjiMatch] in
                 let ns = swiftText as NSString
-                return trie.longestMatchEnd(in: ns, from: current)
+                return trie.longestMatchEnd(in: ns, from: current, requireKanji: requireKanjiMatch)
             }
             if let end = matchEnd {
                 trieLookupTime += CFAbsoluteTimeGetCurrent() - lookupStart
                 if await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges) {
                     // start cleared inside helper
                 }
-                let extendedEnd = await extendMatchEnd(
-                    trie: trie,
-                    swiftText: swiftText,
-                    text: text,
-                    startIndex: current,
-                    initialEnd: end,
-                    totalLength: length
-                )
+                let extendedEnd: Int
+                if requireKanjiMatch {
+                    extendedEnd = await extendMatchEnd(
+                        trie: trie,
+                        swiftText: swiftText,
+                        text: text,
+                        startIndex: current,
+                        initialEnd: end,
+                        totalLength: length
+                    )
+                } else {
+                    extendedEnd = end
+                }
                 let len = extendedEnd - cursor
                 sumMatchLen += len
                 if len > maxMatchLen { maxMatchLen = len }
@@ -268,7 +275,7 @@ actor SegmentationService {
             }
             trieLookupTime += CFAbsoluteTimeGetCurrent() - lookupStart
 
-            let unit = text.character(at: cursor)
+            let unit = currentUnit
             guard let scalar = UnicodeScalar(unit) else {
                 cursor += 1
                 continue

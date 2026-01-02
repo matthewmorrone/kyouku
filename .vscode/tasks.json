@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Sim: Build + Install + Launch",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/scripts/sim-run.sh"
+      ],
+      "problemMatcher": [],
+      "group": "build"
+    },
+    {
+      "label": "Device: Build + Install + Launch",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/scripts/device-run.sh"
+      ],
+      "problemMatcher": [],
+      "group": "build"
+    }
+  ]
+}

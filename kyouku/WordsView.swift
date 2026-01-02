@@ -14,11 +14,11 @@ struct WordsView: View {
                 searchField
                 List(selection: $selectedWordIDs) {
                     if hasActiveSearch {
-                        Section("Dictionary Results") {
+                        Section("") {
                             dictionarySection
                         }
                     } else {
-                        Section("Saved Entries") {
+                        Section() {
                             savedSection
                         }
                     }
@@ -29,17 +29,15 @@ struct WordsView: View {
             .navigationTitle("Dictionary")
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    if canEditSavedWords {
-                        Button {
-                            editModeState = editModeState.isEditing ? .inactive : .active
-                        } label: {
-                            Image(systemName: "pencil")
-                        }
-                        .accessibilityLabel(editModeState.isEditing ? "Done" : "Edit")
-                    }
-                }
-                ToolbarItem(placement: .bottomBar) {
                     if isEditing {
+                        if canEditSavedWords {
+                            Button(role: .destructive) {
+                                showDeleteAllConfirmation = true
+                            } label: {
+                                Label("Clear All", systemImage: "square.stack.3d.down.right")
+                            }
+                            .accessibilityLabel("Delete all saved entries")
+                        }
                         Button(role: .destructive) {
                             deleteSelection()
                         } label: {
@@ -47,15 +45,13 @@ struct WordsView: View {
                         }
                         .disabled(selectedWordIDs.isEmpty)
                     }
-                }
-                ToolbarItem(placement: .bottomBar) {
-                    if isEditing && canEditSavedWords {
-                        Button(role: .destructive) {
-                            showDeleteAllConfirmation = true
+                    if canEditSavedWords {
+                        Button {
+                            editModeState = editModeState.isEditing ? .inactive : .active
                         } label: {
-                            Label("Delete All", systemImage: "trash")
+                            Image(systemName: "pencil")
                         }
-                        .accessibilityLabel("Delete all saved entries")
+                        .accessibilityLabel(editModeState.isEditing ? "Done" : "Edit")
                     }
                 }
             }
@@ -148,8 +144,16 @@ struct WordsView: View {
                 .foregroundStyle(.secondary)
         } else {
             ForEach(sortedWords) { word in
-                savedRow(word)
-                    .tag(word.id)
+                if isEditing {
+                    savedRow(word)
+                        .tag(word.id)
+                } else {
+                    NavigationLink {
+                        WordDefinitionsView(surface: word.surface, kana: word.kana)
+                    } label: {
+                        savedRow(word)
+                    }
+                }
             }
         }
     }

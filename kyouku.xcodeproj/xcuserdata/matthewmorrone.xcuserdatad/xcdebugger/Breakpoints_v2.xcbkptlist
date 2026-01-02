@@ -14,10 +14,10 @@
             filePath = "kyouku/RubyText.swift"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "494"
-            endingLineNumber = "494"
-            landmarkName = "init(frame:textContainer:)"
-            landmarkType = "7">
+            startingLineNumber = "483"
+            endingLineNumber = "483"
+            landmarkName = "TokenOverlayTextView"
+            landmarkType = "3">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -30,9 +30,9 @@
             filePath = "kyouku/RubyText.swift"
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
-            startingLineNumber = "557"
-            endingLineNumber = "557"
-            landmarkName = "draw(_:)"
+            startingLineNumber = "546"
+            endingLineNumber = "546"
+            landmarkName = "sharedInit()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>

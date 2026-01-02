@@ -10,6 +10,7 @@ enum DiagnosticsLogging {
         static var tokenOverlayGeometry: Area { area(enabled: true) }
         static var pasteSelection: Area { area(enabled: true) }
         static var furigana: Area { area(enabled: true) }
+        static var furiganaRubyTrace: Area { area(enabled: false) }
         static var notesStore: Area { area(enabled: true) }
         static var readingOverrides: Area { area(enabled: true) }
         static var tokenBoundaries: Area { area(enabled: true) }

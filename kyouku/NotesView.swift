@@ -12,6 +12,8 @@ struct NotesView: View {
     @EnvironmentObject var notesStore: NotesStore
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var store: WordsStore
+    @EnvironmentObject var readingOverrides: ReadingOverridesStore
+    @EnvironmentObject var tokenBoundaries: TokenBoundariesStore
     @State private var pendingDeleteOffsets: IndexSet? = nil
     @State private var showDeleteAlert: Bool = false
     @State private var pendingDeleteHasAssociatedWords: Bool = false
@@ -19,6 +21,8 @@ struct NotesView: View {
     @State private var showRenameAlert: Bool = false
     @State private var renameTarget: Note? = nil
     @State private var renameText: String = ""
+    @State private var toastText: String? = nil
+    @State private var toastDismissWorkItem: DispatchWorkItem? = nil
 
     var body: some View {
         NavigationStack {
@@ -66,9 +70,7 @@ struct NotesView: View {
                                 Label("Duplicate", systemImage: "plus.square.on.square")
                             }
                             Button {
-                                router.pendingResetNoteID = note.id
-                                router.noteToOpen = note
-                                router.selectedTab = .paste
+                                resetCustomSpans(noteID: note.id)
                             } label: {
                                 Label("Reset Custom Spans", systemImage: "arrow.counterclockwise")
                             }
@@ -99,6 +101,9 @@ struct NotesView: View {
                             }
                         }
                     }
+                    .onMove { source, destination in
+                        notesStore.moveNotes(fromOffsets: source, toOffset: destination)
+                    }
                     .onDelete { offsets in
                         pendingDeleteOffsets = offsets
                         var hasAssociatedWords = false
@@ -117,6 +122,17 @@ struct NotesView: View {
             }
             .navigationTitle("Notes")
             .environment(\.editMode, $editModeState)
+            .overlay(alignment: .bottom) {
+                if let toastText {
+                    Text(toastText)
+                        .font(.subheadline)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.bottom, 24)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: { PasteView.createNewNote(notes: notesStore, router: router) }) {
@@ -207,6 +223,28 @@ struct NotesView: View {
         renameTarget = nil
         renameText = ""
         showRenameAlert = false
+    }
+
+    private func resetCustomSpans(noteID: UUID) {
+        router.pendingResetNoteID = nil
+        readingOverrides.removeAll(for: noteID)
+        tokenBoundaries.removeAll(for: noteID)
+        showToast("Reset custom spans")
+    }
+
+    private func showToast(_ message: String) {
+        toastDismissWorkItem?.cancel()
+        withAnimation {
+            toastText = message
+        }
+
+        let workItem = DispatchWorkItem {
+            withAnimation {
+                toastText = nil
+            }
+        }
+        toastDismissWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
     }
 }
 
