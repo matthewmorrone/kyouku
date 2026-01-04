@@ -25,15 +25,16 @@ enum FuriganaAttributedTextBuilder {
         }
 
         let buildStart = CFAbsoluteTimeGetCurrent()
-        let annotated = try await computeAnnotatedSpans(
+        let stage2 = try await computeStage2(
             text: text,
             context: context,
             tokenBoundaries: tokenBoundaries,
-            readingOverrides: readingOverrides
+            readingOverrides: readingOverrides,
+            baseSpans: nil
         )
         let attributed = project(
             text: text,
-            annotatedSpans: annotated,
+            semanticSpans: stage2.semanticSpans,
             textSize: textSize,
             furiganaSize: furiganaSize,
             context: context
@@ -43,16 +44,21 @@ enum FuriganaAttributedTextBuilder {
         return attributed
     }
 
-    static func computeAnnotatedSpans(
+    struct Stage2Result {
+        let annotatedSpans: [AnnotatedSpan]
+        let semanticSpans: [SemanticSpan]
+    }
+
+    static func computeStage2(
         text: String,
         context: String = "general",
         tokenBoundaries: [Int] = [],
         readingOverrides: [ReadingOverride] = [],
         baseSpans: [TextSpan]? = nil
-    ) async throws -> [AnnotatedSpan] {
+    ) async throws -> Stage2Result {
         guard text.isEmpty == false else {
             log("[\(context)] Skipping span computation because the input text is empty.")
-            return []
+            return Stage2Result(annotatedSpans: [], semanticSpans: [])
         }
 
         log("[\(context)] Starting furigana span computation for \(text.count) characters.")
@@ -67,6 +73,7 @@ enum FuriganaAttributedTextBuilder {
         }
         let nsText = text as NSString
         let adjustedSpans = normalizeCoverage(spans: segmented, text: nsText)
+
         let gaps = coverageGaps(spans: adjustedSpans, text: text)
         if gaps.isEmpty == false {
             log("[\(context)] Coverage gaps detected after normalization: \(gaps)")
@@ -75,17 +82,53 @@ enum FuriganaAttributedTextBuilder {
         log("[\(context)] Segmentation spans ready: \(adjustedSpans.count) in \(segmentationDuration) ms.")
 
         let attachmentStart = CFAbsoluteTimeGetCurrent()
-        let annotated = await SpanReadingAttacher().attachReadings(text: text, spans: adjustedSpans)
-        let resolvedAnnotated = applyReadingOverrides(
-            annotated,
-            overrides: readingOverrides
+        let stage2 = await SpanReadingAttacher().attachReadings(
+            text: text,
+            spans: adjustedSpans,
+            treatSpanBoundariesAsAuthoritative: (baseSpans != nil)
         )
+
+        // Apply user overrides to Stage-2 outputs. This preserves the existing
+        // precedence rule: user overrides only apply on exact range matches.
+        let resolvedAnnotated = applyReadingOverrides(stage2.annotatedSpans, overrides: readingOverrides)
+        let resolvedSemantic = applyReadingOverrides(stage2.semanticSpans, overrides: readingOverrides)
+
         let attachmentDuration = elapsedMilliseconds(since: attachmentStart)
         log("[\(context)] Annotated spans ready for projection: \(resolvedAnnotated.count) in \(attachmentDuration) ms.")
 
         let totalDuration = elapsedMilliseconds(since: start)
         log("[\(context)] Completed span computation in \(totalDuration) ms.")
-        return resolvedAnnotated
+        return Stage2Result(annotatedSpans: resolvedAnnotated, semanticSpans: resolvedSemantic)
+    }
+
+    static func computeAnnotatedSpans(
+        text: String,
+        context: String = "general",
+        tokenBoundaries: [Int] = [],
+        readingOverrides: [ReadingOverride] = [],
+        baseSpans: [TextSpan]? = nil
+    ) async throws -> [AnnotatedSpan] {
+        // Reading reconciliation policy (downstream of Stage 1):
+        //
+        // Stage 1 provides *surface spans only*. All reading selection happens here in Stage 2.
+        // Precedence is intentionally explicit and conservative:
+        //  1) User override (range-based `ReadingOverride`) wins for that span.
+        //  2) Deterministic dictionary reading for the surface (JMdict-derived; only when unambiguous)
+        //     may override MeCab if it disagrees. If the dictionary has multiple readings for a
+        //     surface, we do NOT guess here.
+        //  3) MeCab/IPADic reading (attached by `SpanReadingAttacher`).
+        //  4) Fallback: nil (no reading).
+        //
+        // IMPORTANT: This is a policy declaration only. Do not add linguistic heuristics here.
+        // Any change to precedence should be made deliberately and in one place.
+        let stage2 = try await computeStage2(
+            text: text,
+            context: context,
+            tokenBoundaries: tokenBoundaries,
+            readingOverrides: readingOverrides,
+            baseSpans: baseSpans
+        )
+        return stage2.annotatedSpans
     }
 
     static func coverageGaps(spans: [TextSpan], text: String) -> [NSRange] {
@@ -182,6 +225,59 @@ enum FuriganaAttributedTextBuilder {
             let spanText = nsText.substring(with: projectionRange)
 
             let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: projectionRange)
+
+            for segment in segments {
+                guard segment.reading.isEmpty == false else { continue }
+                mutable.addAttribute(.rubyAnnotation, value: true, range: segment.range)
+                mutable.addAttribute(rubyReadingKey, value: segment.reading, range: segment.range)
+                mutable.addAttribute(rubySizeKey, value: furiganaSize, range: segment.range)
+
+                if DiagnosticsLogging.isEnabled(.furiganaRubyTrace) {
+                    let headword = nsText.substring(with: segment.range)
+                    Self.rubyTraceLogger.info(
+                        "ruby headword='\(headword, privacy: .public)' reading='\(segment.reading, privacy: .public)' commonKanaRemoved='\(segment.commonKanaRemoved, privacy: .public)'"
+                    )
+                }
+                appliedCount += 1
+            }
+        }
+
+        _ = elapsedMilliseconds(since: projectionStart)
+        // log("[\(context)] Projected ruby for \(appliedCount) segments in (projectionDuration) ms.")
+        return mutable.copy() as? NSAttributedString ?? NSAttributedString(string: text)
+    }
+
+    /// Ruby projection over Stage-2 semantic units.
+    ///
+    /// This consumes `SemanticSpan` so that ruby projection can treat kanji+okurigana
+    /// as a single unit when MeCab proves it, without pushing that logic back into
+    /// Stage 1 segmentation.
+    static func project(
+        text: String,
+        semanticSpans: [SemanticSpan],
+        textSize: Double,
+        furiganaSize: Double,
+        context: String = "general"
+    ) -> NSAttributedString {
+        guard text.isEmpty == false else { return NSAttributedString(string: text) }
+
+        let mutable = NSMutableAttributedString(string: text)
+        let rubyReadingKey = NSAttributedString.Key("RubyReadingText")
+        let rubySizeKey = NSAttributedString.Key("RubyReadingFontSize")
+        let nsText = text as NSString
+        var appliedCount = 0
+        let projectionStart = CFAbsoluteTimeGetCurrent()
+
+        for semantic in semanticSpans {
+            guard let reading = semantic.readingKana, semantic.range.location != NSNotFound else { continue }
+            guard semantic.range.length > 0 else { continue }
+            guard containsKanji(in: semantic.surface) else { continue }
+            guard NSMaxRange(semantic.range) <= nsText.length else { continue }
+
+            // The semantic span range already includes any okurigana that is proven
+            // by MeCab token coverage. Do not extend across semantic boundaries here.
+            let spanText = nsText.substring(with: semantic.range)
+            let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: semantic.range)
 
             for segment in segments {
                 guard segment.reading.isEmpty == false else { continue }
@@ -407,6 +503,25 @@ private extension FuriganaAttributedTextBuilder {
             let key = OverrideKey(location: span.span.range.location, length: span.span.range.length)
             if let kana = mapping[key] {
                 return AnnotatedSpan(span: span.span, readingKana: kana, lemmaCandidates: span.lemmaCandidates, partOfSpeech: span.partOfSpeech)
+            }
+            return span
+        }
+    }
+
+    private static func applyReadingOverrides(
+        _ semantic: [SemanticSpan],
+        overrides: [ReadingOverride]
+    ) -> [SemanticSpan] {
+        let mapping: [OverrideKey: String] = overrides.reduce(into: [:]) { partialResult, override in
+            guard let kana = override.userKana, kana.isEmpty == false else { return }
+            let key = OverrideKey(location: override.rangeStart, length: override.rangeLength)
+            partialResult[key] = kana
+        }
+        guard mapping.isEmpty == false else { return semantic }
+        return semantic.map { span in
+            let key = OverrideKey(location: span.range.location, length: span.range.length)
+            if let kana = mapping[key] {
+                return SemanticSpan(range: span.range, surface: span.surface, sourceSpanIndices: span.sourceSpanIndices, readingKana: kana)
             }
             return span
         }

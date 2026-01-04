@@ -29,7 +29,25 @@
 - If you touch panel sizing/geometry, read `docs/TokenActionPanelGeometry.md` first.
 
 ## Dev workflows + diagnostics
-- Primary workflow: build/run in Xcode. VS Code tasks wrap scripts:
+
+**Copilot must not invoke build, run, or test workflows.** All build/run/test workflows are for humans only and must be performed manually. The following information is provided for documentation and human reference only.
+
+### ⚠️ Command execution rules (STRICT)
+
+- **Copilot MAY:**
+  - run non-build shell commands (e.g. `ls`, `rg`, `sed`, `awk`, `cat`, `python`)
+  - inspect files and logs
+  - reason about code paths without executing builds
+- **Copilot MUST NOT:**
+  - run `xcodebuild`
+  - run `swift build`
+  - invoke Xcode schemes
+  - run `scripts/sim-run.sh` or `scripts/device-run.sh`
+  - run tests, builds, or simulators of any kind
+
+Builds are performed manually in Xcode only. Any attempt by Copilot to run builds, tests, simulators, or invoke related scripts violates these instructions.
+
+- Primary workflow for humans: build/run in Xcode. VS Code tasks wrap scripts:
   - Simulator: `bash scripts/sim-run.sh` (env: `SIM_NAME`, `SCHEME`, `CONF`, `DERIVED_DATA_PATH`, `RUBY_TRACE=1`).
   - Device: `bash scripts/device-run.sh` (env: `DEVICE_UDID`/`DEVICE_NAME`, `SCHEME`, `CONF`, `DERIVED_DATA_PATH`).
 - Logging toggles: `DiagnosticsLogging` areas via `UserDefaults`/env vars like `DiagnosticsLogging.furigana=1` (`kyouku/Logging.swift`). `RUBY_TRACE=1` enables `DiagnosticsLogging.furiganaRubyTrace=1` in the simulator script.

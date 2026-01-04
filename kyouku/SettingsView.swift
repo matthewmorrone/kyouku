@@ -28,7 +28,8 @@ struct SettingsView: View {
 
     @State private var previewAttributedText = NSAttributedString(string: SettingsView.previewSampleTextValue)
     @State private var previewRebuildTask: Task<Void, Never>? = nil
-    @State private var previewSpans: [AnnotatedSpan]? = nil
+    @State private var previewAnnotatedSpans: [AnnotatedSpan]? = nil
+    @State private var previewSemanticSpans: [SemanticSpan]? = nil
     @State private var previewSpansText: String? = nil
     @State private var previewValuesInitialized = false
     @State private var pendingReadingTextSize: Double = 17
@@ -296,7 +297,7 @@ struct SettingsView: View {
         pendingReadingTextSize = readingTextSize
         pendingReadingFuriganaSize = readingFuriganaSize
         pendingReadingLineSpacing = readingLineSpacing
-        _ = await ensurePreviewSpans(for: previewText)
+        _ = await ensurePreviewStage2(for: previewText)
         schedulePreviewRebuild()
     }
 
@@ -412,11 +413,11 @@ struct SettingsView: View {
     }
 
     private func rebuildPreviewAttributedText(text: String, textSize: Double, furiganaSize: Double) async {
-        let spans = await ensurePreviewSpans(for: text)
+        let stage2 = await ensurePreviewStage2(for: text)
         if Task.isCancelled { return }
         let attributed = FuriganaAttributedTextBuilder.project(
             text: text,
-            annotatedSpans: spans,
+            semanticSpans: stage2.semantic,
             textSize: textSize,
             furiganaSize: furiganaSize,
             context: "SettingsPreview"
@@ -427,32 +428,35 @@ struct SettingsView: View {
         }
     }
 
-    private func ensurePreviewSpans(for text: String) async -> [AnnotatedSpan] {
-        let cached = await MainActor.run(body: { () -> (String?, [AnnotatedSpan]?) in
-            (previewSpansText, previewSpans)
+    private func ensurePreviewStage2(for text: String) async -> (annotated: [AnnotatedSpan], semantic: [SemanticSpan]) {
+        let cached = await MainActor.run(body: { () -> (String?, [AnnotatedSpan]?, [SemanticSpan]?) in
+            (previewSpansText, previewAnnotatedSpans, previewSemanticSpans)
         })
-        if cached.0 == text, let spans = cached.1 {
-            return spans
+        if cached.0 == text, let annotated = cached.1, let semantic = cached.2 {
+            return (annotated: annotated, semantic: semantic)
         }
 
         do {
-            let spans = try await FuriganaAttributedTextBuilder.computeAnnotatedSpans(
+            let stage2 = try await FuriganaAttributedTextBuilder.computeStage2(
                 text: text,
                 context: "SettingsPreview",
                 tokenBoundaries: [],
-                readingOverrides: []
+                readingOverrides: [],
+                baseSpans: nil
             )
             await MainActor.run {
-                previewSpans = spans
+                previewAnnotatedSpans = stage2.annotatedSpans
+                previewSemanticSpans = stage2.semanticSpans
                 previewSpansText = text
             }
-            return spans
+            return (annotated: stage2.annotatedSpans, semantic: stage2.semanticSpans)
         } catch {
             await MainActor.run {
-                previewSpans = []
+                previewAnnotatedSpans = []
+                previewSemanticSpans = []
                 previewSpansText = text
             }
-            return []
+            return (annotated: [], semantic: [])
         }
     }
 }

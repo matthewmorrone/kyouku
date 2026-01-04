@@ -25,6 +25,14 @@ struct TextSpan: Equatable, Hashable {
     }
 }
 
+extension TextSpan {
+    static func describe(spans: [TextSpan]) -> String {
+        spans
+            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+            .joined(separator: ", ")
+    }
+}
+
 /// Stage 2 reading attachment output. Each span now carries its optional kana
 /// reading (normalized to Hiragana). No other metadata survives into later
 /// stages, keeping reading attachment isolated.
@@ -49,5 +57,32 @@ struct AnnotatedSpan: Equatable, Hashable {
             hasher.combine(lemma)
         }
         hasher.combine(partOfSpeech ?? "")
+    }
+}
+
+/// Stage 2.5 semantic grouping output.
+///
+/// A `SemanticSpan` represents a contiguous group of one or more Stage-1 `TextSpan`s
+/// that should be treated as a single semantic unit for ruby projection.
+///
+/// IMPORTANT:
+/// - This does not mutate or replace the original `TextSpan`s.
+/// - It exists explicitly downstream of Stage 1 because Stage 1 is lexicon-only.
+/// - Grouping decisions are driven by MeCab token coverage, not substring heuristics.
+struct SemanticSpan: Equatable, Hashable {
+    /// Union range of the member spans (UTF-16 / `NSRange`).
+    let range: NSRange
+    /// Surface text for `range`.
+    let surface: String
+    /// Indices of the original spans (contiguous, half-open) that form this unit.
+    let sourceSpanIndices: Range<Int>
+    /// Optional kana reading (normalized to Hiragana) for the whole semantic unit.
+    let readingKana: String?
+
+    init(range: NSRange, surface: String, sourceSpanIndices: Range<Int>, readingKana: String?) {
+        self.range = range
+        self.surface = surface
+        self.sourceSpanIndices = sourceSpanIndices
+        self.readingKana = readingKana
     }
 }

@@ -754,9 +754,11 @@ private struct DictionaryContentHeightPreferenceKey: PreferenceKey {
 #Preview {
     TokenActionPanel(
         selection: TokenSelectionContext(
-            spanIndex: 0,
+            tokenIndex: 0,
             range: NSRange(location: 0, length: 2),
             surface: "京都",
+            semanticSpan: SemanticSpan(range: NSRange(location: 0, length: 2), surface: "京都", sourceSpanIndices: 0..<1, readingKana: "きょうと"),
+            sourceSpanIndices: 0..<1,
             annotatedSpan: AnnotatedSpan(span: TextSpan(range: NSRange(location: 0, length: 2), surface: "京都"), readingKana: "きょうと")
         ),
         lookup: DictionaryLookupViewModel(),

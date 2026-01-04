@@ -5,6 +5,7 @@ struct FuriganaRenderingHost: View {
     @Binding var text: String
     var furiganaText: NSAttributedString?
     var furiganaSpans: [AnnotatedSpan]?
+    var semanticSpans: [SemanticSpan]
     var textSize: Double
     var isEditing: Bool
     var showFurigana: Bool
@@ -80,23 +81,10 @@ struct FuriganaRenderingHost: View {
 
     private func displayShell<Content: View>(@ViewBuilder content: @escaping () -> Content) -> some View {
         GeometryReader { proxy in
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 8) {
-                    content()
-                        // Force a real width constraint so ruby can wrap, even if
-                        // the underlying view has an aggressive intrinsic size.
-                        // IMPORTANT: apply the width constraint *before* fixedSize so SwiftUI
-                        // measures the representable at the same width it will be laid out.
-                        .frame(width: proxy.size.width, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(minWidth: proxy.size.width, alignment: .leading)
-                        .frame(minHeight: 40)
-                }
-                .font(.system(size: textSize))
-                .multilineTextAlignment(.leading)
-                .padding(.bottom, bottomOverscrollPadding)
-            }
-            .scrollIndicators(.hidden)
+            content()
+                // Constrain width so ruby wraps correctly.
+                .frame(width: proxy.size.width, alignment: .leading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -110,7 +98,12 @@ struct FuriganaRenderingHost: View {
             defaultRubyFontSize: defaultRubyFontSize
         )
         let insetOverhang = max(ceil(rawOverhang), 2)
-        let insets = UIEdgeInsets(top: 8, left: 12 + insetOverhang, bottom: 12, right: 12 + insetOverhang)
+        let insets = UIEdgeInsets(
+            top: 8,
+            left: 12 + insetOverhang,
+            bottom: 12 + bottomOverscrollPadding,
+            right: 12 + insetOverhang
+        )
 
         return RubyText(
             attributed: attributed,
@@ -119,8 +112,10 @@ struct FuriganaRenderingHost: View {
             extraGap: CGFloat(max(0, lineSpacing)),
             textInsets: insets,
             annotationVisibility: annotationVisibility,
+            isScrollEnabled: true,
+            allowSystemTextSelection: false,
             tokenOverlays: tokenColorOverlays,
-            annotatedSpans: furiganaSpans ?? [],
+            semanticSpans: semanticSpans,
             selectedRange: selectedRangeHighlight,
             customizedRanges: customizedRanges,
             enableTapInspection: enableTapInspection,
@@ -149,7 +144,8 @@ struct FuriganaRenderingHost: View {
     }
 
     private var tokenColorOverlays: [RubyText.TokenOverlay] {
-        guard let spans = furiganaSpans, (alternateTokenColors || highlightUnknownTokens) else { return [] }
+        guard (alternateTokenColors || highlightUnknownTokens) else { return [] }
+        guard semanticSpans.isEmpty == false else { return [] }
         let backingString = furiganaText?.string ?? text
         let textStorage = backingString as NSString
         var overlays: [RubyText.TokenOverlay] = []
@@ -157,7 +153,7 @@ struct FuriganaRenderingHost: View {
         if alternateTokenColors {
             let palette = tokenPalette.filter { $0.cgColor.alpha > 0 }
             if palette.isEmpty == false {
-                let coverageRanges = Self.coverageRanges(from: spans, textStorage: textStorage)
+                let coverageRanges = Self.coverageRanges(from: semanticSpans, textStorage: textStorage)
                 overlays.reserveCapacity(coverageRanges.count)
                 for (index, range) in coverageRanges.enumerated() {
                     let color = palette[index % palette.count]
@@ -167,19 +163,19 @@ struct FuriganaRenderingHost: View {
         }
 
         if highlightUnknownTokens {
-            let unknowns = Self.unknownTokenOverlays(from: spans, textStorage: textStorage, color: unknownTokenColor)
+            let unknowns = Self.unknownTokenOverlays(from: semanticSpans, annotatedSpans: furiganaSpans ?? [], textStorage: textStorage, color: unknownTokenColor)
             overlays.append(contentsOf: unknowns)
         }
 
         return overlays
     }
 
-    private static func coverageRanges(from spans: [AnnotatedSpan], textStorage: NSString) -> [NSRange] {
+    private static func coverageRanges(from spans: [SemanticSpan], textStorage: NSString) -> [NSRange] {
         let textLength = textStorage.length
         guard textLength > 0 else { return [] }
         let bounds = NSRange(location: 0, length: textLength)
         let sorted = spans
-            .map { $0.span.range }
+            .map { $0.range }
             .filter { $0.location != NSNotFound && $0.length > 0 }
             .map { NSIntersectionRange($0, bounds) }
             .filter { $0.length > 0 }
@@ -220,21 +216,32 @@ struct FuriganaRenderingHost: View {
         return clamped.length > 0 ? clamped : nil
     }
 
-    private static func unknownTokenOverlays(from spans: [AnnotatedSpan], textStorage: NSString, color: UIColor) -> [RubyText.TokenOverlay] {
+    private static func unknownTokenOverlays(
+        from semanticSpans: [SemanticSpan],
+        annotatedSpans: [AnnotatedSpan],
+        textStorage: NSString,
+        color: UIColor
+    ) -> [RubyText.TokenOverlay] {
         guard textStorage.length > 0 else { return [] }
         var overlays: [RubyText.TokenOverlay] = []
-        overlays.reserveCapacity(spans.count)
-        // "Unknown" should mean we failed to get any lexical signal for the span.
-        // `readingKana` is intentionally nil for kana-only spans (no kanji), so using it
-        // here incorrectly marks common words like 「なる」/「なりたくて」 as unknown.
-        // MeCab/IPADic coverage does not perfectly overlap with the JMdict-based SQLite dictionary
-        // used by lookups, so we also treat trie-derived lexicon matches as known even if MeCab
-        // couldn't provide lemmas.
-        for span in spans where span.lemmaCandidates.isEmpty && span.span.isLexiconMatch == false {
-            guard let clamped = Self.clampRange(span.span.range, length: textStorage.length) else { continue }
+        overlays.reserveCapacity(semanticSpans.count)
+
+        for semantic in semanticSpans {
+            let indices = semantic.sourceSpanIndices
+            guard indices.isEmpty == false else { continue }
+            guard indices.lowerBound >= 0, indices.upperBound <= annotatedSpans.count else { continue }
+            let group = annotatedSpans[indices.lowerBound..<indices.upperBound]
+
+            // "Unknown" should mean we failed to get any lexical signal for the *entire semantic token*.
+            // Preserve the existing per-span criteria, but apply it across the semantic group.
+            let isUnknown = group.allSatisfy { $0.lemmaCandidates.isEmpty && $0.span.isLexiconMatch == false }
+            guard isUnknown else { continue }
+
+            guard let clamped = Self.clampRange(semantic.range, length: textStorage.length) else { continue }
             if containsNonWhitespace(in: clamped, textStorage: textStorage) == false { continue }
             overlays.append(RubyText.TokenOverlay(range: clamped, color: color))
         }
+
         return overlays
     }
 }

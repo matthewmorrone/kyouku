@@ -27,8 +27,8 @@ enum RubyAnnotationVisibility {
 }
 
 struct RubySpanSelection {
-    let spanIndex: Int
-    let annotatedSpan: AnnotatedSpan
+    let tokenIndex: Int
+    let semanticSpan: SemanticSpan
     let highlightRange: NSRange
 }
 
@@ -51,8 +51,10 @@ struct RubyText: UIViewRepresentable {
     var extraGap: CGFloat
     var textInsets: UIEdgeInsets = RubyText.defaultInsets
     var annotationVisibility: RubyAnnotationVisibility = .visible
+    var isScrollEnabled: Bool = false
+    var allowSystemTextSelection: Bool = true
     var tokenOverlays: [TokenOverlay] = []
-    var annotatedSpans: [AnnotatedSpan] = []
+    var semanticSpans: [SemanticSpan] = []
     var selectedRange: NSRange? = nil
     var customizedRanges: [NSRange] = []
     var enableTapInspection: Bool = true
@@ -74,8 +76,8 @@ struct RubyText: UIViewRepresentable {
     func makeUIView(context: Context) -> TokenOverlayTextView {
         let textView = TokenOverlayTextView()
         textView.isEditable = false
-        textView.isSelectable = true
-        textView.isScrollEnabled = false
+        textView.isSelectable = allowSystemTextSelection
+        textView.isScrollEnabled = isScrollEnabled
         textView.backgroundColor = .clear
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = false
@@ -95,6 +97,14 @@ struct RubyText: UIViewRepresentable {
         textView.contextMenuStateProvider = contextMenuStateProvider
         textView.contextMenuActionHandler = onContextMenuAction
         textView.delegate = context.coordinator
+
+        if allowSystemTextSelection == false {
+            textView.selectedRange = NSRange(location: 0, length: 0)
+            textView.resignFirstResponder()
+            if #available(iOS 11.0, *) {
+                textView.textDragInteraction?.isEnabled = false
+            }
+        }
         return textView
     }
 
@@ -104,9 +114,23 @@ struct RubyText: UIViewRepresentable {
         uiView.tintColor = .systemBlue
         uiView.rubyAnnotationVisibility = annotationVisibility
         uiView.isEditable = false
+        uiView.isSelectable = allowSystemTextSelection
+        uiView.isScrollEnabled = isScrollEnabled
         uiView.textContainer.widthTracksTextView = false
         uiView.textContainer.maximumNumberOfLines = 0
         uiView.textContainer.lineBreakMode = .byWordWrapping
+
+        if allowSystemTextSelection == false {
+            uiView.selectedRange = NSRange(location: 0, length: 0)
+            uiView.resignFirstResponder()
+            if #available(iOS 11.0, *) {
+                uiView.textDragInteraction?.isEnabled = false
+            }
+        } else {
+            if #available(iOS 11.0, *) {
+                uiView.textDragInteraction?.isEnabled = true
+            }
+        }
 
         // Gap between ruby and headword. Keep it small and stable so ruby feels anchored.
         // (Previously this was a bit too large, making ruby feel "detached".)
@@ -161,7 +185,7 @@ struct RubyText: UIViewRepresentable {
         let processed = RubyText.applyAnnotationVisibility(annotationVisibility, to: mutable)
 
         uiView.applyAttributedText(processed)
-        uiView.annotatedSpans = annotatedSpans
+        uiView.semanticSpans = semanticSpans
         uiView.selectionHighlightRange = selectedRange
         uiView.isTapInspectionEnabled = enableTapInspection
         uiView.spanSelectionHandler = onSpanSelection
@@ -435,7 +459,7 @@ struct RubyText: UIViewRepresentable {
 }
 
 final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
-    var annotatedSpans: [AnnotatedSpan] = []
+    var semanticSpans: [SemanticSpan] = []
 
     // Vertical gap between the headword and ruby text.
     var rubyBaselineGap: CGFloat = 1.0
@@ -521,6 +545,18 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     private var needsHighlightUpdate: Bool = false
 
     private var lastTextContainerIdentity: ObjectIdentifier? = nil
+
+    override var contentOffset: CGPoint {
+        didSet {
+            // Ruby readings are custom-drawn in `draw(_:)`. When this view is scrollable,
+            // UIKit can scroll cached text content without re-invoking our draw pass,
+            // which makes ruby appear "stuck" while the text scrolls. Explicitly request
+            // a redraw on scroll so ruby stays aligned to glyph positions.
+            guard isScrollEnabled else { return }
+            guard oldValue != contentOffset else { return }
+            setNeedsDisplay()
+        }
+    }
 
     private func applyStableTextContainerConfig() {
         // For SwiftUI measurement-driven wrapping we must control the container width
@@ -790,6 +826,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             // No change; avoid resetting attributedText which would dismiss menus.
             return
         }
+        let savedOffset = contentOffset
         let wasFirstResponder = isFirstResponder
         let oldSelectedRange = selectedRange
         attributedText = text
@@ -798,6 +835,19 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             let newLength = attributedText?.length ?? 0
             if oldSelectedRange.location != NSNotFound, NSMaxRange(oldSelectedRange) <= newLength {
                 selectedRange = oldSelectedRange
+            }
+        }
+
+        if isScrollEnabled {
+            // Setting attributedText can snap to the top; restore prior offset.
+            layoutIfNeeded()
+
+            let minY = -adjustedContentInset.top
+            let maxY = max(minY, contentSize.height - bounds.height + adjustedContentInset.bottom)
+            let clampedY = min(max(savedOffset.y, minY), maxY)
+            let clamped = CGPoint(x: savedOffset.x, y: clampedY)
+            if (clamped.y - contentOffset.y).magnitude > 0.5 {
+                setContentOffset(clamped, animated: false)
             }
         }
         needsHighlightUpdate = true
@@ -1258,10 +1308,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     }
 
     private func spanSelectionContext(forUTF16Index index: Int) -> RubySpanSelection? {
-        guard let (spanIndex, span) = annotatedSpans.spanContext(containingUTF16Index: index) else { return nil }
-        let spanRange = span.span.range
+        guard let (tokenIndex, span) = semanticSpans.spanContext(containingUTF16Index: index) else { return nil }
+        let spanRange = span.range
         guard spanRange.location != NSNotFound, spanRange.length > 0 else { return nil }
-        return RubySpanSelection(spanIndex: spanIndex, annotatedSpan: span, highlightRange: spanRange)
+        return RubySpanSelection(tokenIndex: tokenIndex, semanticSpan: span, highlightRange: spanRange)
     }
 
     private func inspectionDetails(forUTF16Index index: Int) -> (character: Character, utf16Range: NSRange, scalars: [String])? {
@@ -1289,12 +1339,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     }
 
     private func logSpanResolution(for index: Int) {
-        guard let span = annotatedSpans.spanContainingUTF16Index(index) else {
-            Self.logEvent("Inspect tap span unresolved: no annotated span contains index=\(index)")
+        guard let span = semanticSpans.spanContainingUTF16Index(index) else {
+            Self.logEvent("Inspect tap span unresolved: no semantic span contains index=\(index)")
             return
         }
-        let spanRange = span.span.range
-        let spanSurfaceDescription = span.span.surface.debugDescription
+        let spanRange = span.range
+        let spanSurfaceDescription = span.surface.debugDescription
         let rangeDescription = "[\(spanRange.location)..<\(NSMaxRange(spanRange))]"
         Self.logEvent("Inspect tap span surface=\(spanSurfaceDescription) range=\(rangeDescription)")
     }
@@ -1386,6 +1436,32 @@ extension Collection where Element == AnnotatedSpan {
         guard isEmpty == false, index >= 0 else { return nil }
         for (offset, span) in enumerated() {
             let range = span.span.range
+            guard range.location != NSNotFound else { continue }
+            if NSLocationInRange(index, range) {
+                return (offset, span)
+            }
+        }
+        return nil
+    }
+}
+
+extension Collection where Element == SemanticSpan {
+    func spanContainingUTF16Index(_ index: Int) -> SemanticSpan? {
+        guard isEmpty == false, index >= 0 else { return nil }
+        for span in self {
+            let range = span.range
+            guard range.location != NSNotFound else { continue }
+            if NSLocationInRange(index, range) {
+                return span
+            }
+        }
+        return nil
+    }
+
+    func spanContext(containingUTF16Index index: Int) -> (Int, SemanticSpan)? {
+        guard isEmpty == false, index >= 0 else { return nil }
+        for (offset, span) in enumerated() {
+            let range = span.range
             guard range.location != NSNotFound else { continue }
             if NSLocationInRange(index, range) {
                 return (offset, span)

@@ -35,6 +35,7 @@ struct PasteView: View {
     @State private var isEditing: Bool = false
     @State private var furiganaAttributedText: NSAttributedString? = nil
     @State private var furiganaSpans: [AnnotatedSpan]? = nil
+    @State private var furiganaSemanticSpans: [SemanticSpan] = []
     @State private var furiganaRefreshToken: Int = 0
     @State private var furiganaTaskHandle: Task<Void, Never>? = nil
     @State private var suppressNextEditingRefresh: Bool = false
@@ -371,17 +372,17 @@ struct PasteView: View {
                 switch (oldSelection, newSelection) {
                 case (nil, .some(let newCtx)):
                     let r = newCtx.range
-                    Self.selectionLogger.debug("Dictionary popup shown (selection change) spanIndex=\(newCtx.spanIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(newCtx.surface, privacy: .public) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
+                    Self.selectionLogger.debug("Dictionary popup shown (selection change) tokenIndex=\(newCtx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(newCtx.surface, privacy: .public) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
                 case (.some(_), nil):
                     Self.selectionLogger.debug("Dictionary popup hidden (selection cleared)")
                 case (.some(let oldCtx), .some(let newCtx)):
                     if oldCtx.id != newCtx.id {
                         let oldR = oldCtx.range
                         let newR = newCtx.range
-                        Self.selectionLogger.debug("Dictionary popup replaced oldSpanIndex=\(oldCtx.spanIndex) oldRange=\(oldR.location)-\(NSMaxRange(oldR)) -> newSpanIndex=\(newCtx.spanIndex) newRange=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface, privacy: .public)")
+                        Self.selectionLogger.debug("Dictionary popup replaced oldTokenIndex=\(oldCtx.tokenIndex) oldRange=\(oldR.location)-\(NSMaxRange(oldR)) -> newTokenIndex=\(newCtx.tokenIndex) newRange=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface, privacy: .public)")
                     } else if oldCtx.range.location != newCtx.range.location || oldCtx.range.length != newCtx.range.length || oldCtx.surface != newCtx.surface {
                         let newR = newCtx.range
-                        Self.selectionLogger.debug("Dictionary popup updated spanIndex=\(newCtx.spanIndex) range=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface, privacy: .public)")
+                        Self.selectionLogger.debug("Dictionary popup updated tokenIndex=\(newCtx.tokenIndex) range=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface, privacy: .public)")
                     }
                 default:
                     break
@@ -394,7 +395,7 @@ struct PasteView: View {
             if oldID == nil, let _ = newID {
                 if let ctx = sheetSelection {
                     let r = ctx.range
-                    Self.selectionLogger.debug("Dictionary popup shown (sheet binding) spanIndex=\(ctx.spanIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface, privacy: .public)")
+                    Self.selectionLogger.debug("Dictionary popup shown (sheet binding) tokenIndex=\(ctx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface, privacy: .public)")
                 } else {
                     Self.selectionLogger.debug("Dictionary popup shown (sheet binding)")
                 }
@@ -504,6 +505,7 @@ struct PasteView: View {
                 text: $inputText,
                 furiganaText: furiganaAttributedText,
                 furiganaSpans: furiganaSpans,
+                semanticSpans: furiganaSemanticSpans,
                 textSize: readingTextSize,
                 isEditing: isEditing,
                 showFurigana: showFurigana,
@@ -619,12 +621,13 @@ struct PasteView: View {
     }
 
     private var tokenListItems: [TokenListItem] {
-        guard let spans = furiganaSpans else { return [] }
+        let spans = furiganaSemanticSpans
+        guard spans.isEmpty == false else { return [] }
         var seenKeys: Set<String> = []
         let particleSet: Set<String> = hideCommonParticles ? commonParticleSet : []
 
         return spans.enumerated().compactMap { index, span in
-            guard let trimmed = trimmedRangeAndSurface(for: span.span.range) else { return nil }
+            guard let trimmed = trimmedRangeAndSurface(for: span.range) else { return nil }
             let normalizedSurface = trimmed.surface.trimmingCharacters(in: .whitespacesAndNewlines)
 
             if hideCommonParticles, particleSet.contains(normalizedSurface) {
@@ -766,6 +769,7 @@ struct PasteView: View {
         PasteBufferStore.save("")
         furiganaAttributedText = nil
         furiganaSpans = nil
+        furiganaSemanticSpans = []
     }
 
     private func onAppearHandler() {
@@ -924,7 +928,7 @@ struct PasteView: View {
             clearSelection()
             return
         }
-        presentDictionaryForSpan(at: selection.spanIndex, focusSplitMenu: false)
+        presentDictionaryForSpan(at: selection.tokenIndex, focusSplitMenu: false)
         persistentSelectionRange = selection.highlightRange
     }
 
@@ -941,7 +945,7 @@ struct PasteView: View {
 
     private func focusSplitMenuForCurrentSelection() {
         guard let selection = tokenSelection else { return }
-        startSplitFlow(for: selection.spanIndex)
+        startSplitFlow(for: selection.tokenIndex)
     }
 
     @MainActor
@@ -1173,15 +1177,50 @@ struct PasteView: View {
         return (highlightRange, trimmedSurface)
     }
 
+    private func aggregatedAnnotatedSpan(for semantic: SemanticSpan) -> AnnotatedSpan {
+        let stage1 = furiganaSpans ?? []
+        let indices = semantic.sourceSpanIndices
+        let group: ArraySlice<AnnotatedSpan>
+        if indices.lowerBound >= 0, indices.upperBound <= stage1.count {
+            group = stage1[indices.lowerBound..<indices.upperBound]
+        } else {
+            group = []
+        }
+
+        var lemmas: [String] = []
+        if group.isEmpty == false {
+            var seen: Set<String> = []
+            for span in group {
+                for lemma in span.lemmaCandidates where seen.contains(lemma) == false {
+                    seen.insert(lemma)
+                    lemmas.append(lemma)
+                }
+            }
+        }
+
+        let isLexiconMatch = group.contains(where: { $0.span.isLexiconMatch })
+        let partOfSpeech = group.compactMap(
+            { $0.partOfSpeech }
+        ).first
+        return AnnotatedSpan(
+            span: TextSpan(range: semantic.range, surface: semantic.surface, isLexiconMatch: isLexiconMatch),
+            readingKana: semantic.readingKana,
+            lemmaCandidates: lemmas,
+            partOfSpeech: partOfSpeech
+        )
+    }
+
     private func selectionContext(forSpanAt index: Int) -> TokenSelectionContext? {
-        guard let spans = furiganaSpans else { return nil }
-        guard spans.indices.contains(index) else { return nil }
-        guard let trimmed = trimmedRangeAndSurface(for: spans[index].span.range) else { return nil }
+        guard furiganaSemanticSpans.indices.contains(index) else { return nil }
+        let semantic = furiganaSemanticSpans[index]
+        guard let trimmed = trimmedRangeAndSurface(for: semantic.range) else { return nil }
         return TokenSelectionContext(
-            spanIndex: index,
+            tokenIndex: index,
             range: trimmed.range,
             surface: trimmed.surface,
-            annotatedSpan: spans[index]
+            semanticSpan: semantic,
+            sourceSpanIndices: semantic.sourceSpanIndices,
+            annotatedSpan: aggregatedAnnotatedSpan(for: semantic)
         )
     }
 
@@ -1196,7 +1235,7 @@ struct PasteView: View {
         }
         if dictionaryPopupEnabled {
             let r = context.range
-            Self.selectionLogger.debug("Dictionary popup shown spanIndex=\(index) range=\(r.location)-\(NSMaxRange(r)) surface=\(context.surface, privacy: .public) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
+            Self.selectionLogger.debug("Dictionary popup shown tokenIndex=\(index) range=\(r.location)-\(NSMaxRange(r)) surface=\(context.surface, privacy: .public) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
         }
         pendingSplitFocusSelectionID = focusSplitMenu ? context.id : nil
     }
@@ -1214,10 +1253,9 @@ struct PasteView: View {
     }
 
     private func bookmarkToken(at index: Int) {
-        guard let spans = furiganaSpans else { return }
-        guard spans.indices.contains(index) else { return }
+        guard furiganaSemanticSpans.indices.contains(index) else { return }
         guard let context = selectionContext(forSpanAt: index) else { return }
-        let reading = normalizedReading(spans[index].readingKana)
+        let reading = normalizedReading(context.semanticSpan.readingKana)
         let surface = context.surface.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Toggle behavior: if already saved, delete; otherwise add
@@ -1342,18 +1380,17 @@ struct PasteView: View {
 
     private func mergeSpan(at index: Int, direction: MergeDirection) {
         let wasShowingTokensPopover = showTokensPopover
-        guard let spans = furiganaSpans else { return }
-        guard spans.indices.contains(index) else { return }
-        guard let neighborIndex = neighborIndex(for: index, direction: direction), spans.indices.contains(neighborIndex) else { return }
-        guard let union = applySpanMerge(primaryIndex: index, neighborIndex: neighborIndex, actionName: "Merge Tokens") else { return }
+        guard let pair = stage1MergePair(forSemanticIndex: index, direction: direction) else { return }
+        guard let union = applySpanMerge(primaryIndex: pair.primaryIndex, neighborIndex: pair.neighborIndex, actionName: "Merge Tokens") else { return }
         persistentSelectionRange = union
         pendingSelectionRange = union
-        let mergedIndex = min(index, neighborIndex)
+        let mergedIndex = min(pair.primaryIndex, pair.neighborIndex)
         let textStorage = inputText as NSString
         guard NSMaxRange(union) <= textStorage.length else { return }
         let surface = textStorage.substring(with: union)
+        let semantic = SemanticSpan(range: union, surface: surface, sourceSpanIndices: mergedIndex..<(mergedIndex + 1), readingKana: nil)
         let ephemeral = AnnotatedSpan(span: TextSpan(range: union, surface: surface, isLexiconMatch: false), readingKana: nil, lemmaCandidates: [])
-        let ctx = TokenSelectionContext(spanIndex: mergedIndex, range: union, surface: surface, annotatedSpan: ephemeral)
+        let ctx = TokenSelectionContext(tokenIndex: mergedIndex, range: union, surface: surface, semanticSpan: semantic, sourceSpanIndices: semantic.sourceSpanIndices, annotatedSpan: ephemeral)
         tokenSelection = ctx
         if sheetDictionaryPanelEnabled {
             sheetSelection = ctx
@@ -1363,17 +1400,14 @@ struct PasteView: View {
     }
 
     private func startSplitFlow(for index: Int) {
-        guard let spans = furiganaSpans else { return }
-        guard spans.indices.contains(index) else { return }
-        guard let trimmed = trimmedRangeAndSurface(for: spans[index].span.range), trimmed.range.length > 1 else { return }
+        guard furiganaSemanticSpans.indices.contains(index) else { return }
+        let semantic = furiganaSemanticSpans[index]
+        guard let trimmed = trimmedRangeAndSurface(for: semantic.range), trimmed.range.length > 1 else { return }
         presentDictionaryForSpan(at: index, focusSplitMenu: true)
     }
 
     private func canMergeSpan(at index: Int, direction: MergeDirection) -> Bool {
-        guard let spans = furiganaSpans else { return false }
-        guard spans.indices.contains(index) else { return false }
-        guard let neighbor = neighborIndex(for: index, direction: direction) else { return false }
-        return spans.indices.contains(neighbor)
+        stage1MergePair(forSemanticIndex: index, direction: direction) != nil
     }
 
     private func handleOverridesExternalChange() {
@@ -1461,19 +1495,19 @@ struct PasteView: View {
     private func mergeSelection(_ direction: MergeDirection) {
         let wasShowingTokensPopover = showTokensPopover
         guard let selection = tokenSelection else { return }
-        guard let spans = furiganaSpans else { return }
-        guard let neighborIndex = neighborIndex(for: selection.spanIndex, direction: direction), spans.indices.contains(neighborIndex) else { return }
-        guard let union = applySpanMerge(primaryIndex: selection.spanIndex, neighborIndex: neighborIndex, actionName: "Merge Tokens") else { return }
+        guard let pair = stage1MergePair(forSemanticIndex: selection.tokenIndex, direction: direction) else { return }
+        guard let union = applySpanMerge(primaryIndex: pair.primaryIndex, neighborIndex: pair.neighborIndex, actionName: "Merge Tokens") else { return }
         persistentSelectionRange = union
         pendingSelectionRange = union
         pendingSplitFocusSelectionID = nil
 
-        let mergedIndex = min(selection.spanIndex, neighborIndex)
+        let mergedIndex = min(pair.primaryIndex, pair.neighborIndex)
         let textStorage = inputText as NSString
         guard NSMaxRange(union) <= textStorage.length else { return }
         let surface = textStorage.substring(with: union)
+        let semantic = SemanticSpan(range: union, surface: surface, sourceSpanIndices: mergedIndex..<(mergedIndex + 1), readingKana: nil)
         let ephemeral = AnnotatedSpan(span: TextSpan(range: union, surface: surface, isLexiconMatch: false), readingKana: nil, lemmaCandidates: [])
-        let ctx = TokenSelectionContext(spanIndex: mergedIndex, range: union, surface: surface, annotatedSpan: ephemeral)
+        let ctx = TokenSelectionContext(tokenIndex: mergedIndex, range: union, surface: surface, semanticSpan: semantic, sourceSpanIndices: semantic.sourceSpanIndices, annotatedSpan: ephemeral)
         tokenSelection = ctx
         if sheetDictionaryPanelEnabled {
             sheetSelection = ctx
@@ -1486,7 +1520,30 @@ struct PasteView: View {
         guard let selection = tokenSelection else { return }
         guard selection.range.length > 1 else { return }
         guard offset > 0, offset < selection.range.length else { return }
-        applySpanSplit(spanIndex: selection.spanIndex, range: selection.range, offset: offset, actionName: "Split Token")
+
+        let splitUTF16Index = selection.range.location + offset
+        guard let stage1 = furiganaSpans else { return }
+
+        let indices = selection.sourceSpanIndices
+        let group: ArraySlice<AnnotatedSpan>
+        if indices.lowerBound >= 0, indices.upperBound <= stage1.count {
+            group = stage1[indices.lowerBound..<indices.upperBound]
+        } else {
+            group = []
+        }
+
+        let stage1Index: Int? = {
+            if let local = group.enumerated().first(where: { NSLocationInRange(splitUTF16Index, $0.element.span.range) })?.offset {
+                return indices.lowerBound + local
+            }
+            return stage1.enumerated().first(where: { NSLocationInRange(splitUTF16Index, $0.element.span.range) })?.offset
+        }()
+
+        guard let spanIndex = stage1Index, stage1.indices.contains(spanIndex) else { return }
+        let spanRange = stage1[spanIndex].span.range
+        let localOffset = splitUTF16Index - spanRange.location
+        guard localOffset > 0, localOffset < spanRange.length else { return }
+        applySpanSplit(spanIndex: spanIndex, range: spanRange, offset: localOffset, actionName: "Split Token")
         clearSelection(resetPersistent: false)
     }
 
@@ -1658,9 +1715,29 @@ struct PasteView: View {
 
     private func canMergeSelection(_ direction: MergeDirection) -> Bool {
         guard let selection = tokenSelection else { return false }
-        guard let spans = furiganaSpans else { return false }
-        guard let neighbor = neighborIndex(for: selection.spanIndex, direction: direction) else { return false }
-        return spans.indices.contains(neighbor)
+        return stage1MergePair(forSemanticIndex: selection.tokenIndex, direction: direction) != nil
+    }
+
+    private func stage1MergePair(forSemanticIndex index: Int, direction: MergeDirection) -> (primaryIndex: Int, neighborIndex: Int)? {
+        guard let stage1 = furiganaSpans else { return nil }
+        guard furiganaSemanticSpans.indices.contains(index) else { return nil }
+        let semantic = furiganaSemanticSpans[index]
+        let lower = semantic.sourceSpanIndices.lowerBound
+        let upper = semantic.sourceSpanIndices.upperBound
+        guard lower >= 0, upper <= stage1.count else { return nil }
+
+        switch direction {
+        case .previous:
+            let neighbor = lower - 1
+            let primary = lower
+            guard stage1.indices.contains(neighbor), stage1.indices.contains(primary) else { return nil }
+            return (primaryIndex: primary, neighborIndex: neighbor)
+        case .next:
+            let neighbor = upper
+            let primary = upper - 1
+            guard stage1.indices.contains(neighbor), stage1.indices.contains(primary) else { return nil }
+            return (primaryIndex: primary, neighborIndex: neighbor)
+        }
     }
 
     private func selectionIsCustomized(_ selection: TokenSelectionContext) -> Bool {
@@ -1732,6 +1809,7 @@ struct PasteView: View {
         let currentTextSize = readingTextSize
         let currentFuriganaSize = readingFuriganaSize
         let currentSpans = furiganaSpans
+        let currentSemanticSpans = furiganaSemanticSpans
         let currentOverrides = readingOverrides.overrides(for: activeNoteID).filter { $0.userKana != nil }
         let currentAmendedSpans = tokenBoundaries.spans(for: activeNoteID, text: currentText)
         let pipelineInput = FuriganaPipelineService.Input(
@@ -1742,6 +1820,7 @@ struct PasteView: View {
             furiganaSize: currentFuriganaSize,
             recomputeSpans: recomputeSpans,
             existingSpans: currentSpans,
+            existingSemanticSpans: currentSemanticSpans,
             amendedSpans: currentAmendedSpans,
             readingOverrides: currentOverrides,
             context: "PasteView"
@@ -1759,13 +1838,18 @@ struct PasteView: View {
                     Self.logFurigana("Discarded stale furigana result token \(token); latest token is \(furiganaRefreshToken)")
                     return
                 }
-                guard inputText == currentText && showFurigana == currentShowFurigana else {
-                    Self.logFurigana("Discarded furigana result token \(token) because state changed before apply")
+                guard inputText == currentText else {
+                    Self.logFurigana("Discarded furigana result token \(token) because text changed before apply")
                     return
                 }
                 furiganaSpans = result.spans
+                furiganaSemanticSpans = result.semanticSpans
                 Self.logFurigana("Applied spans: \(result.spans?.count ?? 0)")
-                furiganaAttributedText = result.attributedString
+                if showFurigana == currentShowFurigana {
+                    furiganaAttributedText = result.attributedString
+                } else if showFurigana == false {
+                    furiganaAttributedText = nil
+                }
                 restoreSelectionIfNeeded()
             }
         }
@@ -1774,19 +1858,23 @@ struct PasteView: View {
     @MainActor
     private func restoreSelectionIfNeeded() {
         guard let targetRange = pendingSelectionRange else { return }
-        guard let spans = furiganaSpans else { return }
-        guard let match = spans.enumerated().first(where: { $0.element.span.range == targetRange }) else { return }
+        let spans = furiganaSemanticSpans
+        guard spans.isEmpty == false else { return }
+        guard let match = spans.enumerated().first(where: { $0.element.range == targetRange }) else { return }
         let textStorage = inputText as NSString
         guard NSMaxRange(targetRange) <= textStorage.length else {
             pendingSelectionRange = nil
             return
         }
         let surface = textStorage.substring(with: targetRange)
+        let semantic = match.element
         let context = TokenSelectionContext(
-            spanIndex: match.offset,
+            tokenIndex: match.offset,
             range: targetRange,
             surface: surface,
-            annotatedSpan: match.element
+            semanticSpan: semantic,
+            sourceSpanIndices: semantic.sourceSpanIndices,
+            annotatedSpan: aggregatedAnnotatedSpan(for: semantic)
         )
         tokenSelection = context
         if sheetDictionaryPanelEnabled {
