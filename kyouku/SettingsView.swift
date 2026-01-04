@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 struct SettingsView: View {
     @EnvironmentObject private var wordsStore: WordsStore
@@ -12,6 +13,13 @@ struct SettingsView: View {
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
+
+    @AppStorage(WordOfTheDayScheduler.enabledKey) private var wotdEnabled: Bool = false
+    @AppStorage(WordOfTheDayScheduler.hourKey) private var wotdHour: Int = 9
+    @AppStorage(WordOfTheDayScheduler.minuteKey) private var wotdMinute: Int = 0
+
+    @State private var wotdAuthStatus: UNAuthorizationStatus = .notDetermined
+    @State private var wotdPendingCount: Int = 0
 
     @State private var exportURL: URL? = nil
     @State private var isImporting: Bool = false
@@ -41,6 +49,7 @@ struct SettingsView: View {
                 textAppearanceSection
                 tokenHighlightSection
                 extractFilterSection
+                wordOfTheDaySection
                 Section("Backup & Restore") {
                     Button("Export…") {
                         exportAll()
@@ -77,10 +86,14 @@ struct SettingsView: View {
                 Text(importSummary ?? "")
             }
             .task { await initializePreviewValuesIfNeeded() }
+            .task { await refreshWordOfTheDayStatus() }
             .onChange(of: readingTextSize) { _, newValue in syncPendingTextSize(to: newValue) }
             .onChange(of: readingFuriganaSize) { _, newValue in syncPendingFuriganaSize(to: newValue) }
             .onChange(of: readingLineSpacing) { _, newValue in syncPendingLineSpacing(to: newValue) }
             .onDisappear { previewRebuildTask?.cancel() }
+            .onChange(of: wotdEnabled) { _, _ in Task { await rescheduleWordOfTheDay() } }
+            .onChange(of: wotdHour) { _, _ in Task { await rescheduleWordOfTheDay() } }
+            .onChange(of: wotdMinute) { _, _ in Task { await rescheduleWordOfTheDay() } }
         }
     }
 
@@ -163,6 +176,58 @@ struct SettingsView: View {
     private var extractFilterSection: some View {
         Section("Extract Filters") {
             ParticleTagEditor(tags: commonParticlesBinding)
+        }
+    }
+
+    private var wordOfTheDaySection: some View {
+        Section("Word of the Day") {
+            Toggle("Daily notification", isOn: $wotdEnabled)
+
+            DatePicker(
+                "Time",
+                selection: wotdTimeBinding,
+                displayedComponents: [.hourAndMinute]
+            )
+            .disabled(wotdEnabled == false)
+
+            HStack {
+                Text("Permission")
+                Spacer()
+                Text(wotdPermissionLabel)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Text("Scheduled")
+                Spacer()
+                Text("\(wotdPendingCount)")
+                    .foregroundStyle(.secondary)
+            }
+
+            Button("Request Permission") {
+                Task {
+                    _ = await WordOfTheDayScheduler.requestAuthorization()
+                    await refreshWordOfTheDayStatus()
+                    await rescheduleWordOfTheDay()
+                }
+            }
+            .disabled(wotdAuthStatus == .authorized || wotdAuthStatus == .provisional)
+
+            Button("Schedule Now") {
+                Task {
+                    await rescheduleWordOfTheDay(force: true)
+                }
+            }
+            .disabled(wotdEnabled == false)
+
+            Button("Send Test Notification") {
+                Task {
+                    let word = wordsStore.allWords().randomElement()
+                    await WordOfTheDayScheduler.sendTestNotification(word: word)
+                    await refreshWordOfTheDayStatus()
+                }
+            }
+            .disabled(wotdEnabled == false)
         }
     }
 
@@ -289,6 +354,61 @@ struct SettingsView: View {
         previewRebuildTask = Task {
             await rebuildPreviewAttributedText(text: text, textSize: textSize, furiganaSize: furiganaSize)
         }
+    }
+
+    private var wotdTimeBinding: Binding<Date> {
+        Binding(
+            get: {
+                let calendar = Calendar.current
+                var comps = calendar.dateComponents([.year, .month, .day], from: Date())
+                comps.hour = wotdHour
+                comps.minute = wotdMinute
+                return calendar.date(from: comps) ?? Date()
+            },
+            set: { newValue in
+                let calendar = Calendar.current
+                let comps = calendar.dateComponents([.hour, .minute], from: newValue)
+                wotdHour = comps.hour ?? 9
+                wotdMinute = comps.minute ?? 0
+            }
+        )
+    }
+
+    private var wotdPermissionLabel: String {
+        switch wotdAuthStatus {
+        case .authorized:
+            return "Allowed"
+        case .provisional:
+            return "Provisional"
+        case .denied:
+            return "Denied"
+        case .notDetermined:
+            return "Not requested"
+        case .ephemeral:
+            return "Ephemeral"
+        @unknown default:
+            return "Unknown"
+        }
+    }
+
+    private func refreshWordOfTheDayStatus() async {
+        wotdAuthStatus = await WordOfTheDayScheduler.authorizationStatus()
+        wotdPendingCount = await WordOfTheDayScheduler.pendingWordOfTheDayRequestCount()
+    }
+
+    private func rescheduleWordOfTheDay(force: Bool = false) async {
+        if force {
+            await WordOfTheDayScheduler.clearPendingWordOfTheDayRequests()
+        }
+        let words = wordsStore.allWords()
+        await WordOfTheDayScheduler.refreshScheduleIfEnabled(
+            words: words,
+            hour: wotdHour,
+            minute: wotdMinute,
+            enabled: wotdEnabled,
+            daysToSchedule: 14
+        )
+        await refreshWordOfTheDayStatus()
     }
 
     private func rebuildPreviewAttributedText(text: String, textSize: Double, furiganaSize: Double) async {

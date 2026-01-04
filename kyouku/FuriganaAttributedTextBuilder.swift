@@ -406,7 +406,7 @@ private extension FuriganaAttributedTextBuilder {
         return annotated.map { span in
             let key = OverrideKey(location: span.span.range.location, length: span.span.range.length)
             if let kana = mapping[key] {
-                return AnnotatedSpan(span: span.span, readingKana: kana, lemmaCandidates: span.lemmaCandidates)
+                return AnnotatedSpan(span: span.span, readingKana: kana, lemmaCandidates: span.lemmaCandidates, partOfSpeech: span.partOfSpeech)
             }
             return span
         }

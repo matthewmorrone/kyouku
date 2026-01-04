@@ -64,7 +64,8 @@ struct SpanReadingAttacher {
             let nsRange = NSRange(annotation.range, in: text)
             guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
             let surface = String(text[annotation.range])
-            return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm)
+            let pos = String(describing: annotation.partOfSpeech)
+            return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm, partOfSpeech: pos)
         }
         Self.signposter.endInterval("MeCab Tokenize", tokenizeInterval)
         let tokenizeMs = (CFAbsoluteTimeGetCurrent() - tokenizeStart) * 1000
@@ -77,7 +78,7 @@ struct SpanReadingAttacher {
             let attachment = attachmentForSpan(span, annotations: annotations, tokenizer: tokenizer)
             let override = await ReadingOverridePolicy.shared.overrideReading(for: span.surface, mecabReading: attachment.reading)
             let finalReading = override ?? attachment.reading
-            annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas))
+            annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas, partOfSpeech: attachment.partOfSpeech))
         }
 
         await Self.cache.store(annotated, for: key)
@@ -96,9 +97,10 @@ struct SpanReadingAttacher {
     private typealias RetokenizedResult = (reading: String, lemmas: [String])
 
     private func attachmentForSpan(_ span: TextSpan, annotations: [MeCabAnnotation], tokenizer: Tokenizer) -> SpanAttachmentResult {
-        guard span.range.length > 0 else { return SpanAttachmentResult(reading: nil, lemmas: []) }
+        guard span.range.length > 0 else { return SpanAttachmentResult(reading: nil, lemmas: [], partOfSpeech: nil) }
 
         var lemmaCandidates: [String] = []
+        var posCandidates: [String] = []
         let requiresReading = containsKanji(span.surface)
         var builder = requiresReading ? "" : nil
         let spanEnd = span.range.location + span.range.length
@@ -110,6 +112,7 @@ struct SpanReadingAttacher {
             let intersection = NSIntersectionRange(span.range, annotation.range)
             guard intersection.length > 0 else { continue }
             Self.appendLemmaCandidate(annotation.dictionaryForm, to: &lemmaCandidates)
+            Self.appendPartOfSpeechCandidate(annotation.partOfSpeech, to: &posCandidates)
 
             guard requiresReading else { continue }
             if intersection.length == annotation.range.length {
@@ -127,8 +130,10 @@ struct SpanReadingAttacher {
 
         if requiresReading {
             if let built = builder, built.isEmpty == false {
-                let trimmed = Self.trimDictionaryOkurigana(surface: span.surface, reading: built)
-                let normalized = Self.toHiragana(trimmed)
+                // Keep the full reading (including okurigana) and let the ruby projector
+                // split/trim against the surface text. Pre-trimming here can cause the
+                // projector to mis-detect kana boundaries (e.g. "私たち" -> "わ").
+                let normalized = Self.toHiragana(built)
                 readingResult = normalized.isEmpty ? nil : normalized
             } else if let token = coveringToken {
                 let tokenReadingSource: String
@@ -149,13 +154,11 @@ struct SpanReadingAttacher {
 
                 if readingResult == nil,
                    let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
-                    let trimmed = Self.trimDictionaryOkurigana(surface: span.surface, reading: retokenized.reading)
-                    let normalized = Self.toHiragana(trimmed)
+                    let normalized = Self.toHiragana(retokenized.reading)
                     readingResult = normalized.isEmpty ? nil : normalized
                 }
             } else if let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
-                let trimmed = Self.trimDictionaryOkurigana(surface: span.surface, reading: retokenized.reading)
-                let normalized = Self.toHiragana(trimmed)
+                let normalized = Self.toHiragana(retokenized.reading)
                 readingResult = normalized.isEmpty ? nil : normalized
             }
         }
@@ -165,7 +168,8 @@ struct SpanReadingAttacher {
             lemmaCandidates = retokenized.lemmas
         }
 
-        return SpanAttachmentResult(reading: readingResult, lemmas: lemmaCandidates)
+        let posSummary: String? = posCandidates.isEmpty ? nil : posCandidates.joined(separator: " / ")
+        return SpanAttachmentResult(reading: readingResult, lemmas: lemmaCandidates, partOfSpeech: posSummary)
     }
 
     private func retokenizedResult(for span: TextSpan, tokenizer: Tokenizer, cache: inout RetokenizedResult?) -> RetokenizedResult? {
@@ -227,19 +231,6 @@ struct SpanReadingAttacher {
         return String(String.UnicodeScalarView(scalars.reversed()))
     }
 
-    /// JMdict dictionary readings keep okurigana, but ruby should align to kanji only.
-    private static func trimDictionaryOkurigana(surface: String, reading: String) -> String {
-        guard reading.isEmpty == false else { return reading }
-        guard let suffix = trailingKanaRun(in: surface), suffix.isEmpty == false else { return reading }
-
-        // MeCab readings are typically katakana, while the surface okurigana is usually hiragana.
-        // Normalize both before suffix matching so we reliably trim duplicated okurigana.
-        let normalizedReading = toHiragana(reading)
-        let normalizedSuffix = toHiragana(suffix)
-        guard normalizedReading.hasSuffix(normalizedSuffix) else { return reading }
-        return String(normalizedReading.dropLast(normalizedSuffix.count))
-    }
-
     private static func trailingKanaRun(in surface: String) -> String? {
         guard surface.isEmpty == false else { return nil }
         var scalars: [UnicodeScalar] = []
@@ -281,6 +272,15 @@ struct SpanReadingAttacher {
         }
     }
 
+    private static func appendPartOfSpeechCandidate(_ candidate: String, to list: inout [String]) {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+        guard trimmed != "unknown" else { return }
+        if list.contains(trimmed) == false {
+            list.append(trimmed)
+        }
+    }
+
     private static func normalizeLemma(_ candidate: String?) -> String? {
         guard let candidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), candidate.isEmpty == false else { return nil }
         guard candidate != "*" else { return nil }
@@ -313,11 +313,13 @@ private struct MeCabAnnotation {
     let reading: String
     let surface: String
     let dictionaryForm: String
+    let partOfSpeech: String
 }
 
 private struct SpanAttachmentResult {
     let reading: String?
     let lemmas: [String]
+    let partOfSpeech: String?
 }
 
 private struct ReadingAttachmentCacheKey: Sendable, nonisolated Hashable {

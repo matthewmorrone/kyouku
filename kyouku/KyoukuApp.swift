@@ -42,6 +42,13 @@ struct KyoukuApp: App {
                 .task {
                     await ReadingOverridePolicy.shared.warmUp()
                     await LegacyNotificationCleanup.runIfNeeded()
+
+                    let defaults = UserDefaults.standard
+                    let enabled = defaults.bool(forKey: WordOfTheDayScheduler.enabledKey)
+                    let hour = defaults.object(forKey: WordOfTheDayScheduler.hourKey) != nil ? defaults.integer(forKey: WordOfTheDayScheduler.hourKey) : 9
+                    let minute = defaults.object(forKey: WordOfTheDayScheduler.minuteKey) != nil ? defaults.integer(forKey: WordOfTheDayScheduler.minuteKey) : 0
+                    let words = store.allWords()
+                    await WordOfTheDayScheduler.refreshScheduleIfEnabled(words: words, hour: hour, minute: minute, enabled: enabled)
                 }
         }
     }

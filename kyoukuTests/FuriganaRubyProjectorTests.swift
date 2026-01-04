@@ -77,4 +77,15 @@ final class FuriganaRubyProjectorTests: XCTestCase {
         XCTAssertEqual(segments.first?.reading, "なにげ")
         XCTAssertEqual(segments.first?.commonKanaRemoved, "なく")
     }
+
+    func testWatashiTachiProjectsWatashiOverWatashiKanji() {
+        // Regression: "私たち" should not split "わたし" at the internal "た".
+        let spanText = "私たち"
+        let reading = "わたしたち"
+        let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: NSRange(location: 0, length: (spanText as NSString).length))
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments.first?.range, NSRange(location: 0, length: 1))
+        XCTAssertEqual(segments.first?.reading, "わたし")
+        XCTAssertEqual(segments.first?.commonKanaRemoved, "たち")
+    }
 }

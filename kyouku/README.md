@@ -1,14 +1,5 @@
 # Kyouku — Functional Overview & Architecture
 
-Furigana still disappears when touching the paste area
-Selecting words sucks
-When you select a word, you cannot select another word until the dictionary popup has appeared, which sucks if the word you’re trying to press isn’t able to be pressed 
-
-please check this diff for anything worth keeping. first thing that comes to mind is centralized logging with easily configurable switches
-
-うらなう
-
-
 ## Purpose
 
 Kyouku is an iOS app for light-weight Japanese study. It lets users paste arbitrary text, keep quick notes, perform manual dictionary lookups, and run spaced repetition style drills on saved vocabulary. The experience is intentionally simple: no automatic parsing, no inline annotation toggles, and no background text processors to babysit.
@@ -50,16 +41,3 @@ Kyouku is an iOS app for light-weight Japanese study. It lets users paste arbitr
 3. Jump to Dictionary, search for interesting vocabulary, and store entries.
 4. Use the Cards tab to quiz against the saved word list.
 5. Repeat, optionally trimming saved notes/words as you go.
-
-## To Do
-- Noticeable delay for furigana to appear when first loading the app
-- Noticeable delay when loading a note
-- Extreme left and top furigana are cut off in the paste area
-- 瞬き shows with まばた above 瞬
-- にじしょく for 虹色: jisho disagrees
-- いだ for 抱
-- わたしま for 私待: correct, but 私 isn't properly centered
-
-## Ideas
-+ add a toggle for highlighting distinct parts of speech
-+ add a toggle for distinguishing kanji, hiragana and katakana

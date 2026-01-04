@@ -347,14 +347,16 @@ struct PasteView: View {
             }
         }
         .onChange(of: alternateTokenColors) { _, enabled in
-            if enabled {
-                triggerFuriganaRefreshIfNeeded(reason: "alternate token colors toggled on", recomputeSpans: false)
-            }
+            triggerFuriganaRefreshIfNeeded(
+                reason: enabled ? "alternate token colors toggled on" : "alternate token colors toggled off",
+                recomputeSpans: false
+            )
         }
         .onChange(of: highlightUnknownTokens) { _, enabled in
-            if enabled {
-                triggerFuriganaRefreshIfNeeded(reason: "unknown highlight toggled on", recomputeSpans: false)
-            }
+            triggerFuriganaRefreshIfNeeded(
+                reason: enabled ? "unknown highlight toggled on" : "unknown highlight toggled off",
+                recomputeSpans: false
+            )
         }
         .onChange(of: readingFuriganaSize) { _, _ in
             triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
@@ -465,6 +467,7 @@ struct PasteView: View {
                             .onTapGesture { clearSelection(resetPersistent: false) }
 
                         dictionaryPanel(for: selection, enableDragToDismiss: true, embedInMaterialBackground: true)
+                            .id("\(selection.id)-\(overrideSignature)")
                             .padding(.horizontal, 16)
                             .padding(.bottom, 24)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -669,7 +672,7 @@ struct PasteView: View {
             TokenActionPanel(
                 selection: selection,
                 lookup: inlineLookup,
-                preferredReading: selection.annotatedSpan.readingKana,
+                preferredReading: preferredReadingForSelection(selection),
                 canMergePrevious: canMergeSelection(.previous),
                 canMergeNext: canMergeSelection(.next),
                 onDismiss: { clearSelection(resetPersistent: false) },
@@ -695,6 +698,7 @@ struct PasteView: View {
                 focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
                 onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
             )
+            .id("\(selection.id)-\(overrideSignature)")
             .padding(.horizontal, 0)
             .padding(.bottom, 0)
             .ignoresSafeArea(edges: .bottom)
@@ -964,7 +968,7 @@ struct PasteView: View {
         TokenActionPanel(
             selection: selection,
             lookup: inlineLookup,
-            preferredReading: selection.annotatedSpan.readingKana,
+            preferredReading: preferredReadingForSelection(selection),
             canMergePrevious: canMergeSelection(.previous),
             canMergeNext: canMergeSelection(.next),
             onShowDefinitions: {
@@ -1024,8 +1028,31 @@ struct PasteView: View {
 
     private func presentWordDefinitions(for selection: TokenSelectionContext) {
         wordDefinitionsSurface = selection.surface
-        wordDefinitionsKana = normalizedReading(selection.annotatedSpan.readingKana)
+        wordDefinitionsKana = normalizedReading(preferredReadingForSelection(selection))
         showWordDefinitionsSheet = true
+    }
+
+    private func preferredReadingForSelection(_ selection: TokenSelectionContext) -> String? {
+        let overrides = readingOverrides.overrides(for: activeNoteID, overlapping: selection.range)
+        if let exact = overrides.first(where: {
+            $0.rangeStart == selection.range.location &&
+            $0.rangeLength == selection.range.length &&
+            $0.userKana != nil
+        }) {
+            return exact.userKana
+        }
+
+        if let bestOverlap = overrides
+            .filter({ $0.userKana != nil })
+            .max(by: { lhs, rhs in
+                let lhsRange = NSRange(location: lhs.rangeStart, length: lhs.rangeLength)
+                let rhsRange = NSRange(location: rhs.rangeStart, length: rhs.rangeLength)
+                return NSIntersectionRange(lhsRange, selection.range).length < NSIntersectionRange(rhsRange, selection.range).length
+            }) {
+            return bestOverlap.userKana
+        }
+
+        return selection.annotatedSpan.readingKana
     }
 
     private func applyDictionarySheet<Content: View>(to view: Content) -> AnyView {

@@ -29,14 +29,9 @@ struct FuriganaRenderingHost: View {
             else if text.isEmpty {
                 displayShell { EmptyView() }
             }
-            else if showFurigana {
-                displayShell {
-                    rubyBlock(annotationVisibility: .visible)
-                }
-            }
             else {
                 displayShell {
-                    rubyBlock(annotationVisibility: .removed)
+                    rubyBlock(annotationVisibility: showFurigana ? .visible : .removed)
                 }
             }
         }
@@ -94,11 +89,14 @@ struct FuriganaRenderingHost: View {
                         // measures the representable at the same width it will be laid out.
                         .frame(width: proxy.size.width, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
+                        .frame(minWidth: proxy.size.width, alignment: .leading)
+                        .frame(minHeight: 40)
                 }
                 .font(.system(size: textSize))
                 .multilineTextAlignment(.leading)
                 .padding(.bottom, bottomOverscrollPadding)
             }
+            .scrollIndicators(.hidden)
         }
     }
 
@@ -115,7 +113,7 @@ struct FuriganaRenderingHost: View {
         let insets = UIEdgeInsets(top: 8, left: 12 + insetOverhang, bottom: 12, right: 12 + insetOverhang)
 
         return RubyText(
-            attributed: resolvedAttributedText,
+            attributed: attributed,
             fontSize: CGFloat(textSize),
             lineHeightMultiple: 1.0,
             extraGap: CGFloat(max(0, lineSpacing)),
@@ -130,15 +128,20 @@ struct FuriganaRenderingHost: View {
             contextMenuStateProvider: contextMenuStateProvider,
             onContextMenuAction: onContextMenuAction
         )
-        .id(rubyViewIdentity(for: annotationVisibility))
+        // `RubyText` performs custom drawing for ruby annotations. When token overlay modes
+        // toggle, UIKit doesn't always repaint the custom ruby layer immediately, so we
+        // include overlay mode in the view identity to force a refresh.
+        // IMPORTANT: do not include `annotationVisibility` in the identity, otherwise
+        // toggling furigana recreates the view and resets the ScrollView to the top.
+        .id(rubyViewIdentity())
+        .frame(minHeight: 40, alignment: .topLeading)
     }
 
-    private func rubyViewIdentity(for visibility: RubyAnnotationVisibility) -> Int {
-        switch visibility {
-        case .visible: return 1
-        case .hiddenKeepMetrics: return 2
-        case .removed: return 3
-        }
+    private func rubyViewIdentity() -> String {
+        // Keep this intentionally narrow to avoid unnecessary view re-creation.
+        // This identity is used only to force refreshes when overlay modes change.
+        let overlayMode = (alternateTokenColors ? 1 : 0) | (highlightUnknownTokens ? 2 : 0)
+        return "ruby-overlay-\(overlayMode)"
     }
 
     private var resolvedAttributedText: NSAttributedString {
@@ -262,7 +265,21 @@ private struct EditingTextView: UIViewRepresentable {
         view.delegate = context.coordinator
         view.font = UIFont.systemFont(ofSize: fontSize)
         view.textColor = UIColor.label
-        view.text = text
+        
+        // Build attributed text from the same source as view mode, but remove ruby for editing.
+        let baseAttributed = NSAttributedString(string: text)
+        let processed = Self.removingRuby(from: baseAttributed)
+        let fullRange = NSRange(location: 0, length: (processed.length))
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.lineHeightMultiple = max(0.8, 1.0)
+        paragraph.lineSpacing = max(0, lineSpacing)
+        let baseFont = UIFont.systemFont(ofSize: fontSize)
+        let colored = NSMutableAttributedString(attributedString: processed)
+        colored.addAttribute(NSAttributedString.Key.paragraphStyle, value: paragraph, range: fullRange)
+        colored.addAttribute(NSAttributedString.Key.foregroundColor, value: UIColor.label, range: fullRange)
+        colored.addAttribute(NSAttributedString.Key.font, value: baseFont, range: fullRange)
+        view.attributedText = colored
 
         // Apply paragraph style immediately so the first layout matches view mode metrics.
         let initialLength = view.textStorage.length
@@ -272,9 +289,9 @@ private struct EditingTextView: UIViewRepresentable {
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
             view.textStorage.addAttributes([
-                .paragraphStyle: paragraph,
-                .foregroundColor: UIColor.label,
-                .font: UIFont.systemFont(ofSize: fontSize)
+                NSAttributedString.Key.paragraphStyle: paragraph,
+                NSAttributedString.Key.foregroundColor: UIColor.label,
+                NSAttributedString.Key.font: UIFont.systemFont(ofSize: fontSize)
             ], range: NSRange(location: 0, length: initialLength))
         }
 
@@ -290,9 +307,33 @@ private struct EditingTextView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
-        if uiView.text != text {
-            uiView.text = text
+        do {
+            let baseAttributed = NSAttributedString(string: text)
+            let processed = Self.removingRuby(from: baseAttributed)
+            let fullRange = NSRange(location: 0, length: processed.length)
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.lineHeightMultiple = max(0.8, 1.0)
+            paragraph.lineSpacing = max(0, lineSpacing)
+            let baseFont = UIFont.systemFont(ofSize: fontSize)
+            let colored = NSMutableAttributedString(attributedString: processed)
+            colored.addAttribute(NSAttributedString.Key.paragraphStyle, value: paragraph, range: fullRange)
+            colored.addAttribute(NSAttributedString.Key.foregroundColor, value: UIColor.label, range: fullRange)
+            colored.addAttribute(NSAttributedString.Key.font, value: baseFont, range: fullRange)
+            if uiView.attributedText?.isEqual(to: colored) == false {
+                let wasFirstResponder = uiView.isFirstResponder
+                let oldSelectedRange = uiView.selectedRange
+                uiView.attributedText = colored
+                if wasFirstResponder {
+                    _ = uiView.becomeFirstResponder()
+                    let newLength = uiView.attributedText?.length ?? 0
+                    if oldSelectedRange.location != NSNotFound, NSMaxRange(oldSelectedRange) <= newLength {
+                        uiView.selectedRange = oldSelectedRange
+                    }
+                }
+            }
         }
+
         uiView.font = UIFont.systemFont(ofSize: fontSize)
         uiView.textColor = UIColor.label
         uiView.textContainerInset = insets
@@ -318,9 +359,9 @@ private struct EditingTextView: UIViewRepresentable {
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
             uiView.textStorage.addAttributes([
-                .paragraphStyle: paragraph,
-                .foregroundColor: UIColor.label,
-                .font: UIFont.systemFont(ofSize: fontSize)
+                NSAttributedString.Key.paragraphStyle: paragraph,
+                NSAttributedString.Key.foregroundColor: UIColor.label,
+                NSAttributedString.Key.font: UIFont.systemFont(ofSize: fontSize)
             ], range: NSRange(location: 0, length: fullLength))
         }
 
@@ -367,10 +408,31 @@ private struct EditingTextView: UIViewRepresentable {
         paragraph.lineBreakMode = .byWordWrapping
         paragraph.lineSpacing = max(0, lineSpacing)
         textView.typingAttributes = [
-            .font: UIFont.systemFont(ofSize: fontSize),
-            .foregroundColor: UIColor.label,
-            .paragraphStyle: paragraph
+            NSAttributedString.Key.font: UIFont.systemFont(ofSize: fontSize),
+            NSAttributedString.Key.foregroundColor: UIColor.label,
+            NSAttributedString.Key.paragraphStyle: paragraph
         ]
+    }
+
+    private static func removingRuby(from attributed: NSAttributedString) -> NSAttributedString {
+        // Remove any custom ruby-related attributes by copying and stripping known keys.
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+        // Known ruby-related keys that may be used by RubyText. Adjust as needed.
+        let rubyKeys: [NSAttributedString.Key] = [
+            NSAttributedString.Key(rawValue: "RubyAnnotation"),
+            NSAttributedString.Key(rawValue: "RubyBaseRange"),
+            NSAttributedString.Key(rawValue: "RubyText"),
+            NSAttributedString.Key(rawValue: "RubySize"),
+            NSAttributedString.Key(rawValue: "RubyAlignment"),
+            NSAttributedString.Key(rawValue: "RubyVisibility")
+        ]
+        mutable.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
+            for key in rubyKeys where attrs[key] != nil {
+                mutable.removeAttribute(key, range: range)
+            }
+        }
+        return mutable
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {

@@ -199,25 +199,35 @@ struct RubyText: UIViewRepresentable {
         // Do not clamp to screen width; use a conservative width to ensure we never under-measure height.
         let baseWidth = max(1, rawWidth)
 
+        // Snap widths to pixel boundaries to avoid sub-pixel wrapping differences.
+        let scale: CGFloat = {
+            if let s = uiView.window?.windowScene?.screen.scale, s > 0 { return s }
+            let traitScale = uiView.traitCollection.displayScale
+            return traitScale > 0 ? traitScale : 2.0
+        }()
+        func snap(_ v: CGFloat) -> CGFloat { (v * scale).rounded() / scale }
+
+        let snappedBaseWidth = snap(baseWidth)
+
         // Ensure TextKit measures with the same constrained width we'll draw with.
         // Do NOT mutate view geometry (e.g. `bounds`) here; only configure TextKit.
         let inset = uiView.textContainerInset
-        let targetWidth = max(0, baseWidth - inset.left - inset.right)
+        let targetWidth = max(0, snap(baseWidth - inset.left - inset.right))
 
-        uiView.lastMeasuredBoundsWidth = baseWidth
+        uiView.lastMeasuredBoundsWidth = snappedBaseWidth
         uiView.lastMeasuredTextContainerWidth = targetWidth
         if abs(uiView.textContainer.size.width - targetWidth) > 0.5 {
             uiView.textContainer.size = CGSize(width: targetWidth, height: .greatestFiniteMagnitude)
         }
 
         if DiagnosticsLogging.isEnabled(.tokenOverlayGeometry) {
-            let shouldLog = (proposedWidth == nil) || abs(uiView.bounds.width - baseWidth) > 0.5
+            let shouldLog = (proposedWidth == nil) || abs(uiView.bounds.width - snappedBaseWidth) > 0.5
             if shouldLog {
                 let logger = DiagnosticsLogging.logger(.tokenOverlayGeometry)
                 let message = String(
                     format: "MEASURE sizeThatFits proposalWidth=%@ baseWidth=%.2f boundsWidth=%.2f insetL=%.2f insetR=%.2f padding=%.2f containerW=%.2f",
                     String(describing: proposedWidth),
-                    baseWidth,
+                    snappedBaseWidth,
                     uiView.bounds.width,
                     inset.left,
                     inset.right,
@@ -228,10 +238,10 @@ struct RubyText: UIViewRepresentable {
             }
         }
 
-        let targetSize = CGSize(width: baseWidth, height: .greatestFiniteMagnitude)
+        let targetSize = CGSize(width: snappedBaseWidth, height: .greatestFiniteMagnitude)
         let measured = uiView.sizeThatFits(targetSize)
         let measuredHeight = measured.height > 0 ? measured.height : targetSize.height
-        return CGSize(width: baseWidth, height: measuredHeight)
+        return CGSize(width: snappedBaseWidth, height: measuredHeight)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -792,6 +802,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }
         needsHighlightUpdate = true
         setNeedsLayout()
+        // Attribute-only changes (e.g. token foreground colors) may not trigger a repaint
+        // if layout metrics are unchanged. Ruby drawing depends on the attributed runs, so
+        // ensure we redraw whenever the attributed text changes.
+        setNeedsDisplay()
         invalidateIntrinsicContentSize()
         Self.logGeometry("applyAttributedText -> setNeedsLayout")
     }

@@ -551,30 +551,6 @@ private struct LookupResultsView: View {
     }
 
     private func dictionaryCard(entry: DictionaryEntry, positionText: String) -> some View {
-        let selectionHasKanji = selection.surface.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
-        let primaryText: String
-        if selectionHasKanji {
-            if entry.kanji.isEmpty == false {
-                primaryText = entry.kanji
-            } else if let kana = entry.kana, kana.isEmpty == false {
-                primaryText = kana
-            } else {
-                primaryText = selection.surface
-            }
-        } else {
-            if let kana = entry.kana, kana.isEmpty == false {
-                primaryText = kana
-            } else {
-                primaryText = selection.surface
-            }
-        }
-
-        let secondaryText: String? = {
-            guard selectionHasKanji else { return nil }
-            guard let kana = entry.kana, kana.isEmpty == false else { return nil }
-            return kana == primaryText ? nil : kana
-        }()
-
         let isSaved = isWordSaved?(entry) ?? false
         let activeReading = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let entryReading = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -586,15 +562,112 @@ private struct LookupResultsView: View {
         let isActiveCustomReading = activeReading.isEmpty == false && hasAnyDictionaryReadingMatch == false
         let shouldShowApplyReadingButton = lookup.results.count > 1
 
-        return VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(primaryText)
-                    .font(.headline)
-                if let kana = secondaryText {
-                    Text(kana)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+        let tokenSurface = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokenReading = (selection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokenPOS = (selection.annotatedSpan.partOfSpeech ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokenLemma = (selection.annotatedSpan.lemmaCandidates.first ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let surfaceHasKanji = tokenSurface.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+
+        // Treat the dictionary headword as the canonical lemma.
+        let lemmaSurface: String = {
+            // If the selected surface is kana-only, prefer kana lemma (avoid showing kanji).
+            if surfaceHasKanji == false {
+                if let kana = entry.kana, kana.isEmpty == false {
+                    return kana
                 }
+                return tokenSurface
+            }
+
+            // Prefer MeCab's dictionary form when available (e.g. なりたくて -> なる).
+            if tokenLemma.isEmpty == false {
+                return tokenLemma
+            }
+
+            // Otherwise, prefer kanji headword when available.
+            if entry.kanji.isEmpty == false {
+                return entry.kanji
+            }
+            if let kana = entry.kana, kana.isEmpty == false {
+                return kana
+            }
+            return tokenSurface
+        }()
+
+        // Use the dictionary-provided reading for the lemma when available.
+        let lemmaReading: String = {
+            // For kana-only surfaces, we intentionally avoid presenting a kanji lemma,
+            // so a separate lemma reading is not useful.
+            guard surfaceHasKanji else { return "" }
+            // Only show a lemma reading when it corresponds to the displayed lemma surface.
+            guard entry.kanji.isEmpty == false else { return "" }
+            guard lemmaSurface == entry.kanji else { return "" }
+            return (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }()
+
+        func trailingKanaRun(in surface: String) -> String {
+            guard surface.isEmpty == false else { return "" }
+            var scalars: [UnicodeScalar] = []
+            for scalar in surface.unicodeScalars.reversed() {
+                let isKana = (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
+                if isKana {
+                    scalars.append(scalar)
+                } else {
+                    break
+                }
+            }
+            guard scalars.isEmpty == false else { return "" }
+            return String(String.UnicodeScalarView(scalars.reversed()))
+        }
+
+        func readingIncludingOkurigana(surface: String, reading: String) -> String {
+            let okurigana = trailingKanaRun(in: surface)
+            guard okurigana.isEmpty == false else { return reading }
+            guard reading.isEmpty == false else { return okurigana }
+            return reading.hasSuffix(okurigana) ? reading : (reading + okurigana)
+        }
+
+        // Surface reading should reflect the *currently highlighted dictionary entry* so
+        // paging shows alternate readings (e.g., 私: わたし / わたくし).
+        let dictionaryReading = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let surfaceReadingBase = dictionaryReading.isEmpty ? tokenReading : dictionaryReading
+        let surfaceReading = readingIncludingOkurigana(surface: tokenSurface, reading: surfaceReadingBase)
+
+        let showSurfaceReading = surfaceReading.isEmpty == false && surfaceReading != tokenSurface
+        let showLemmaLine = lemmaSurface.isEmpty == false && lemmaSurface != tokenSurface
+        let showLemmaReading = lemmaReading.isEmpty == false && lemmaReading != lemmaSurface
+
+        return VStack(alignment: .leading, spacing: 6) {
+            // Surface (reading in parentheses)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(tokenSurface.isEmpty ? "—" : tokenSurface)
+                    .font(.headline)
+                if showSurfaceReading {
+                    Text("(\(surfaceReading))")
+                        .font(.subheadline)
+                }
+            }
+
+            // Lemma (reading in parentheses)
+            if showLemmaLine {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(lemmaSurface)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    if showLemmaReading {
+                        Text("(\(lemmaReading))")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            // POS line above definition
+            if tokenPOS.isEmpty == false {
+                Text(tokenPOS)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .italic()
             }
 
             if entry.gloss.isEmpty == false {
