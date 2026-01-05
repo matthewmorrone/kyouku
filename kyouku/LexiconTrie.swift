@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 
 /// Minimal trie built from all JMdict surface forms. It supports fast,
 /// bounded longest-prefix lookups across UTF-16 code units so segmentation can
@@ -153,6 +152,48 @@ final class LexiconTrie {
         return cursor == endExclusive
     }
 
+    /// Returns true when the substring `[index, endExclusive)` exists as an exact word inside the lexicon.
+    ///
+    /// This is stricter than `hasPrefix` and does not depend on longest-match behavior.
+    func containsWord(in text: NSString, from index: Int, through endExclusive: Int, requireKanji: Bool = true) -> Bool {
+        instrumentation.recordCursor()
+        let length = text.length
+        guard index < length else { return false }
+        guard endExclusive <= length else { return false }
+        instrumentation.recordTraversal()
+
+        var node = root
+        var cursor = index
+        var steps = 0
+        var hasKanji = false
+
+        let loopStart = CFAbsoluteTimeGetCurrent()
+
+        while cursor < endExclusive && steps < maxWordLength {
+            let unit = text.character(at: cursor)
+            instrumentation.recordCharAccess()
+            instrumentation.recordLookup()
+            guard let next = node.children[unit] else {
+                instrumentation.recordSteps(steps)
+                instrumentation.recordTrieTime(CFAbsoluteTimeGetCurrent() - loopStart)
+                return false
+            }
+            if Self.isKanji(unit) {
+                hasKanji = true
+            }
+            node = next
+            cursor += 1
+            steps += 1
+        }
+
+        instrumentation.recordSteps(steps)
+        instrumentation.recordTrieTime(CFAbsoluteTimeGetCurrent() - loopStart)
+
+        guard cursor == endExclusive else { return false }
+        guard node.isWord else { return false }
+        return requireKanji == false || hasKanji
+    }
+
     func beginProfiling() {
         instrumentation.begin()
     }
@@ -174,13 +215,6 @@ private final class TrieInstrumentation {
     private var charAccessCount = 0
     private var trieTime: CFTimeInterval = 0
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "LexiconTrie")
-
-    private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
-        logger.info("[\(file):\(line)] \(function): \(message, privacy: .public)")
-    }
-
     func begin() {
         isActive = true
         cursorCount = 0
@@ -194,7 +228,7 @@ private final class TrieInstrumentation {
     func end(totalDuration: CFTimeInterval) {
         guard isActive else { return }
         isActive = false
-        info("Trie spans: cursors=\(self.cursorCount) traversals=\(self.traversalCount) steps=\(self.stepCount) childrenLookups=\(self.lookupCount) charAtCalls=\(self.charAccessCount) trieTime=\(self.trieTime * 1000)ms totalTime=\(totalDuration * 1000)ms")
+        CustomLogger.shared.info("Trie spans: cursors=\(self.cursorCount) traversals=\(self.traversalCount) steps=\(self.stepCount) childrenLookups=\(self.lookupCount) charAtCalls=\(self.charAccessCount) trieTime=\(self.trieTime * 1000)ms totalTime=\(totalDuration * 1000)ms")
     }
 
     func recordCursor() {

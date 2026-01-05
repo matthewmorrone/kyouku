@@ -1,7 +1,6 @@
 import SwiftUI
 import UIKit
 import Foundation
-import OSLog
 
 struct PasteView: View {
     @EnvironmentObject var notes: NotesStore
@@ -126,8 +125,7 @@ struct PasteView: View {
         return UUID(uuidString: lastOpenedNoteIDRaw)
     }
 
-    private static let furiganaLogger = DiagnosticsLogging.logger(.furigana)
-    private static let selectionLogger = DiagnosticsLogging.logger(.pasteSelection)
+    
     private static let coordinateSpaceName = "PasteViewRootSpace"
     private static let inlineDictionaryPanelEnabledFlag = false
     private static let dictionaryPopupEnabledFlag = true // Temporary debug switch so highlight behavior can be isolated without showing the popup.
@@ -183,7 +181,7 @@ struct PasteView: View {
         }
         .sheet(isPresented: $showWordDefinitionsSheet) {
             NavigationStack {
-                WordDefinitionsView(surface: wordDefinitionsSurface, kana: wordDefinitionsKana)
+                WordDefinitionsView(surface: wordDefinitionsSurface, kana: wordDefinitionsKana, sourceNoteID: currentNote?.id)
             }
         }
     }
@@ -334,7 +332,7 @@ struct PasteView: View {
             } else {
                 if suppressNextEditingRefresh {
                     suppressNextEditingRefresh = false
-                    Self.logFurigana("Skipping refresh: editing toggle was programmatic.")
+                    CustomLogger.shared.info("Skipping refresh: editing toggle was programmatic.")
                     return
                 }
                 triggerFuriganaRefreshIfNeeded(reason: "editing toggled off", recomputeSpans: true)
@@ -372,17 +370,17 @@ struct PasteView: View {
                 switch (oldSelection, newSelection) {
                 case (nil, .some(let newCtx)):
                     let r = newCtx.range
-                    Self.selectionLogger.debug("Dictionary popup shown (selection change) tokenIndex=\(newCtx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(newCtx.surface, privacy: .public) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
+                    CustomLogger.shared.debug("Dictionary popup shown (selection change) tokenIndex=\(newCtx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(newCtx.surface) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
                 case (.some(_), nil):
-                    Self.selectionLogger.debug("Dictionary popup hidden (selection cleared)")
+                    CustomLogger.shared.debug("Dictionary popup hidden (selection cleared)")
                 case (.some(let oldCtx), .some(let newCtx)):
                     if oldCtx.id != newCtx.id {
                         let oldR = oldCtx.range
                         let newR = newCtx.range
-                        Self.selectionLogger.debug("Dictionary popup replaced oldTokenIndex=\(oldCtx.tokenIndex) oldRange=\(oldR.location)-\(NSMaxRange(oldR)) -> newTokenIndex=\(newCtx.tokenIndex) newRange=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface, privacy: .public)")
+                        CustomLogger.shared.debug("Dictionary popup replaced oldTokenIndex=\(oldCtx.tokenIndex) oldRange=\(oldR.location)-\(NSMaxRange(oldR)) -> newTokenIndex=\(newCtx.tokenIndex) newRange=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface)")
                     } else if oldCtx.range.location != newCtx.range.location || oldCtx.range.length != newCtx.range.length || oldCtx.surface != newCtx.surface {
                         let newR = newCtx.range
-                        Self.selectionLogger.debug("Dictionary popup updated tokenIndex=\(newCtx.tokenIndex) range=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface, privacy: .public)")
+                        CustomLogger.shared.debug("Dictionary popup updated tokenIndex=\(newCtx.tokenIndex) range=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface)")
                     }
                 default:
                     break
@@ -395,15 +393,15 @@ struct PasteView: View {
             if oldID == nil, let _ = newID {
                 if let ctx = sheetSelection {
                     let r = ctx.range
-                    Self.selectionLogger.debug("Dictionary popup shown (sheet binding) tokenIndex=\(ctx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface, privacy: .public)")
+                    CustomLogger.shared.debug("Dictionary popup shown (sheet binding) tokenIndex=\(ctx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface)")
                 } else {
-                    Self.selectionLogger.debug("Dictionary popup shown (sheet binding)")
+                    CustomLogger.shared.debug("Dictionary popup shown (sheet binding)")
                 }
             } else if let _ = oldID, newID == nil {
-                Self.selectionLogger.debug("Dictionary popup hidden (sheet binding cleared)")
+                CustomLogger.shared.debug("Dictionary popup hidden (sheet binding cleared)")
             } else if let _ = oldID, let _ = newID, let ctx = sheetSelection {
                 let r = ctx.range
-                Self.selectionLogger.debug("Dictionary popup replaced (sheet binding) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface, privacy: .public)")
+                CustomLogger.shared.debug("Dictionary popup replaced (sheet binding) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface)")
             }
         }
         .onChange(of: currentNote?.id) { _, newValue in
@@ -479,6 +477,13 @@ struct PasteView: View {
             .navigationTitle("Extract Words")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        saveAllVisibleTokens()
+                    } label: {
+                        Label("Save All", systemImage: "tray.and.arrow.down")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { showTokensPopover = false }
                 }
@@ -625,6 +630,7 @@ struct PasteView: View {
         guard spans.isEmpty == false else { return [] }
         var seenKeys: Set<String> = []
         let particleSet: Set<String> = hideCommonParticles ? commonParticleSet : []
+        let noteID = currentNote?.id
 
         return spans.enumerated().compactMap { index, span in
             guard let trimmed = trimmedRangeAndSurface(for: span.range) else { return nil }
@@ -644,7 +650,7 @@ struct PasteView: View {
                 seenKeys.insert(key)
             }
 
-            let alreadySaved = hasSavedWord(surface: trimmed.surface, reading: reading)
+            let alreadySaved = hasSavedWord(surface: trimmed.surface, reading: reading, noteID: noteID)
             return TokenListItem(
                 spanIndex: index,
                 range: trimmed.range,
@@ -909,7 +915,7 @@ struct PasteView: View {
     }
 
     private func clearSelection(resetPersistent: Bool = true) {
-        Self.selectionLogger.debug("Clearing selection resetPersistent=\(resetPersistent)")
+        CustomLogger.shared.debug("Clearing selection resetPersistent=\(resetPersistent)")
         let hadSelection = selectionController.tokenSelection != nil
         selectionController.clearSelection(resetPersistent: resetPersistent)
         isDictionarySheetPresented = false
@@ -919,7 +925,7 @@ struct PasteView: View {
             inlineLookup.isLoading = false
         }
         if dictionaryPopupEnabled && hadSelection {
-            Self.selectionLogger.debug("Dictionary popup hidden")
+            CustomLogger.shared.debug("Dictionary popup hidden")
         }
     }
 
@@ -928,6 +934,18 @@ struct PasteView: View {
             clearSelection()
             return
         }
+
+        ivlog("Tap.handleInlineSpanSelection tokenIndex=\(selection.tokenIndex) highlight=\(selection.highlightRange.location)-\(NSMaxRange(selection.highlightRange))")
+
+        // INVESTIGATION NOTES (2026-01-04)
+        // Token tap → dictionary popup execution path:
+        // RubyText.TokenOverlayTextView.handleInspectionTap → spanSelectionHandler → PasteView.handleInlineSpanSelection
+        // → presentDictionaryForSpan(at:) → selectionContext(forSpanAt:) → aggregatedAnnotatedSpan(for:) (lemma + POS aggregation)
+        // → TokenActionPanel + DictionaryLookupViewModel.load(term:fallbackTerms:).
+        //
+        // Potential jitter sources on tap:
+        // - `selectionContext(forSpanAt:)` rebuilds a TokenSelectionContext and aggregates lemma candidates.
+        // - `handleSelectionLookup` can trigger multiple SQLite lookups (primary term + lemma fallbacks).
         presentDictionaryForSpan(at: selection.tokenIndex, focusSplitMenu: false)
         persistentSelectionRange = selection.highlightRange
     }
@@ -954,6 +972,12 @@ struct PasteView: View {
     }
 
     private func handleSelectionLookup(for term: String) {
+        // INVESTIGATION NOTES (2026-01-04)
+        // Dictionary lookup behavior for the popup:
+        // - Primary term is the selected surface.
+        // - Fallback terms are lemma candidates (can be multiple).
+        // DictionaryLookupViewModel.load iterates candidates sequentially and does SQLite lookups until hits.
+        // This means one tap can cause multiple DB queries and result allocations.
         guard term.isEmpty == false else {
             Task { @MainActor in
                 inlineLookup.results = []
@@ -963,6 +987,8 @@ struct PasteView: View {
             return
         }
         let lemmaFallbacks = tokenSelection?.annotatedSpan.lemmaCandidates ?? []
+
+        ivlog("Tap.handleSelectionLookup term='\(term)' fallbacks=\(lemmaFallbacks.count)")
         Task { [lemmaFallbacks] in
             await inlineLookup.load(term: term, fallbackTerms: lemmaFallbacks)
         }
@@ -1008,7 +1034,10 @@ struct PasteView: View {
         let k = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let kana = (k?.isEmpty == false) ? k : nil
         guard s.isEmpty == false else { return false }
-        return words.words.contains { $0.surface == s && $0.kana == kana }
+        let noteID = currentNote?.id
+        return words.words.contains { word in
+            word.surface == s && word.kana == kana && word.sourceNoteID == noteID
+        }
     }
 
     private func toggleSavedWord(surface: String, entry: DictionaryEntry) {
@@ -1016,10 +1045,11 @@ struct PasteView: View {
         let k = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let kana = (k?.isEmpty == false) ? k : nil
         guard s.isEmpty == false else { return }
+        let noteID = currentNote?.id
 
         let matchingIDs = Set(
             words.words
-                .filter { $0.surface == s && $0.kana == kana }
+                .filter { $0.surface == s && $0.kana == kana && $0.sourceNoteID == noteID }
                 .map(\.id)
         )
 
@@ -1064,7 +1094,7 @@ struct PasteView: View {
             return AnyView(
                 view.sheet(isPresented: $isDictionarySheetPresented, onDismiss: {
                     if dictionaryPopupEnabled {
-                        Self.selectionLogger.debug("Dictionary popup dismissed by user")
+                        CustomLogger.shared.debug("Dictionary popup dismissed by user")
                     }
                     clearSelection(resetPersistent: true)
                 }) {
@@ -1225,7 +1255,14 @@ struct PasteView: View {
     }
 
     private func presentDictionaryForSpan(at index: Int, focusSplitMenu: Bool) {
-        guard let context = selectionContext(forSpanAt: index) else { return }
+        let contextOpt: TokenSelectionContext? = ivtime("Tap.presentDictionaryForSpan selectionContext") {
+            selectionContext(forSpanAt: index)
+        }
+        guard let context = contextOpt else {
+            ivlog("Tap.presentDictionaryForSpan missingContext tokenIndex=\(index)")
+            return
+        }
+        ivlog("Tap.presentDictionaryForSpan haveContext tokenIndex=\(index) range=\(context.range.location)-\(NSMaxRange(context.range)) surfaceLen=\(context.surface.count)")
         pendingSelectionRange = nil
         persistentSelectionRange = context.range
         tokenSelection = context
@@ -1235,7 +1272,7 @@ struct PasteView: View {
         }
         if dictionaryPopupEnabled {
             let r = context.range
-            Self.selectionLogger.debug("Dictionary popup shown tokenIndex=\(index) range=\(r.location)-\(NSMaxRange(r)) surface=\(context.surface, privacy: .public) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
+            CustomLogger.shared.debug("Dictionary popup shown tokenIndex=\(index) range=\(r.location)-\(NSMaxRange(r)) surface=\(context.surface) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
         }
         pendingSplitFocusSelectionID = focusSplitMenu ? context.id : nil
     }
@@ -1259,8 +1296,8 @@ struct PasteView: View {
         let surface = context.surface.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Toggle behavior: if already saved, delete; otherwise add
-        if hasSavedWord(surface: surface, reading: reading) {
-            let matches = words.words.filter { $0.surface == surface && $0.kana == reading }
+        if hasSavedWord(surface: surface, reading: reading, noteID: currentNote?.id) {
+            let matches = words.words.filter { $0.surface == surface && $0.kana == reading && $0.sourceNoteID == currentNote?.id }
             let ids = Set(matches.map { $0.id })
             if ids.isEmpty == false {
                 words.delete(ids: ids)
@@ -1366,10 +1403,16 @@ struct PasteView: View {
         scalar.value == 0xFF70
     }
 
-    private func hasSavedWord(surface: String, reading: String?) -> Bool {
+    // Overloaded hasSavedWord with explicit noteID
+    private func hasSavedWord(surface: String, reading: String?, noteID: UUID?) -> Bool {
         words.words.contains { word in
-            word.surface == surface && word.kana == reading
+            word.surface == surface && word.kana == reading && word.sourceNoteID == noteID
         }
+    }
+
+    // Original hasSavedWord calls new overload with currentNote?.id
+    private func hasSavedWord(surface: String, reading: String?) -> Bool {
+        hasSavedWord(surface: surface, reading: reading, noteID: currentNote?.id)
     }
 
     private func tokenDuplicateKey(surface: String, reading: String?) -> String {
@@ -1413,7 +1456,7 @@ struct PasteView: View {
     private func handleOverridesExternalChange() {
         let signature = computeOverrideSignature()
         guard signature != overrideSignature else { return }
-        Self.selectionLogger.debug("Override change detected for note=\(activeNoteID)")
+        CustomLogger.shared.debug("Override change detected for note=\(activeNoteID)")
         overrideSignature = signature
         updateCustomizedRanges()
         guard inputText.isEmpty == false else { return }
@@ -1694,7 +1737,7 @@ struct PasteView: View {
     private func applyOverridesChange(range: NSRange, newOverrides: [ReadingOverride], actionName: String) {
         let noteID = activeNoteID
         let previous = readingOverrides.overrides(for: noteID, overlapping: range)
-        Self.selectionLogger.debug("Applying overrides action=\(actionName, privacy: .public) note=\(noteID) range=\(range.location)-\(NSMaxRange(range)) replacing=\(previous.count) inserting=\(newOverrides.count)")
+        CustomLogger.shared.debug("Applying overrides action=\(actionName) note=\(noteID) range=\(range.location)-\(NSMaxRange(range)) replacing=\(previous.count) inserting=\(newOverrides.count)")
         readingOverrides.apply(noteID: noteID, removing: range, adding: newOverrides)
         overrideSignature = computeOverrideSignature()
         updateCustomizedRanges()
@@ -1775,11 +1818,11 @@ struct PasteView: View {
 
     private func triggerFuriganaRefreshIfNeeded(reason: String = "state change", recomputeSpans: Bool = true) {
         guard inputText.isEmpty == false else {
-            Self.logFurigana("Skipping refresh (\(reason)): paste text is empty.")
+            CustomLogger.shared.info("Skipping refresh (\(reason)): paste text is empty.")
             return
         }
         furiganaRefreshToken &+= 1
-        Self.logFurigana("Queued refresh token \(furiganaRefreshToken) for text length \(inputText.count). Reason: \(reason)")
+        CustomLogger.shared.info("Queued refresh token \(furiganaRefreshToken) for text length \(inputText.count). Reason: \(reason)")
         startFuriganaTask(token: furiganaRefreshToken, recomputeSpans: recomputeSpans)
     }
 
@@ -1799,9 +1842,19 @@ struct PasteView: View {
 
     private func makeFuriganaTask(token: Int, recomputeSpans: Bool) -> (() async -> Void)? {
         guard inputText.isEmpty == false else {
-            Self.logFurigana("No furigana task created because text is empty.")
+            CustomLogger.shared.info("No furigana task created because text is empty.")
             return nil
         }
+
+        // INVESTIGATION NOTES (2026-01-04)
+        // Initial load / furigana recompute execution path:
+        // PasteView.triggerFuriganaRefreshIfNeeded → startFuriganaTask → makeFuriganaTask → FuriganaPipelineService.render.
+        // FuriganaPipelineService.render → FuriganaAttributedTextBuilder.computeStage2 → Stage-1 segmentation → Stage-2 attachReadings
+        // (now includes Stage-2.5 semanticRegrouping) → ruby projection (when showFurigana == true).
+        //
+        // Main-thread boundary:
+        // `service.render(...)` runs off-main; applying results is wrapped in `MainActor.run`.
+        // Any heavy work inside rendering/ruby layout that happens on the main thread should be flagged separately (see RubyText).
         // Capture current values by value to avoid capturing self
         let currentText = inputText
         let currentShowFurigana = showFurigana
@@ -1826,25 +1879,25 @@ struct PasteView: View {
             context: "PasteView"
         )
         let service = furiganaPipeline
-        Self.logFurigana("Creating furigana task token \(token) for text length \(currentText.count). ShowF: \(currentShowFurigana)")
+        CustomLogger.shared.info("Creating furigana task token \(token) for text length \(currentText.count). ShowFurigana: \(currentShowFurigana)")
         return {
             let result = await service.render(pipelineInput)
             await MainActor.run {
                 guard Task.isCancelled == false else {
-                    Self.logFurigana("Discarded cancelled furigana task token \(token)")
+                    CustomLogger.shared.info("Discarded cancelled furigana task token \(token)")
                     return
                 }
                 guard token == furiganaRefreshToken else {
-                    Self.logFurigana("Discarded stale furigana result token \(token); latest token is \(furiganaRefreshToken)")
+                    CustomLogger.shared.info("Discarded stale furigana result token \(token); latest token is \(furiganaRefreshToken)")
                     return
                 }
                 guard inputText == currentText else {
-                    Self.logFurigana("Discarded furigana result token \(token) because text changed before apply")
+                    CustomLogger.shared.info("Discarded furigana result token \(token) because text changed before apply")
                     return
                 }
                 furiganaSpans = result.spans
                 furiganaSemanticSpans = result.semanticSpans
-                Self.logFurigana("Applied spans: \(result.spans?.count ?? 0)")
+                CustomLogger.shared.info("Applied spans: \(result.spans?.count ?? 0)")
                 if showFurigana == currentShowFurigana {
                     furiganaAttributedText = result.attributedString
                 } else if showFurigana == false {
@@ -1883,9 +1936,53 @@ struct PasteView: View {
         pendingSelectionRange = nil
     }
 
-    fileprivate static func logFurigana(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        let functionName = String(describing: function).replacingOccurrences(of: ":", with: " ")
-        furiganaLogger.info("\(file) \(line) \(functionName) \(message, privacy: .public)")
+    private func saveAllVisibleTokens() {
+        let noteID = currentNote?.id
+        let items = tokenListItems
+        guard items.isEmpty == false else { return }
+
+        Task {
+            let existingKeys: Set<String> = await MainActor.run {
+                Set(
+                    words.words
+                        .filter { $0.sourceNoteID == noteID }
+                        .map { w in
+                            let s = w.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let k = w.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let nk = (k?.isEmpty == false) ? k! : ""
+                            return "\(s)|\(nk)"
+                        }
+                )
+            }
+
+            var toAdd: [WordsStore.WordToAdd] = []
+            toAdd.reserveCapacity(items.count)
+
+            for item in items {
+                // Skip if already saved for this note
+                let candidateKey: String = {
+                    let s = item.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let k = item.reading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return "\(s)|\(k)"
+                }()
+                if existingKeys.contains(candidateKey) {
+                    continue
+                }
+                // Lookup preferred dictionary entry for richer meaning/surface if available
+                let entry = await lookupPreferredDictionaryEntry(surface: item.surface, reading: item.reading)
+
+                guard let entry else { continue }
+                let meaning = normalizedMeaning(from: entry.gloss)
+                guard meaning.isEmpty == false else { continue }
+                let kana = normalizedReading(entry.kana)
+                let surface = resolvedSurface(from: entry, fallback: item.surface)
+                toAdd.append(WordsStore.WordToAdd(surface: surface, kana: kana, meaning: meaning))
+            }
+
+            await MainActor.run {
+                words.addMany(toAdd, sourceNoteID: noteID)
+            }
+        }
     }
 
 }

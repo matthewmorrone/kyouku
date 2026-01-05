@@ -1,18 +1,8 @@
 import SwiftUI
 import UIKit
-import OSLog
 #if DEBUG
 import ObjectiveC
 #endif
-
-// MARK: - Logging Helper
-@inline(__always)
-func Log(_ message: @autoclosure () -> String,
-         file: StaticString = #fileID,
-         line: UInt = #line,
-         function: StaticString = #function) {
-    print("[\(file):\(line)] \(function): \(message())")
-}
 
 extension NSAttributedString.Key {
     static let rubyAnnotation = NSAttributedString.Key("RubyAnnotation")
@@ -86,7 +76,6 @@ struct RubyText: UIViewRepresentable {
         textView.textContainerInset = textInsets
         textView.clipsToBounds = false
         textView.layer.masksToBounds = false
-        textView.textColor = .label
         textView.tintColor = .systemBlue
         textView.font = UIFont.systemFont(ofSize: fontSize)
         textView.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -109,8 +98,15 @@ struct RubyText: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: TokenOverlayTextView, context: Context) {
+        // INVESTIGATION NOTES (2026-01-04)
+        // This method runs on the main thread as part of SwiftUI/UIViewRepresentable updates.
+        // Potential UI-jitter contributors here:
+        // - `requiredVerticalHeadroomForRuby(in: attributed, ...)` can scan attributed runs (potentially O(text length)).
+        // - Building `renderKey` hashes iterates all token overlays + customized ranges (O(k)).
+        // - When `shouldReapplyAttributedText` is true, this allocates a new NSMutableAttributedString and reapplies multiple
+        //   attributes across the full range (O(text length)) and also applies overlay/highlight attribute passes.
+        // Any increases in how often `updateUIView` is triggered (e.g., selection/highlight changes) will amplify this cost.
         uiView.font = UIFont.systemFont(ofSize: fontSize)
-        uiView.textColor = .label
         uiView.tintColor = .systemBlue
         uiView.rubyAnnotationVisibility = annotationVisibility
         uiView.isEditable = false
@@ -158,6 +154,37 @@ struct RubyText: UIViewRepresentable {
         uiView.rubyHighlightHeadroom = rubyHeadroom
         uiView.rubyBaselineGap = rubyBaselineGap
 
+        var renderHasher = Hasher()
+        renderHasher.combine(ObjectIdentifier(attributed))
+        renderHasher.combine(attributed.length)
+        renderHasher.combine(Int((fontSize * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(Int((lineHeightMultiple * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(Int((extraGap * 1000).rounded(.toNearestOrEven)))
+        switch annotationVisibility {
+        case .visible: renderHasher.combine(1)
+        case .hiddenKeepMetrics: renderHasher.combine(2)
+        case .removed: renderHasher.combine(3)
+        }
+        renderHasher.combine(Int((insets.top * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(Int((insets.left * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(Int((insets.bottom * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(Int((insets.right * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(tokenOverlays.count)
+        for o in tokenOverlays {
+            renderHasher.combine(o.range.location)
+            renderHasher.combine(o.range.length)
+            renderHasher.combine(o.color.hash)
+        }
+        renderHasher.combine(customizedRanges.count)
+        for r in customizedRanges {
+            renderHasher.combine(r.location)
+            renderHasher.combine(r.length)
+        }
+        let renderKey = renderHasher.finalize()
+        let shouldReapplyAttributedText = (uiView.lastAppliedRenderKey != renderKey) || (uiView.attributedText == nil)
+
+        if shouldReapplyAttributedText {
+
         let mutable = NSMutableAttributedString(attributedString: attributed)
         let fullRange = NSRange(location: 0, length: mutable.length)
         let paragraph = NSMutableParagraphStyle()
@@ -185,6 +212,8 @@ struct RubyText: UIViewRepresentable {
         let processed = RubyText.applyAnnotationVisibility(annotationVisibility, to: mutable)
 
         uiView.applyAttributedText(processed)
+        uiView.lastAppliedRenderKey = renderKey
+        }
         uiView.semanticSpans = semanticSpans
         uiView.selectionHighlightRange = selectedRange
         uiView.isTapInspectionEnabled = enableTapInspection
@@ -244,22 +273,19 @@ struct RubyText: UIViewRepresentable {
             uiView.textContainer.size = CGSize(width: targetWidth, height: .greatestFiniteMagnitude)
         }
 
-        if DiagnosticsLogging.isEnabled(.tokenOverlayGeometry) {
-            let shouldLog = (proposedWidth == nil) || abs(uiView.bounds.width - snappedBaseWidth) > 0.5
-            if shouldLog {
-                let logger = DiagnosticsLogging.logger(.tokenOverlayGeometry)
-                let message = String(
-                    format: "MEASURE sizeThatFits proposalWidth=%@ baseWidth=%.2f boundsWidth=%.2f insetL=%.2f insetR=%.2f padding=%.2f containerW=%.2f",
-                    String(describing: proposedWidth),
-                    snappedBaseWidth,
-                    uiView.bounds.width,
-                    inset.left,
-                    inset.right,
-                    uiView.textContainer.lineFragmentPadding,
-                    uiView.textContainer.size.width
-                )
-                logger.debug("\(message, privacy: .public)")
-            }
+        let shouldLog = (proposedWidth == nil) || abs(uiView.bounds.width - snappedBaseWidth) > 0.5
+        if shouldLog {
+            let message = String(
+                format: "MEASURE sizeThatFits proposalWidth=%@ baseWidth=%.2f boundsWidth=%.2f insetL=%.2f insetR=%.2f padding=%.2f containerW=%.2f",
+                String(describing: proposedWidth),
+                snappedBaseWidth,
+                uiView.bounds.width,
+                inset.left,
+                inset.right,
+                uiView.textContainer.lineFragmentPadding,
+                uiView.textContainer.size.width
+            )
+            CustomLogger.shared.debug(message)
         }
 
         let targetSize = CGSize(width: snappedBaseWidth, height: .greatestFiniteMagnitude)
@@ -461,6 +487,10 @@ struct RubyText: UIViewRepresentable {
 final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     var semanticSpans: [SemanticSpan] = []
 
+    // Cache a lightweight signature of the last fully applied attributed rendering.
+    // This helps avoid reassigning `attributedText` on highlight-only updates.
+    fileprivate var lastAppliedRenderKey: Int? = nil
+
     // Vertical gap between the headword and ruby text.
     var rubyBaselineGap: CGFloat = 1.0
 
@@ -484,7 +514,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard oldValue != selectionHighlightRange else { return }
             needsHighlightUpdate = true
             setNeedsLayout()
-            Self.logGeometry("selectionHighlightRange didSet -> setNeedsLayout (range=\(String(describing: selectionHighlightRange)))")
+            CustomLogger.shared.debug("selectionHighlightRange didSet -> setNeedsLayout (range=\(String(describing: selectionHighlightRange)))")
         }
     }
 
@@ -493,7 +523,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard oldValue != selectionHighlightInsets else { return }
             needsHighlightUpdate = true
             setNeedsLayout()
-            Self.logGeometry(String(format: "selectionHighlightInsets didSet -> setNeedsLayout (top=%.2f left=%.2f bottom=%.2f right=%.2f)", selectionHighlightInsets.top, selectionHighlightInsets.left, selectionHighlightInsets.bottom, selectionHighlightInsets.right))
+            CustomLogger.shared.debug(String(format: "selectionHighlightInsets didSet -> setNeedsLayout (top=%.2f left=%.2f bottom=%.2f right=%.2f)", selectionHighlightInsets.top, selectionHighlightInsets.left, selectionHighlightInsets.bottom, selectionHighlightInsets.right))
         }
     }
 
@@ -507,17 +537,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     var spanSelectionHandler: ((RubySpanSelection?) -> Void)? = nil
     var contextMenuStateProvider: (() -> RubyContextMenuState?)? = nil
     var contextMenuActionHandler: ((RubyContextMenuAction) -> Void)? = nil
-
-    private static let eventLogger = DiagnosticsLogging.logger(.tokenOverlayEvents)
-    private static let geometryLogger = DiagnosticsLogging.logger(.tokenOverlayGeometry)
-
-    private static func logEvent(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        eventLogger.debug("[\(file):\(line)] \(function): \(message, privacy: .public)")
-    }
-
-    private static func logGeometry(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        geometryLogger.debug("[\(file):\(line)]: \(message, privacy: .public)")
-    }
 
     private lazy var inspectionTapRecognizer: UITapGestureRecognizer = {
         let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleInspectionTap(_:)))
@@ -537,7 +556,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard oldValue != rubyHighlightHeadroom else { return }
             needsHighlightUpdate = true
             setNeedsLayout()
-            Self.logGeometry(String(format: "rubyHighlightHeadroom didSet -> setNeedsLayout (headroom=%.2f)", rubyHighlightHeadroom))
+            CustomLogger.shared.debug(String(format: "rubyHighlightHeadroom didSet -> setNeedsLayout (headroom=%.2f)", rubyHighlightHeadroom))
             invalidateIntrinsicContentSize()
         }
     }
@@ -555,6 +574,11 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard isScrollEnabled else { return }
             guard oldValue != contentOffset else { return }
             setNeedsDisplay()
+
+            // Diagnostics: log scroll changes and a stable "offset from top" metric.
+            // In a UIScrollView, the visual top corresponds to y == -adjustedContentInset.top.
+            let offsetFromTop = contentOffset.y + adjustedContentInset.top
+            CustomLogger.shared.print( String( format: "[RubyText] scroll oldY=%.2f newY=%.2f fromTop=%.2f insetTop=%.2f contentH=%.2f boundsH=%.2f", oldValue.y, contentOffset.y, offsetFromTop, adjustedContentInset.top, contentSize.height, bounds.height ) )
         }
     }
 
@@ -641,21 +665,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 }
             }()
 
-            Self.logGeometry(
-                String(
-                    format: "PASS layoutSubviews bounds=%.2fx%.2f textContainer=%.2fx%.2f usedRectH=%.2f contentSizeH=%.2f scroll=%@ tracksWidth=%@ tcID=%d ruby=%@",
-                    b.width,
-                    b.height,
-                    tcSize.width,
-                    tcSize.height,
-                    usedH,
-                    csH,
-                    scroll ? "true" : "false",
-                    tracks ? "true" : "false",
-                    tcID,
-                    vis
-                )
-            )
+            CustomLogger.shared.debug( String( format: "PASS layoutSubviews bounds=%.2fx%.2f textContainer=%.2fx%.2f usedRectH=%.2f contentSizeH=%.2f scroll=%@ tracksWidth=%@ tcID=%d ruby=%@", b.width, b.height, tcSize.width, tcSize.height, usedH, csH, scroll ? "true" : "false", tracks ? "true" : "false", tcID, vis ) )
         }
 #endif
 
@@ -667,29 +677,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         let boundsMismatch = lastMeasuredBoundsWidth > 0 && abs(bounds.width - lastMeasuredBoundsWidth) > 0.5
         let containerMismatch = lastMeasuredTextContainerWidth > 0 && abs(currentTargetWidth - lastMeasuredTextContainerWidth) > 0.5
         if boundsMismatch || containerMismatch {
-            if DiagnosticsLogging.isEnabled(.tokenOverlayGeometry) {
-                Self.logGeometry(
-                    String(
-                        format: "LAYOUT layoutSubviews boundsW=%.2f measuredW=%.2f insetL=%.2f insetR=%.2f padding=%.2f currentTargetW=%.2f measuredTargetW=%.2f containerW=%.2f",
-                        bounds.width,
-                        lastMeasuredBoundsWidth,
-                        inset.left,
-                        inset.right,
-                        textContainer.lineFragmentPadding,
-                        currentTargetWidth,
-                        lastMeasuredTextContainerWidth,
-                        textContainer.size.width
-                    )
-                )
-            }
+            CustomLogger.shared.debug( String( format: "LAYOUT layoutSubviews boundsW=%.2f measuredW=%.2f insetL=%.2f insetR=%.2f padding=%.2f currentTargetW=%.2f measuredTargetW=%.2f containerW=%.2f", bounds.width, lastMeasuredBoundsWidth, inset.left, inset.right, textContainer.lineFragmentPadding, currentTargetWidth, lastMeasuredTextContainerWidth, textContainer.size.width ) )
             invalidateIntrinsicContentSize()
         }
 
-        // Self.logGeometry("layoutSubviews: needsHighlightUpdate=\(needsHighlightUpdate)")
+        CustomLogger.shared.debug("layoutSubviews: needsHighlightUpdate=\(needsHighlightUpdate)")
         if needsHighlightUpdate {
             updateSelectionHighlightPath()
             needsHighlightUpdate = false
-            // Self.logGeometry("layoutSubviews: performed highlight update")
+            CustomLogger.shared.debug("layoutSubviews: performed highlight update")
         }
     }
 
@@ -857,7 +853,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // ensure we redraw whenever the attributed text changes.
         setNeedsDisplay()
         invalidateIntrinsicContentSize()
-        Self.logGeometry("applyAttributedText -> setNeedsLayout")
+        CustomLogger.shared.debug("applyAttributedText -> setNeedsLayout")
     }
 
     private func updateSelectionHighlightPath() {
@@ -911,7 +907,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             }
             guard highlightRect.width > 0, highlightRect.height > 0 else { continue }
 
-            Self.logGeometry(String(format: "BASE highlight rect x=%.2f y=%.2f w=%.2f h=%.2f", highlightRect.origin.x, highlightRect.origin.y, highlightRect.size.width, highlightRect.size.height))
+            CustomLogger.shared.debug(String(format: "BASE highlight rect x=%.2f y=%.2f w=%.2f h=%.2f", highlightRect.origin.x, highlightRect.origin.y, highlightRect.size.width, highlightRect.size.height))
             basePath.append(UIBezierPath(roundedRect: highlightRect, cornerRadius: 4))
         }
 
@@ -920,11 +916,11 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             // (using `textLayoutManager` + layout fragments). On older OS versions or when unavailable,
             // we fall back to synthesizing ruby rectangles from base glyph rectangles plus configured headroom.
             for rubyRect in rubyHighlightRects(in: range) {
-                Self.logGeometry(String(format: "RUBY highlight rect x=%.2f y=%.2f w=%.2f h=%.2f", rubyRect.origin.x, rubyRect.origin.y, rubyRect.size.width, rubyRect.size.height))
+                CustomLogger.shared.debug(String(format: "RUBY highlight rect x=%.2f y=%.2f w=%.2f h=%.2f", rubyRect.origin.x, rubyRect.origin.y, rubyRect.size.width, rubyRect.size.height))
 
                 let clamped = rubyRect.intersection(bounds)
                 if clamped.isNull == false, clamped.isEmpty == false {
-//                    Self.logGeometry(String(format: "RUBY highlight rect x=%.2f y=%.2f w=%.2f h=%.2f", clamped.origin.x, clamped.origin.y, clamped.size.width, clamped.size.height))
+                    CustomLogger.shared.debug(String(format: "RUBY highlight rect x=%.2f y=%.2f w=%.2f h=%.2f", clamped.origin.x, clamped.origin.y, clamped.size.width, clamped.size.height))
                     rubyPath.append(UIBezierPath(roundedRect: clamped, cornerRadius: 4))
                 }
             }
@@ -1096,24 +1092,33 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     @objc
     private func handleInspectionTap(_ recognizer: UITapGestureRecognizer) {
         guard isTapInspectionEnabled, recognizer.state == .ended else { return }
+
+        // INVESTIGATION NOTES (2026-01-04)
+        // Token tap path runs synchronously on the main thread:
+        // - glyph hit-testing / index resolution
+        // - spanSelectionContext lookup
+        // - highlight application + callback to SwiftUI
+        // Also logs multiple debug lines per tap. If taps feel sluggish, check:
+        // - spanSelectionContext(forUTF16Index:) complexity
+        // - logging volume
         let tapPoint = recognizer.location(in: self)
-        Self.logEvent("Inspect tap at x=\(tapPoint.x) y=\(tapPoint.y)")
+        CustomLogger.shared.debug("Inspect tap at x=\(tapPoint.x) y=\(tapPoint.y)")
 
         guard let rawIndex = utf16IndexForTap(at: tapPoint) else {
             clearInspectionHighlight()
-            Self.logEvent("Inspect tap ignored: no glyph resolved")
+            CustomLogger.shared.debug("Inspect tap ignored: no glyph resolved")
             return
         }
 
         guard let resolvedIndex = resolvedTextIndex(from: rawIndex) else {
             clearInspectionHighlight()
-            Self.logEvent("Inspect tap unresolved: no base character near index=\(rawIndex)")
+            CustomLogger.shared.debug("Inspect tap unresolved: no base character near index=\(rawIndex)")
             return
         }
 
         guard let selection = spanSelectionContext(forUTF16Index: resolvedIndex) else {
             clearInspectionHighlight()
-            Self.logEvent("Inspect tap unresolved: no annotated span contains index=\(resolvedIndex)")
+            CustomLogger.shared.debug("Inspect tap unresolved: no annotated span contains index=\(resolvedIndex)")
             return
         }
 
@@ -1126,12 +1131,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             let scalarsDescription = details.scalars.joined(separator: ", ")
             let indexSummary = rawIndex == resolvedIndex ? "\(resolvedIndex)" : "\(resolvedIndex) (resolved from \(rawIndex))"
 
-            Self.logEvent(
-                "Inspect tap char=\(charDescription) utf16Index=\(indexSummary) utf16Range=\(rangeDescription) scalars=[\(scalarsDescription)]"
-            )
+            CustomLogger.shared.debug("Inspect tap char=\(charDescription) utf16Index=\(indexSummary) utf16Range=\(rangeDescription) scalars=[\(scalarsDescription)]")
         } else {
             let highlightDescription = "[\(selection.highlightRange.location)..<\(NSMaxRange(selection.highlightRange))]"
-            Self.logEvent("Inspect tap resolved to span range \(highlightDescription) but no character details could be extracted")
+            CustomLogger.shared.debug("Inspect tap resolved to span range \(highlightDescription) but no character details could be extracted")
         }
 
         logSpanResolution(for: resolvedIndex)
@@ -1340,13 +1343,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
     private func logSpanResolution(for index: Int) {
         guard let span = semanticSpans.spanContainingUTF16Index(index) else {
-            Self.logEvent("Inspect tap span unresolved: no semantic span contains index=\(index)")
+            CustomLogger.shared.debug("Inspect tap span unresolved: no semantic span contains index=\(index)")
             return
         }
         let spanRange = span.range
         let spanSurfaceDescription = span.surface.debugDescription
         let rangeDescription = "[\(spanRange.location)..<\(NSMaxRange(spanRange))]"
-        Self.logEvent("Inspect tap span surface=\(spanSurfaceDescription) range=\(rangeDescription)")
+        CustomLogger.shared.debug("Inspect tap span surface=\(spanSurfaceDescription) range=\(rangeDescription)")
     }
 
 #if DEBUG
@@ -1371,7 +1374,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     private static func installTextViewGuard(original: Selector, swizzled: Selector, name: String) {
         guard let method = class_getInstanceMethod(TokenOverlayTextView.self, original),
               let swizzledMethod = class_getInstanceMethod(TokenOverlayTextView.self, swizzled) else {
-            logEvent("Unable to install TextKit 1 guard for \(name)")
+            CustomLogger.shared.error("Unable to install TextKit 1 guard for \(name)")
             return
         }
         method_exchangeImplementations(method, swizzledMethod)
@@ -1380,7 +1383,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     private static func installGlyphRangeGuard() {
         guard let original = class_getInstanceMethod(NSLayoutManager.self, #selector(NSLayoutManager.glyphRange(for:))),
               let swizzled = class_getInstanceMethod(NSLayoutManager.self, #selector(NSLayoutManager.tk1_guardedGlyphRange(for:))) else {
-            logEvent("Unable to install TextKit 1 guard for glyphRange(for:)")
+            CustomLogger.shared.error("Unable to install TextKit 1 guard for glyphRange(for:)")
             return
         }
         method_exchangeImplementations(original, swizzled)
@@ -1388,7 +1391,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
     static func debugReportTextKit1Access(_ symbol: String) {
         let message = "⚠️ TextKit 1 API accessed: \(symbol). Use TextKit 2 layout primitives instead."
-        logEvent(message)
+        CustomLogger.shared.warn(message)
         if ProcessInfo.processInfo.environment["KYOUKU_STRICT_TEXTKIT2"] == "1" {
             assertionFailure(message)
         }

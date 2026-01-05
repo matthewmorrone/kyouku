@@ -2,13 +2,28 @@ import SwiftUI
 
 struct WordDefinitionsView: View {
     @EnvironmentObject var store: WordsStore
+    @EnvironmentObject var router: AppRouter
+    @EnvironmentObject var notesStore: NotesStore
 
     let surface: String
     let kana: String?
+    let sourceNoteID: UUID?
 
     @State private var entries: [DictionaryEntry] = []
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
+
+    private struct DefinitionGroup: Identifiable, Hashable {
+        let entryID: Int64
+        let gloss: String
+        let isCommon: Bool
+        /// Unique spellings (kanji + kana variants) for this entry.
+        let spellings: [String]
+        /// All kana variants observed for this entry.
+        let kanaVariants: [String]
+
+        var id: Int64 { entryID }
+    }
 
     var body: some View {
         List {
@@ -17,6 +32,28 @@ struct WordDefinitionsView: View {
                     .font(.largeTitle.weight(.semibold))
                     .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if let noteID = sourceNoteID, let note = notesStore.notes.first(where: { $0.id == noteID }) {
+                Section {
+                    HStack(spacing: 10) {
+                        Image(systemName: "book")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text((note.title?.isEmpty == false ? note.title : nil) ?? "Untitled")
+                                .font(.subheadline.weight(.semibold))
+                            Text("From note")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Open") {
+                            router.noteToOpen = note
+                            router.selectedTab = .paste
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
             }
 
             if isLoading {
@@ -39,8 +76,8 @@ struct WordDefinitionsView: View {
                 }
             } else {
                 Section {
-                    ForEach(entries) { entry in
-                        definitionRow(entry)
+                    ForEach(groupedDefinitions) { group in
+                        definitionRow(group)
                     }
                 }
             }
@@ -57,28 +94,101 @@ struct WordDefinitionsView: View {
         return kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    private func definitionRow(_ entry: DictionaryEntry) -> some View {
-        let reading = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
-        let savedSurface = displaySurface(for: entry)
-        let isSaved = isSaved(surface: savedSurface, kana: entry.kana)
+    private var groupedDefinitions: [DefinitionGroup] {
+        // Keep first-seen ordering stable.
+        var order: [Int64] = []
+        var buckets: [Int64: [DictionaryEntry]] = [:]
+        for entry in entries {
+            if buckets[entry.entryID] == nil {
+                order.append(entry.entryID)
+                buckets[entry.entryID] = []
+            }
+            buckets[entry.entryID, default: []].append(entry)
+        }
+
+        let preferred = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return order.compactMap { entryID in
+            guard let groupEntries = buckets[entryID], let first = groupEntries.first else { return nil }
+
+            var spellings: [String] = []
+            var seenSpellings: Set<String> = []
+            var kanaVariants: [String] = []
+            var seenKana: Set<String> = []
+
+            func addSpelling(_ s: String) {
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.isEmpty == false else { return }
+                if seenSpellings.insert(trimmed).inserted {
+                    spellings.append(trimmed)
+                }
+            }
+            func addKana(_ s: String) {
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.isEmpty == false else { return }
+                if seenKana.insert(trimmed).inserted {
+                    kanaVariants.append(trimmed)
+                }
+            }
+
+            // Prefer showing the currently-viewed spelling first, if present.
+            if preferred.isEmpty == false {
+                addSpelling(preferred)
+            }
+
+            for e in groupEntries {
+                addSpelling(e.kanji)
+                if let k = e.kana { addSpelling(k) }
+                if let k = e.kana { addKana(k) }
+            }
+
+            return DefinitionGroup(
+                entryID: entryID,
+                gloss: first.gloss,
+                isCommon: first.isCommon,
+                spellings: spellings,
+                kanaVariants: kanaVariants
+            )
+        }
+    }
+
+    private func definitionRow(_ group: DefinitionGroup) -> some View {
+        let preferredSurface = titleText
+        let primarySurface = (group.spellings.first ?? preferredSurface).trimmingCharacters(in: .whitespacesAndNewlines)
+        let reading = preferredReading(from: group.kanaVariants)
+        let isSaved = isSaved(surface: primarySurface, kana: reading)
+        let otherSpellings = group.spellings
+            .filter { $0 != primarySurface }
+            .filter { $0.isEmpty == false }
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(reading.isEmpty ? "(no reading)" : reading)
-                        .font(.headline)
+                    if let reading, reading.isEmpty == false {
+                        Text(reading)
+                            .font(.headline)
 
-                    if savedSurface != titleText, savedSurface.isEmpty == false {
-                        Text(savedSurface)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                        if primarySurface != reading, primarySurface.isEmpty == false {
+                            Text(primarySurface)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("(no reading)")
+                            .font(.headline)
+
+                        if primarySurface.isEmpty == false {
+                            Text(primarySurface)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
                 Spacer(minLength: 0)
 
                 Button {
-                    toggleSaved(surface: savedSurface, kana: entry.kana, meaning: firstGloss(for: entry))
+                    toggleSaved(surface: primarySurface, kana: reading, meaning: firstGloss(for: group.gloss))
                 } label: {
                     Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
                         .font(.headline)
@@ -89,8 +199,31 @@ struct WordDefinitionsView: View {
                 .accessibilityLabel(isSaved ? "Saved" : "Save")
             }
 
-            if entry.gloss.isEmpty == false {
-                Text(entry.gloss)
+            if otherSpellings.isEmpty == false {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("Other spellings")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    ForEach(Array(otherSpellings.enumerated()), id: \.element) { idx, spelling in
+                        if idx > 0 {
+                            Text("·")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        NavigationLink {
+                            WordDefinitionsView(surface: spelling, kana: nil, sourceNoteID: sourceNoteID)
+                        } label: {
+                            Text(spelling)
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if group.gloss.isEmpty == false {
+                Text(group.gloss)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -136,18 +269,24 @@ struct WordDefinitionsView: View {
         }
     }
 
-    private func displaySurface(for entry: DictionaryEntry) -> String {
-        if entry.kanji.isEmpty {
-            if let kana = entry.kana, kana.isEmpty == false {
-                return kana
-            }
-            return surface
+    private func preferredReading(from kanaVariants: [String]) -> String? {
+        let cleaned = kanaVariants
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+        guard cleaned.isEmpty == false else { return nil }
+
+        func isAllHiragana(_ text: String) -> Bool {
+            guard text.isEmpty == false else { return false }
+            return text.unicodeScalars.allSatisfy { (0x3040...0x309F).contains($0.value) }
         }
-        return entry.kanji
+
+        // Prefer a hiragana reading when available; otherwise fall back to the shortest.
+        if let hira = cleaned.first(where: isAllHiragana) { return hira }
+        return cleaned.min(by: { $0.count < $1.count })
     }
 
-    private func firstGloss(for entry: DictionaryEntry) -> String {
-        entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
+    private func firstGloss(for gloss: String) -> String {
+        gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? gloss
     }
 
     private func isSaved(surface: String, kana: String?) -> Bool {
@@ -178,3 +317,4 @@ struct WordDefinitionsView: View {
         }
     }
 }
+

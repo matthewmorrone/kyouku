@@ -645,6 +645,17 @@ private struct LookupResultsView: View {
                 if showSurfaceReading {
                     Text("(\(surfaceReading))")
                         .font(.subheadline)
+
+                    if onApplyCustomReading != nil {
+                        inlineIconButton(
+                            systemImage: isActiveCustomReading ? "pencil.circle.fill" : "pencil.circle",
+                            tint: isActiveCustomReading ? .accentColor : .secondary,
+                            accessibilityLabel: isActiveCustomReading ? "Active custom reading" : "Apply custom reading"
+                        ) {
+                            customReadingText = ""
+                            isCustomReadingPromptPresented = true
+                        }
+                    }
                 }
             }
 
@@ -689,17 +700,6 @@ private struct LookupResultsView: View {
                     .disabled(canUseReading(entry) == false)
                 }
 
-                if onApplyCustomReading != nil {
-                    iconActionButton(
-                        systemImage: isActiveCustomReading ? "pencil.circle.fill" : "pencil.circle",
-                        tint: isActiveCustomReading ? .accentColor : .secondary,
-                        accessibilityLabel: isActiveCustomReading ? "Active custom reading" : "Apply custom reading"
-                    ) {
-                        customReadingText = ""
-                        isCustomReadingPromptPresented = true
-                    }
-                }
-
                 iconActionButton(
                     systemImage: isSaved ? "bookmark.fill" : "bookmark",
                     tint: isSaved ? .accentColor : .secondary,
@@ -734,6 +734,18 @@ private struct LookupResultsView: View {
         }
         .buttonStyle(.bordered)
         .tint(tint)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private func inlineIconButton(systemImage: String, tint: Color, accessibilityLabel: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.subheadline)
+                .frame(width: 18, height: 18)
+                .padding(.leading, 2)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(tint)
         .accessibilityLabel(accessibilityLabel)
     }
 

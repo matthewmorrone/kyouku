@@ -1,9 +1,38 @@
 import Foundation
 import CoreFoundation
+import QuartzCore
 import Mecab_Swift
 import IPADic
 import OSLog
+
 internal import StringTools
+
+// INVESTIGATION: timing/logging helpers (2026-01-05)
+// NOTE: Investigation-only instrumentation. Do not change control flow beyond adding logs.
+@preconcurrency @MainActor @inline(__always)
+func ivlog(_ msg: String) {
+    print("[INVESTIGATION] \(msg) main=\(Thread.isMainThread)")
+}
+
+@preconcurrency @MainActor @inline(__always)
+func ivtime<T>(_ label: String, _ f: () throws -> T) rethrows -> T {
+    let t0 = CACurrentMediaTime()
+    defer {
+        let ms = (CACurrentMediaTime() - t0) * 1000
+        ivlog("\(label) dt=\(String(format: "%.2f", ms))ms")
+    }
+    return try f()
+}
+
+@preconcurrency @MainActor @inline(__always)
+func ivtimeAsync<T>(_ label: String, _ f: () async throws -> T) async rethrows -> T {
+    let t0 = CACurrentMediaTime()
+    defer {
+        let ms = (CACurrentMediaTime() - t0) * 1000
+        ivlog("\(label) dt=\(String(format: "%.2f", ms))ms")
+    }
+    return try await f()
+}
 
 /// Stage 2 of the furigana pipeline. Consumes `TextSpan` boundaries, runs
 /// MeCab/IPADic exactly once per input text, and attaches kana readings. No
@@ -18,18 +47,7 @@ struct SpanReadingAttacher {
     }()
 
     private static let cache = ReadingAttachmentCache(maxEntries: 32)
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SpanReadingAttacher")
     private static let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SpanReadingAttacher")
-
-    private static func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
-        logger.info("[\(file):\(line)] \(function): \(message)")
-    }
-
-    private static func debug(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
-        logger.debug("[\(file):\(line)] \(function): \(message)")
-    }
 
     struct Result {
         let annotatedSpans: [AnnotatedSpan]
@@ -46,18 +64,29 @@ struct SpanReadingAttacher {
     /// This intentionally lives downstream of Stage 1 because Stage 1 is frozen
     /// and lexicon-only. Semantic regrouping is driven by MeCab token coverage and
     /// is used for ruby projection only; it never mutates the original spans.
+    ///
+    /// INVESTIGATION NOTES (2026-01-04)
+    /// - Execution path: FuriganaPipelineService.render → FuriganaAttributedTextBuilder.computeStage2 → Stage-1 segmentation
+    ///   → SpanReadingAttacher.attachReadings (Stage-2) → semanticRegrouping (Stage-2.5) → FuriganaAttributedTextBuilder.project.
+    /// - New work vs prior "stable" (commit 17a31955…): Stage-2.5 semantic regrouping now runs for every Stage-2 pass.
+    /// - Performance-sensitive additions:
+    ///   - Materializing and printing semantic spans via `SemanticSpan.describe(spans:)` can be O(n) in span count and alloc-heavy.
+    ///   - Stage-2.5 contains nested scans that can degrade worse than O(n) depending on token/run structure (see below).
+    /// - No explicit numeric "scoring" found here; instead there are head/dependent heuristics (POS + boundary rules) that function
+    ///   like a classifier to decide grouping.
     func attachReadings(
         text: String,
         spans: [TextSpan],
         treatSpanBoundariesAsAuthoritative: Bool
     ) async -> Result {
+        ivlog("Stage2.attachReadings enter len=\(text.count) spans=\(spans.count) authoritative=\(treatSpanBoundariesAsAuthoritative)")
         guard text.isEmpty == false, spans.isEmpty == false else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
             let semantic = spans.enumerated().map { idx, span in
                 SemanticSpan(range: span.range, surface: span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: nil)
             }
-            print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
-            print(SemanticSpan.describe(spans: semantic))
+            CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
+            CustomLogger.shared.print(SemanticSpan.describe(spans: semantic))
             return Result(annotatedSpans: passthrough, semanticSpans: semantic)
         }
 
@@ -71,22 +100,24 @@ struct SpanReadingAttacher {
         )
         if let cached = await Self.cache.value(for: key) {
             let duration = Self.elapsedMilliseconds(since: start)
-            Self.debug("[SpanReadingAttacher] Cache hit for \(spans.count) spans in \(duration) ms.")
+            CustomLogger.shared.debug("[SpanReadingAttacher] Cache hit for \(spans.count) spans in \(duration) ms.")
             Self.signposter.endInterval("AttachReadings Overall", overallInterval)
-            print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
-            print(SemanticSpan.describe(spans: cached.semanticSpans))
+            CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
+            CustomLogger.shared.print(SemanticSpan.describe(spans: cached.semanticSpans))
             return cached
         }
 
         let tokStart = CFAbsoluteTimeGetCurrent()
         let tokInterval = Self.signposter.beginInterval("Tokenizer Acquire")
-        let tokenizerOpt = Self.tokenizer()
+        let tokenizerOpt: Tokenizer? = ivtime("Stage2.tokenizerAcquire") {
+            Self.tokenizer()
+        }
         Self.signposter.endInterval("Tokenizer Acquire", tokInterval)
         let tokMs = (CFAbsoluteTimeGetCurrent() - tokStart) * 1000
         if tokenizerOpt == nil {
-            Self.logger.error("[SpanReadingAttacher] Tokenizer acquisition failed in \(String(format: "%.3f", tokMs)) ms")
+            // CustomLogger.shared.error("[SpanReadingAttacher] Tokenizer acquisition failed in \(String(format: \"%.3f\", tokMs)) ms")
         } else {
-            Self.info("[SpanReadingAttacher] Tokenizer acquired in \(String(format: "%.3f", tokMs)) ms")
+            CustomLogger.shared.info("[SpanReadingAttacher] Tokenizer acquired in \(String(format: "%.3f", tokMs)) ms")
         }
         guard let tokenizer = tokenizerOpt else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
@@ -95,25 +126,27 @@ struct SpanReadingAttacher {
             }
             let result = Result(annotatedSpans: passthrough, semanticSpans: semantic)
             await Self.cache.store(result, for: key)
-//            Self.info("[SpanReadingAttacher] Failed to acquire tokenizer. Returning passthrough spans in (duration) ms.")
+            CustomLogger.shared.info("[SpanReadingAttacher] Failed to acquire tokenizer. Returning passthrough spans in (duration) ms.")
             Self.signposter.endInterval("AttachReadings Overall", overallInterval)
-            print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
-            print(SemanticSpan.describe(spans: result.semanticSpans))
+            CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
+            CustomLogger.shared.print(SemanticSpan.describe(spans: result.semanticSpans))
             return result
         }
 
         let tokenizeStart = CFAbsoluteTimeGetCurrent()
         let tokenizeInterval = Self.signposter.beginInterval("MeCab Tokenize", "len=\(text.count)")
-        let annotations = tokenizer.tokenize(text: text).compactMap { annotation -> MeCabAnnotation? in
-            let nsRange = NSRange(annotation.range, in: text)
-            guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
-            let surface = String(text[annotation.range])
-            let pos = String(describing: annotation.partOfSpeech)
-            return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm, partOfSpeech: pos)
+        let annotations: [MeCabAnnotation] = ivtime("Stage2.mecabTokenize") {
+            tokenizer.tokenize(text: text).compactMap { annotation -> MeCabAnnotation? in
+                let nsRange = NSRange(annotation.range, in: text)
+                guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
+                let surface = String(text[annotation.range])
+                let pos = String(describing: annotation.partOfSpeech)
+                return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm, partOfSpeech: pos)
+            }
         }
         Self.signposter.endInterval("MeCab Tokenize", tokenizeInterval)
         let tokenizeMs = (CFAbsoluteTimeGetCurrent() - tokenizeStart) * 1000
-        Self.info("[SpanReadingAttacher] MeCab tokenization produced \(annotations.count) annotations in \(String(format: "%.3f", tokenizeMs)) ms")
+        CustomLogger.shared.info("[SpanReadingAttacher] MeCab tokenization produced \(annotations.count) annotations in \(String(format: "%.3f", tokenizeMs)) ms")
 
         var annotated: [AnnotatedSpan] = []
         annotated.reserveCapacity(spans.count)
@@ -125,26 +158,33 @@ struct SpanReadingAttacher {
             annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas, partOfSpeech: attachment.partOfSpeech))
         }
 
-        let semantic: [SemanticSpan] = await Task.detached(priority: .userInitiated) { [self] in
-            await self.semanticRegrouping(
-                text: text,
-                nsText: text as NSString,
-                spans: spans,
-                annotatedSpans: annotated,
-                annotations: annotations,
-                treatSpanBoundariesAsAuthoritative: treatSpanBoundariesAsAuthoritative
-            )
-        }.value
+        let semantic: [SemanticSpan] = await ivtimeAsync("Stage2.5.detachedWait") {
+            await Task.detached(priority: .userInitiated) { [self] in
+                await ivlog("Stage2.5.detached start")
+                let out = await ivtimeAsync("Stage2.5.semanticRegrouping") {
+                    await self.semanticRegrouping(
+                        text: text,
+                        nsText: text as NSString,
+                        spans: spans,
+                        annotatedSpans: annotated,
+                        annotations: annotations,
+                        treatSpanBoundariesAsAuthoritative: treatSpanBoundariesAsAuthoritative
+                    )
+                }
+                await ivlog("Stage2.5.detached end out=\(out.count)")
+                return out
+            }.value
+        }
 
-        print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
-        print(SemanticSpan.describe(spans: semantic))
-        print("Stage2: stage1Count=\(spans.count) stage2Count=\(semantic.count)")
+        CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
+        CustomLogger.shared.print(SemanticSpan.describe(spans: semantic))
+        CustomLogger.shared.debug("Stage2: stage1Count=\(spans.count) stage2Count=\(semantic.count)")
 
         let result = Result(annotatedSpans: annotated, semanticSpans: semantic)
         await Self.cache.store(result, for: key)
 
-        let duration = Self.elapsedMilliseconds(since: start)
-        Self.info("[SpanReadingAttacher] Attached readings for \(spans.count) spans in \(String(format: "%.3f", duration)) ms.")
+        _ = Self.elapsedMilliseconds(since: start)
+        // CustomLogger.shared.info("[SpanReadingAttacher] Attached readings for \(spans.count) spans in \(String(format: \"%.3f\", duration)) ms.")
         Self.signposter.endInterval("AttachReadings Overall", overallInterval)
         return result
     }
@@ -157,71 +197,28 @@ struct SpanReadingAttacher {
         annotations: [MeCabAnnotation],
         treatSpanBoundariesAsAuthoritative: Bool
     ) async -> [SemanticSpan] {
-        let disableSemanticRegroupingPassthrough = false
-
-        let maxIterations = 10_000
-        let progressEvery = 200
+        // INVESTIGATION/ROLLBACK (2026-01-05)
+        // Merge-only, multi-pass boundary repair.
+        // Hard rules:
+        //  1) May merge spans, but must never split an existing Stage-1 span.
+        //  2) Span count must be monotonically non-increasing across passes.
+        //  3) No head/dependent logic, no syntactic parsing, no POS ownership.
+        // Merge criteria (only):
+        //  • A MeCab token whose surface range exactly covers multiple adjacent Stage-1 spans → merge them.
+        //  • Explicit small whitelist merges (e.g. verb stem + auxiliaries like てる, ていく, てくる).
+        // Safety:
+        //  • Never cross hard boundaries (punctuation / whitespace). We enforce contiguity and reject hard-boundary spans.
 
         func passthroughSemanticSpans(reason: String?) -> [SemanticSpan] {
             if let reason {
-                print("[STAGE-2] bailout: \(reason)")
+                CustomLogger.shared.debug("[STAGE-2] bailout: \(reason)")
             }
             return annotatedSpans.enumerated().map { idx, span in
                 SemanticSpan(range: span.span.range, surface: span.span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: span.readingKana)
             }
         }
 
-        @inline(__always)
-        func step(
-            _ counter: inout Int,
-            loop: String,
-            cursor: Int? = nil,
-            tokenRange: NSRange? = nil,
-            tokenSurface: String? = nil,
-            boundaryRange: NSRange? = nil,
-            producedRange: NSRange? = nil,
-            producedSurface: String? = nil,
-            outputCount: Int? = nil
-        ) -> Bool {
-            counter += 1
-            if counter % progressEvery == 0 {
-                let c = cursor.map(String.init) ?? "n/a"
-                let out = outputCount.map(String.init) ?? "n/a"
-                print("[STAGE-2] progress loop=\(loop) iter=\(counter) cursor=\(c) out=\(out)")
-            }
-            if counter >= maxIterations {
-                let c = cursor.map(String.init) ?? "n/a"
-                let tr: String = {
-                    guard let tokenRange, tokenRange.location != NSNotFound else { return "n/a" }
-                    return "\(tokenRange.location)-\(NSMaxRange(tokenRange))"
-                }()
-                let ts = tokenSurface ?? "n/a"
-                let br: String = {
-                    guard let boundaryRange, boundaryRange.location != NSNotFound else { return "n/a" }
-                    return "\(boundaryRange.location)-\(NSMaxRange(boundaryRange))"
-                }()
-                let pr: String = {
-                    guard let producedRange, producedRange.location != NSNotFound else { return "n/a" }
-                    return "\(producedRange.location)-\(NSMaxRange(producedRange))"
-                }()
-                let ps = producedSurface ?? "n/a"
-                let out = outputCount.map(String.init) ?? "n/a"
-                print("[STAGE-2] iteration-cap hit loop=\(loop) iter=\(counter) cursor=\(c) tokenRange=\(tr) token=\(ts) boundary=\(br) produced=\(pr) producedSurface=\(ps) out=\(out)")
-                return false
-            }
-            return true
-        }
-
-        print("[STAGE-2] start (main=\(Thread.isMainThread)) spans=\(spans.count)")
-        if Thread.isMainThread {
-            print("[STAGE-2] WARNING entered on main thread")
-        }
-
-        if disableSemanticRegroupingPassthrough {
-            let semantic = passthroughSemanticSpans(reason: "disableSemanticRegroupingPassthrough")
-            print("[STAGE-2] end (main=\(Thread.isMainThread)) spansIn=\(spans.count) spansOut=\(semantic.count)")
-            return semantic
-        }
+        ivlog("Stage2.5.mergeOnly start spans=\(spans.count)")
 
         // User-amended spans are authoritative: do not regroup across their boundaries.
         guard treatSpanBoundariesAsAuthoritative == false else {
@@ -238,17 +235,12 @@ struct SpanReadingAttacher {
             assert(expectedCursor == nsText.length, "Stage2 invariant failed: authoritative semantic ranges do not cover full text")
 #endif
 
-            print("[STAGE-2] end (main=\(Thread.isMainThread)) spansIn=\(spans.count) spansOut=\(semantic.count)")
+            CustomLogger.shared.debug("[STAGE-2] end spansIn=\(spans.count) spansOut=\(semantic.count)")
             return semantic
         }
 
-        // Stage-2 semantic regrouping: deterministic, Stage-1-driven.
-        // HEAD-FIRST CONTRACT:
-        // - Single left-to-right pass.
-        // - Spans start on HEAD tokens (or hard particle boundary tokens).
-        // - Dependents only attach to an already-started head span on their left.
-        // - Particles の/が/を/に/は are hard boundaries (standalone spans).
-        // - Compound verb heads absorb preceding verb heads (e.g. 出 + 逢 + って => 出逢って).
+        // Lexicon membership (JMdict trie). Used only for merge validation; never mutates Stage-1.
+        let trie: LexiconTrie? = try? await LexiconProvider.shared.trie()
 
         struct Segment {
             var range: NSRange
@@ -261,43 +253,6 @@ struct SpanReadingAttacher {
             return nsText.substring(with: segment.range)
         }
 
-        func merge(_ segments: inout [Segment], from start: Int, to endExclusive: Int) -> Bool {
-            guard start >= 0, endExclusive <= segments.count, endExclusive - start >= 2 else { return false }
-
-            // Never cross hard boundaries: only merge if spans are strictly contiguous in UTF-16.
-            var cursor = NSMaxRange(segments[start].range)
-            for k in (start + 1)..<endExclusive {
-                if segments[k].range.location != cursor {
-                    return false
-                }
-                cursor = NSMaxRange(segments[k].range)
-            }
-
-            let union = NSUnionRange(segments[start].range, segments[endExclusive - 1].range)
-            let lower = segments[start].sourceSpanIndices.lowerBound
-            let upper = segments[(endExclusive - 1)].sourceSpanIndices.upperBound
-            segments[start] = Segment(range: union, sourceSpanIndices: lower..<upper)
-            segments.removeSubrange((start + 1)..<endExclusive)
-            return true
-        }
-
-        func splitLastComposedCharacterOff(_ segment: Segment) -> (prefix: Segment, last: Segment)? {
-            let r = segment.range
-            guard r.location != NSNotFound, r.length >= 2 else { return nil }
-            guard NSMaxRange(r) <= nsText.length else { return nil }
-            let lastIndex = max(0, NSMaxRange(r) - 1)
-            let lastCharRange = nsText.rangeOfComposedCharacterSequence(at: lastIndex)
-            guard NSMaxRange(lastCharRange) == NSMaxRange(r) else { return nil }
-            let prefixLen = lastCharRange.location - r.location
-            guard prefixLen > 0 else { return nil }
-            let prefixRange = NSRange(location: r.location, length: prefixLen)
-            let lastRange = lastCharRange
-            return (
-                prefix: Segment(range: prefixRange, sourceSpanIndices: segment.sourceSpanIndices),
-                last: Segment(range: lastRange, sourceSpanIndices: segment.sourceSpanIndices)
-            )
-        }
-
         func isKanaOnly(_ s: String) -> Bool {
             guard s.isEmpty == false else { return false }
             for scalar in s.unicodeScalars {
@@ -308,311 +263,230 @@ struct SpanReadingAttacher {
             return true
         }
 
-        func isSingleKanji(_ s: String) -> Bool {
-            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.isEmpty == false else { return false }
-            let ns = trimmed as NSString
-            guard ns.length == 1 else { return false }
-            return containsKanji(trimmed)
-        }
-
-        func endsWithKana(_ s: String) -> Bool {
+        func isHiraganaOnly(_ s: String) -> Bool {
             guard s.isEmpty == false else { return false }
-            guard let last = s.unicodeScalars.last else { return false }
-            return CharacterSet.hiragana.contains(last) || CharacterSet.katakana.contains(last)
-        }
-
-        func endsWithSmallTsu(_ s: String) -> Bool {
-            s.hasSuffix("っ") || s.hasSuffix("ッ")
-        }
-
-        func startsWithSmallTsu(_ s: String) -> Bool {
-            s.hasPrefix("っ") || s.hasPrefix("ッ")
-        }
-
-        func isHardParticleBoundary(_ ann: MeCabAnnotation) -> Bool {
-            // Hard boundary particles must always be their own semantic span.
-            // Use MeCab POS as primary signal; surface as guard.
-            if ann.surface == "の" || ann.surface == "が" || ann.surface == "を" || ann.surface == "に" || ann.surface == "は" {
-                return true
-            }
-            return false
-        }
-
-        func isVerbHead(_ ann: MeCabAnnotation) -> Bool {
-            // Treat "動詞" tokens as heads, but exclude auxiliary verbs.
-            if ann.partOfSpeech.contains("助動詞") { return false }
-            return ann.partOfSpeech.contains("動詞")
-        }
-
-        func isHeadEligible(_ ann: MeCabAnnotation) -> Bool {
-            // Heads must start spans. Keep this intentionally conservative.
-            if isHardParticleBoundary(ann) { return false }
-            if ann.partOfSpeech.contains("記号") { return false }
-            if ann.partOfSpeech.contains("助詞") { return false }
-            if ann.partOfSpeech.contains("助動詞") { return false }
-            if ann.partOfSpeech.contains("接尾") { return false }
-
-            if ann.partOfSpeech.contains("名詞") { return true }
-            if ann.partOfSpeech.contains("動詞") { return true }
-            if ann.partOfSpeech.contains("形容詞") { return true }
-            if ann.partOfSpeech.contains("形容動詞") { return true }
-
-            // Adverbs are only head-eligible when the surface is > 1 char.
-            if ann.partOfSpeech.contains("副詞") {
-                return (ann.surface as NSString).length > 1
-            }
-            return false
-        }
-
-        func isDependentOnly(_ ann: MeCabAnnotation) -> Bool {
-            // Never heads.
-            if ann.partOfSpeech.contains("記号") { return true }
-            if ann.partOfSpeech.contains("助詞") { return true }
-            if ann.partOfSpeech.contains("助動詞") { return true }
-            if ann.partOfSpeech.contains("接尾") { return true }
-            // Defensive: if token surface is boundary-only, treat as dependent-only.
-            if Self.isHardBoundaryOnly(ann.surface) { return true }
-            return false
-        }
-
-        func appendFallbackSegments(in range: NSRange) {
-            let fallback = Self.semanticFallbackSpans(in: range, nsText: nsText, spans: spans, annotatedSpans: annotatedSpans)
-            for s in fallback {
-                guard s.range.location != NSNotFound, s.range.length > 0 else { continue }
-                segments.append(Segment(range: s.range, sourceSpanIndices: s.sourceSpanIndices))
-            }
-        }
-
-        // Single-pass head-first scan over non-boundary runs.
-        var segments: [Segment] = []
-        segments.reserveCapacity(max(spans.count, annotations.count))
-
-        let hardBoundaries = Self.hardBoundaryRanges(in: nsText)
-        let runs = Self.nonBoundaryRuns(in: nsText, hardBoundaries: hardBoundaries)
-
-        let sortedTokens: [MeCabAnnotation] = annotations
-            .map { ann in
-                let r = Self.clamp(ann.range, toLength: nsText.length)
-                return MeCabAnnotation(range: r, reading: ann.reading, surface: ann.surface, dictionaryForm: ann.dictionaryForm, partOfSpeech: ann.partOfSpeech)
-            }
-            .filter { $0.range.location != NSNotFound && $0.range.length > 0 }
-            .sorted { $0.range.location < $1.range.location }
-
-        var iter = 0
-        for run in runs {
-            guard run.location != NSNotFound, run.length > 0 else { continue }
-            guard NSMaxRange(run) <= nsText.length else { continue }
-
-            // Tokens fully contained in this run.
-            let runStart = run.location
-            let runEnd = NSMaxRange(run)
-            let tokensInRun = sortedTokens.filter { t in
-                t.range.location >= runStart && NSMaxRange(t.range) <= runEnd
-            }
-
-            // If MeCab didn't cover this run, fall back to Stage-1-derived spans for coverage.
-            if tokensInRun.isEmpty {
-                appendFallbackSegments(in: run)
-                continue
-            }
-
-            var currentStart: Int? = nil
-            var currentEnd: Int = 0
-            var currentIsVerbChain = false
-
-            func flushCurrentIfAny() {
-                guard let start = currentStart else { return }
-                let r = NSRange(location: start, length: max(0, currentEnd - start))
-                if r.length == 0 {
-                    print("[STAGE-2] zero-length span skipped loop=head-first range=\(r.location)-\(NSMaxRange(r))")
-                } else {
-                    let src = Self.sourceSpanIndexRange(intersecting: r, spans: spans)
-                    segments.append(Segment(range: r, sourceSpanIndices: src))
+            for scalar in s.unicodeScalars {
+                if CharacterSet.hiragana.contains(scalar) == false {
+                    return false
                 }
-                currentStart = nil
-                currentEnd = 0
-                currentIsVerbChain = false
             }
+            return true
+        }
 
-            var cursor = runStart
-            for token in tokensInRun {
-                if step(&iter, loop: "head-first", cursor: cursor, tokenRange: token.range, tokenSurface: token.surface, boundaryRange: nil, producedRange: nil, producedSurface: nil, outputCount: segments.count) == false {
-                    // Do not bail to Stage-1 here; just stop regrouping and fall back for the remaining uncovered run.
-                    print("[STAGE-2] head-first iteration cap reached; covering remainder with fallback")
-                    flushCurrentIfAny()
-                    if cursor < runEnd {
-                        appendFallbackSegments(in: NSRange(location: cursor, length: runEnd - cursor))
-                    }
-                    cursor = runEnd
-                    break
-                }
-
-                let tr = token.range
-                if tr.location < runStart || NSMaxRange(tr) > runEnd {
-                    // Should not happen due to filtering, but be defensive.
+        func isHardBoundarySurface(_ s: String) -> Bool {
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return true }
+            // Treat punctuation/symbol-only spans as hard boundaries.
+            var allBoundary = true
+            for scalar in trimmed.unicodeScalars {
+                if CharacterSet.whitespacesAndNewlines.contains(scalar) {
                     continue
                 }
-
-                // Fill any uncovered gap (should be rare in a non-boundary run).
-                if tr.location > cursor {
-                    flushCurrentIfAny()
-                    let gap = NSRange(location: cursor, length: tr.location - cursor)
-                    appendFallbackSegments(in: gap)
-                    cursor = tr.location
-                }
-
-                // Skip any token that is boundary-only (should not occur in a run).
-                if Self.isHardBoundaryOnly(token.surface) {
-                    cursor = max(cursor, NSMaxRange(tr))
+                if CharacterSet.punctuationCharacters.contains(scalar) || CharacterSet.symbols.contains(scalar) {
                     continue
                 }
+                allBoundary = false
+                break
+            }
+            return allBoundary
+        }
 
-                if isHardParticleBoundary(token) {
-                    // Hard particles are standalone.
-                    flushCurrentIfAny()
-                    if tr.length == 0 {
-                        print("[STAGE-2] zero-length hard particle skipped range=\(tr.location)-\(NSMaxRange(tr))")
-                    } else {
-                        let src = Self.sourceSpanIndexRange(intersecting: tr, spans: spans)
-                        segments.append(Segment(range: tr, sourceSpanIndices: src))
-                    }
-                    cursor = max(cursor, NSMaxRange(tr))
-                    continue
+        func merge(_ segments: inout [Segment], from start: Int, to endExclusive: Int) -> Bool {
+            guard start >= 0, endExclusive <= segments.count, endExclusive - start >= 2 else { return false }
+
+            // Never cross hard boundaries: only merge if spans are strictly contiguous in UTF-16.
+            var cursor = segments[start].range.location
+            let end = NSMaxRange(segments[endExclusive - 1].range)
+            var k = start
+            while k < endExclusive {
+                if segments[k].range.location != cursor { return false }
+                let s = surface(of: segments[k])
+                if isHardBoundarySurface(s) { return false }
+                cursor = NSMaxRange(segments[k].range)
+                k += 1
+            }
+            guard cursor == end else { return false }
+
+            let union = NSUnionRange(segments[start].range, segments[endExclusive - 1].range)
+            let lower = segments[start].sourceSpanIndices.lowerBound
+            let upper = segments[(endExclusive - 1)].sourceSpanIndices.upperBound
+            segments[start] = Segment(range: union, sourceSpanIndices: lower..<upper)
+            segments.removeSubrange((start + 1)..<endExclusive)
+            return true
+        }
+
+        func tokenEndExclusiveCoveringSegments(tokenRange: NSRange, segments: [Segment], startIndex: Int) -> Int? {
+            guard tokenRange.location != NSNotFound, tokenRange.length > 0 else { return nil }
+            guard startIndex >= 0, startIndex < segments.count else { return nil }
+            guard segments[startIndex].range.location == tokenRange.location else { return nil }
+            let tokenEnd = NSMaxRange(tokenRange)
+
+            var cursor = tokenRange.location
+            var j = startIndex
+            while j < segments.count, cursor < tokenEnd {
+                let r = segments[j].range
+                guard r.location == cursor else { return nil }
+                let s = surface(of: segments[j])
+                if isHardBoundarySurface(s) { return nil }
+                cursor = NSMaxRange(r)
+                if cursor > tokenEnd { return nil }
+                j += 1
+            }
+            guard cursor == tokenEnd else { return nil }
+            guard j - startIndex >= 2 else { return nil }
+            return j
+        }
+
+        func readingForSegment(_ segment: Segment) -> String? {
+            // Prefer an exact MeCab token reading for this range when available.
+            if let token = annotations.first(where: { $0.range.location == segment.range.location && $0.range.length == segment.range.length }) {
+                let r = token.reading.trimmingCharacters(in: .whitespacesAndNewlines)
+                if r.isEmpty == false { return r }
+            }
+
+            // Fallback: concatenate underlying span readings, including kana-only surfaces.
+            var out = ""
+            for idx in segment.sourceSpanIndices {
+                guard annotatedSpans.indices.contains(idx) else { continue }
+                let a = annotatedSpans[idx]
+                if let r = a.readingKana, r.isEmpty == false {
+                    out.append(r)
+                } else if isKanaOnly(a.span.surface) {
+                    out.append(a.span.surface)
                 }
+            }
+            return out.isEmpty ? nil : out
+        }
 
-                let headEligible = isHeadEligible(token)
-                let dependentOnly = isDependentOnly(token)
+        // Pre-index tokens by start to keep the per-pass scan O(n) in spans.
+        var tokensByStart: [Int: [MeCabAnnotation]] = [:]
+        tokensByStart.reserveCapacity(min(64, annotations.count))
+        for token in annotations {
+            guard token.range.location != NSNotFound, token.range.length > 0 else { continue }
+            tokensByStart[token.range.location, default: []].append(token)
+        }
+        for (k, list) in tokensByStart {
+            tokensByStart[k] = list.sorted { lhs, rhs in
+                if lhs.range.length != rhs.range.length { return lhs.range.length > rhs.range.length }
+                return lhs.surface.count > rhs.surface.count
+            }
+        }
 
-                // 1) If there is no current head and the token is head-eligible, start a head immediately.
-                if currentStart == nil, headEligible {
-                    currentStart = tr.location
-                    currentEnd = NSMaxRange(tr)
-                    currentIsVerbChain = isVerbHead(token)
-                    cursor = max(cursor, NSMaxRange(tr))
-                    continue
-                }
+        let whitelistMerges: Set<String> = ["てる", "ていく", "てくる"]
 
-                if headEligible {
-                    // Start a new head span (or extend compound verb chain).
-                    if currentStart == nil {
-                        currentStart = tr.location
-                        currentEnd = NSMaxRange(tr)
-                        currentIsVerbChain = isVerbHead(token)
-                    } else if currentIsVerbChain && isVerbHead(token) && tr.location == currentEnd {
-                        // Compound verb: absorb verb heads into existing verb chain.
-                        currentEnd = NSMaxRange(tr)
-                    } else {
-                        flushCurrentIfAny()
-                        currentStart = tr.location
-                        currentEnd = NSMaxRange(tr)
-                        currentIsVerbChain = isVerbHead(token)
-                    }
-                } else {
-                    // 2) Only attempt dependent attachment after a head exists.
-                    if let _ = currentStart, tr.location == currentEnd {
-                        currentEnd = NSMaxRange(tr)
-                    } else if headEligible == false {
-                        // 3) Only emit standalone fallback when the token is not head-eligible.
-                        // Avoid noisy logs for head-eligible tokens by construction.
-                        if dependentOnly {
-                            flushCurrentIfAny()
-                            if tr.length == 0 {
-                                print("[STAGE-2] zero-length dependent skipped range=\(tr.location)-\(NSMaxRange(tr)) token=\(token.surface) pos=\(token.partOfSpeech)")
-                            } else {
-                                let src = Self.sourceSpanIndexRange(intersecting: tr, spans: spans)
-                                segments.append(Segment(range: tr, sourceSpanIndices: src))
+        var segments: [Segment] = spans.enumerated().map { idx, span in
+            Segment(range: span.range, sourceSpanIndices: idx..<(idx + 1))
+        }
+
+        let maxPasses = 64
+        var pass = 0
+        while pass < maxPasses {
+            pass += 1
+            let beforeCount = segments.count
+            ivlog("Stage2.5.mergeOnly pass=\(pass) spans=\(beforeCount)")
+
+            var didMerge = false
+            var i = 0
+            while i < segments.count {
+                // Rule 1: token coverage merge (exact range cover).
+                if let candidates = tokensByStart[segments[i].range.location], candidates.isEmpty == false {
+                    var mergedThisIndex = false
+                    for token in candidates {
+                        if let endExclusive = tokenEndExclusiveCoveringSegments(tokenRange: token.range, segments: segments, startIndex: i) {
+                            if merge(&segments, from: i, to: endExclusive) {
+                                didMerge = true
+                                mergedThisIndex = true
+                                break
                             }
-                        } else {
-                            // Non-head but also not classified dependent-only; preserve coverage without extra noise.
-                            flushCurrentIfAny()
-                            if tr.length > 0 {
-                                let src = Self.sourceSpanIndexRange(intersecting: tr, spans: spans)
-                                segments.append(Segment(range: tr, sourceSpanIndices: src))
+                        }
+                    }
+                    if mergedThisIndex {
+                        continue
+                    }
+                }
+
+                // Rule 2: Kanji-head + kana-tail continuation merge (adjacent only).
+                // Merge S[i], S[i+1] iff:
+                //  1) left contains at least one Kanji
+                //  2) right is entirely Hiragana
+                //  3) (a) combined surface exists in lexicon trie, OR
+                //     (b) MeCab produced a single lemma/token whose range exactly covers the combined range.
+                if i + 1 < segments.count {
+                    let leftSeg = segments[i]
+                    let rightSeg = segments[i + 1]
+                    let contiguous = NSMaxRange(leftSeg.range) == rightSeg.range.location
+                    if contiguous {
+                        let left = surface(of: leftSeg)
+                        let right = surface(of: rightSeg)
+                        if isHardBoundarySurface(left) == false,
+                           isHardBoundarySurface(right) == false,
+                           containsKanji(left),
+                           isHiraganaOnly(right) {
+                            let combinedRange = NSRange(location: leftSeg.range.location, length: leftSeg.range.length + rightSeg.range.length)
+                            let combinedSurface = left + right
+
+                            var ok = false
+                            if let trie {
+                                ok = trie.containsWord(in: nsText, from: combinedRange.location, through: NSMaxRange(combinedRange), requireKanji: true)
+                            }
+                            if ok == false {
+                                if let candidates = tokensByStart[combinedRange.location] {
+                                    ok = candidates.contains(where: { token in
+                                        token.range.location == combinedRange.location &&
+                                            token.range.length == combinedRange.length &&
+                                            token.dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                                    })
+                                }
+                            }
+
+                            if ok {
+                                CustomLogger.shared.debug("[STAGE-2.5] merge kanjiKana '\(left)' + '\(right)' -> '\(combinedSurface)'")
+                                if merge(&segments, from: i, to: i + 2) {
+                                    didMerge = true
+                                    continue
+                                }
                             }
                         }
                     }
                 }
 
-                cursor = max(cursor, NSMaxRange(tr))
-            }
-
-            flushCurrentIfAny()
-
-            if cursor < runEnd {
-                appendFallbackSegments(in: NSRange(location: cursor, length: runEnd - cursor))
-            }
-        }
-
-        // Materialize SemanticSpan array with readings chosen via existing override policy.
-        var semantic: [SemanticSpan] = []
-        semantic.reserveCapacity(segments.count)
-        for seg in segments {
-            let s = surface(of: seg)
-            guard s.isEmpty == false else { continue }
-
-            let requiresReading = containsKanji(s)
-            var mecabReading: String?
-            if requiresReading {
-                var builder = ""
-                let end = NSMaxRange(seg.range)
-                for ann in annotations {
-                    if ann.range.location >= end { break }
-                    let intersection = NSIntersectionRange(seg.range, ann.range)
-                    guard intersection.length > 0 else { continue }
-                    // Only accept fully-covered tokens; avoid inventing readings for partial overlaps.
-                    guard intersection.length == ann.range.length else {
-                        builder = ""
-                        break
+                // Rule 3: explicit whitelist merges (adjacent only).
+                if i + 1 < segments.count {
+                    let left = surface(of: segments[i])
+                    let right = surface(of: segments[i + 1])
+                    let contiguous = NSMaxRange(segments[i].range) == segments[i + 1].range.location
+                    if contiguous && isHardBoundarySurface(left) == false && isHardBoundarySurface(right) == false {
+                        if whitelistMerges.contains(right) {
+                            if merge(&segments, from: i, to: i + 2) {
+                                didMerge = true
+                                continue
+                            }
+                        }
                     }
-                    let chunk = ann.reading.isEmpty ? ann.surface : ann.reading
-                    builder.append(chunk)
                 }
-                let normalized = Self.toHiragana(builder)
-                mecabReading = normalized.isEmpty ? nil : normalized
+
+                i += 1
             }
 
-            let dictOverride = await ReadingOverridePolicy.shared.overrideReading(for: s, mecabReading: mecabReading)
-            let finalReading = dictOverride ?? mecabReading
-            if seg.range.length == 0 {
-                print("[STAGE-2] zero-length semantic span skipped range=\(seg.range.location)-\(NSMaxRange(seg.range)) surface=\(s)")
-            } else {
-                semantic.append(SemanticSpan(range: seg.range, surface: s, sourceSpanIndices: seg.sourceSpanIndices, readingKana: finalReading))
-            }
-        }
-
+            let afterCount = segments.count
 #if DEBUG
-        // Semantic spans must be strictly increasing and must not include hard boundaries.
-        var prevEnd = 0
-        for s in semantic {
-            assert(s.range.location >= prevEnd, "Stage2 invariant failed: semantic spans overlap/out-of-order")
-            assert(s.range.length > 0, "Stage2 invariant failed: empty semantic span")
-            assert(NSMaxRange(s.range) <= nsText.length, "Stage2 invariant failed: semantic span out of bounds")
-            let surface = nsText.substring(with: s.range)
-            assert(Self.isHardBoundaryOnly(surface) == false, "Stage2 invariant failed: semantic span includes only hard boundary text")
-            prevEnd = NSMaxRange(s.range)
-        }
-
-        // Gaps between semantic spans may only contain hard-boundary characters.
-        if semantic.isEmpty == false {
-            var cursor = 0
-            for s in semantic {
-                if s.range.location > cursor {
-                    let gap = NSRange(location: cursor, length: s.range.location - cursor)
-                    let gapText = nsText.substring(with: gap)
-                    assert(Self.isHardBoundaryOnly(gapText), "Stage2 invariant failed: uncovered non-boundary gap")
-                }
-                cursor = max(cursor, NSMaxRange(s.range))
-            }
-            if cursor < nsText.length {
-                let gap = NSRange(location: cursor, length: nsText.length - cursor)
-                let gapText = nsText.substring(with: gap)
-                assert(Self.isHardBoundaryOnly(gapText), "Stage2 invariant failed: uncovered non-boundary tail gap")
-            }
-        }
+            assert(afterCount <= beforeCount, "Stage2.5 invariant failed: span count increased \(beforeCount) -> \(afterCount)")
 #endif
+            if didMerge == false {
+                break
+            }
+        }
 
-        print("[STAGE-2] end (main=\(Thread.isMainThread)) spansIn=\(spans.count) spansOut=\(semantic.count)")
+        let semantic: [SemanticSpan] = segments.map { seg in
+            SemanticSpan(
+                range: seg.range,
+                surface: surface(of: seg),
+                sourceSpanIndices: seg.sourceSpanIndices,
+                readingKana: readingForSegment(seg)
+            )
+        }
+
+        ivlog("Stage2.5.mergeOnly end spansIn=\(spans.count) spansOut=\(semantic.count)")
         return semantic
     }
 
@@ -806,7 +680,7 @@ struct SpanReadingAttacher {
             if intersection.length == annotation.range.length {
                 let chunk = annotation.reading.isEmpty ? annotation.surface : annotation.reading
                 builder?.append(chunk)
-//                Self.debug("[SpanReadingAttacher] Matched token surface=\(annotation.surface) reading=\(chunk) for span=\(span.surface).")
+                // Self.debug("[SpanReadingAttacher] Matched token surface=\(annotation.surface) reading=\(chunk) for span=\(span.surface).")
             } else if coveringToken == nil,
                       NSLocationInRange(span.range.location, annotation.range),
                       NSMaxRange(span.range) <= NSMaxRange(annotation.range) {

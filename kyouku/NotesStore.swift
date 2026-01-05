@@ -8,11 +8,9 @@
 import SwiftUI
 import Combine
 import Foundation
-import OSLog
 
 class NotesStore: ObservableObject {
     @Published var notes: [Note] = []
-    private static let logger = DiagnosticsLogging.logger(.notesStore)
 
     private let saveURL: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -79,10 +77,9 @@ class NotesStore: ObservableObject {
             )
             let data = try JSONEncoder().encode(archive)
             try data.write(to: saveURL, options: .atomic)
-            Self.logger.debug("Saved \(self.notes.count) notes and \(archive.overrides.count) overrides")
+            CustomLogger.shared.debug("Saved \(self.notes.count) notes and \(archive.overrides.count) overrides")
         } catch {
-            Self.logger.error("Failed to save notes: \(error.localizedDescription, privacy: .public)")
-            print("Failed to save notes:", error)
+            CustomLogger.shared.error("Failed to save notes: \(error)")
         }
     }
 
@@ -98,16 +95,16 @@ class NotesStore: ObservableObject {
                     overridesStore?.replaceAll(with: archive.overrides)
                     needsUpgrade = true
                 }
-                Self.logger.debug("Loaded archive with \(archive.notes.count) notes and \(archive.overrides.count) overrides")
+                CustomLogger.shared.debug("Loaded archive with \(archive.notes.count) notes and \(archive.overrides.count) overrides")
             } else {
                 let loaded = try decoder.decode([Note].self, from: data)
                 notes = loaded
                 needsUpgrade = true
-                Self.logger.debug("Loaded legacy notes array count=\(loaded.count); upgrade scheduled")
+                CustomLogger.shared.debug("Loaded legacy notes array count=\(loaded.count); upgrade scheduled")
             }
         } catch {
             notes = []
-            Self.logger.error("Failed to load notes archive: \(error.localizedDescription, privacy: .public)")
+            CustomLogger.shared.error("Failed to load notes archive: \(error)")
         }
         if needsUpgrade {
             save()
@@ -117,7 +114,7 @@ class NotesStore: ObservableObject {
     // MARK: - Bulk Replace / Export
     func replaceAll(with newNotes: [Note]) {
         self.notes = newNotes
-        Self.logger.debug("Replaced notes array with \(newNotes.count) entries")
+        CustomLogger.shared.debug("Replaced notes array with \(newNotes.count) entries")
         save()
     }
 

@@ -40,7 +40,7 @@ final class WordsStore: ObservableObject {
         guard !s.isEmpty else { return }
         guard !m.isEmpty else { return }
 
-        if words.contains(where: { $0.surface == s && $0.kana == normalizedKana }) {
+        if words.contains(where: { $0.surface == s && $0.kana == normalizedKana && $0.sourceNoteID == sourceNoteID }) {
             return
         }
 
@@ -52,6 +52,73 @@ final class WordsStore: ObservableObject {
             sourceNoteID: sourceNoteID
         )
         words.append(word)
+        save()
+    }
+
+    struct WordToAdd: Hashable {
+        let surface: String
+        let kana: String?
+        let meaning: String
+        let note: String?
+
+        init(surface: String, kana: String?, meaning: String, note: String? = nil) {
+            self.surface = surface
+            self.kana = kana
+            self.meaning = meaning
+            self.note = note
+        }
+    }
+
+    /// Batch add for bulk operations (e.g. "Save All" from a note).
+    ///
+    /// This dedupes efficiently and writes to disk once.
+    func addMany(_ items: [WordToAdd], sourceNoteID: UUID? = nil) {
+        guard items.isEmpty == false else { return }
+
+        var existingKeys: Set<String> = []
+        existingKeys.reserveCapacity(words.count)
+        for w in words {
+            let surface = w.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            let kana = w.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedKana = (kana?.isEmpty == false) ? kana : nil
+            let key = "\(surface)|\(normalizedKana ?? "")|\(w.sourceNoteID?.uuidString ?? "")"
+            existingKeys.insert(key)
+        }
+
+        var newWords: [Word] = []
+        newWords.reserveCapacity(items.count)
+
+        for item in items {
+            let s = item.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedKana = item.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedKana: String?
+            if let tk = trimmedKana, tk.isEmpty == false {
+                normalizedKana = tk
+            } else {
+                normalizedKana = nil
+            }
+            let m = item.meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+            let n = item.note
+
+            guard s.isEmpty == false else { continue }
+            guard m.isEmpty == false else { continue }
+
+            let key = "\(s)|\(normalizedKana ?? "")|\(sourceNoteID?.uuidString ?? "")"
+            guard existingKeys.insert(key).inserted else { continue }
+
+            newWords.append(
+                Word(
+                    surface: s,
+                    kana: normalizedKana,
+                    meaning: m,
+                    note: n,
+                    sourceNoteID: sourceNoteID
+                )
+            )
+        }
+
+        guard newWords.isEmpty == false else { return }
+        words.append(contentsOf: newWords)
         save()
     }
     
@@ -108,7 +175,7 @@ final class WordsStore: ObservableObject {
             let decoded = try JSONDecoder().decode([Word].self, from: data)
             self.words = decoded
         } catch {
-            Log("Failed to load words: \(error)")
+            CustomLogger.shared.error("Failed to load words: \(error)")
         }
     }
     
@@ -120,7 +187,7 @@ final class WordsStore: ObservableObject {
             let data = try JSONEncoder().encode(words)
             try data.write(to: url, options: .atomic)
         } catch {
-            Log("Failed to save words: \(error)")
+            CustomLogger.shared.error("Failed to save words: \(error)")
         }
     }
     

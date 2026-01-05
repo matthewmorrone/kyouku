@@ -9,19 +9,7 @@ actor LexiconProvider {
 
     private var cachedTrie: LexiconTrie?
     private var buildTask: Task<LexiconTrie, Error>?
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "LexiconProvider")
     private let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "LexiconProvider")
-    @MainActor
-    static var furiganaLoggingEnabled: Bool { DiagnosticsLogging.isEnabled(.furigana) }
-
-    private func info(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) async {
-        if await Self.furiganaLoggingEnabled == false { return }
-        logger.info("[\(file):\(line)] \(function): \(message)")
-    }
-
-    private func logError(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        logger.error("[\(file):\(line)] \(function): \(message)")
-    }
 
     func trie() async throws -> LexiconTrie {
         let overallStart = CFAbsoluteTimeGetCurrent()
@@ -29,15 +17,18 @@ actor LexiconProvider {
 
         if let trie = cachedTrie {
             let ms = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-            await info("LexiconProvider.trie(): returning cached trie in \(String(format: "%.3f", ms)) ms")
+            await CustomLogger.shared.info("LexiconProvider.trie(): returning cached trie in \(String(format: "%.3f", ms)) ms")
             signposter.endInterval("Trie() Overall", overallInterval)
             return trie
         }
 
         if let task = buildTask {
-            await info("LexiconProvider.trie(): awaiting in-flight build task…")
+            await CustomLogger.shared.info("LexiconProvider.trie(): awaiting in-flight build task…")
             return try await task.value
         }
+
+        // Capture actor-isolated state before entering the Task closure.
+        let signposter = self.signposter
 
         let task = Task<LexiconTrie, Error> {
             let sqliteStart = CFAbsoluteTimeGetCurrent()
@@ -45,7 +36,7 @@ actor LexiconProvider {
             let forms = try await DictionarySQLiteStore.shared.listAllSurfaceForms()
             signposter.endInterval("Trie() SQLite listAllSurfaceForms", sqliteInterval)
             let sqliteMs = (CFAbsoluteTimeGetCurrent() - sqliteStart) * 1000
-            await self.info("LexiconProvider.trie(): SQLite listAllSurfaceForms took \(String(format: "%.3f", sqliteMs)) ms; forms=\(forms.count)")
+            await CustomLogger.shared.info("LexiconProvider.trie(): SQLite listAllSurfaceForms took \(String(format: "%.3f", sqliteMs)) ms; forms=\(forms.count)")
 
             let buildStart = CFAbsoluteTimeGetCurrent()
             let buildInterval = signposter.beginInterval("Trie() Build LexiconTrie")
@@ -58,7 +49,7 @@ actor LexiconProvider {
             }
             signposter.endInterval("Trie() Build LexiconTrie", buildInterval)
             let buildMs = (CFAbsoluteTimeGetCurrent() - buildStart) * 1000
-            await self.info("LexiconProvider.trie(): LexiconTrie build took \(String(format: "%.3f", buildMs)) ms")
+            await CustomLogger.shared.info("LexiconProvider.trie(): LexiconTrie build took \(String(format: "%.3f", buildMs)) ms")
             return trie
         }
         buildTask = task
@@ -68,14 +59,14 @@ actor LexiconProvider {
             cachedTrie = trie
             buildTask = nil
             let totalMs = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-            await info("LexiconProvider.trie(): built and cached in \(String(format: "%.3f", totalMs)) ms")
+            await CustomLogger.shared.info("LexiconProvider.trie(): built and cached in \(String(format: "%.3f", totalMs)) ms")
             signposter.endInterval("Trie() Overall", overallInterval)
-            await info("Lexicon trie built and cached in memory.")
+            await CustomLogger.shared.info("Lexicon trie built and cached in memory.")
             return trie
         } catch {
             buildTask = nil
             signposter.endInterval("Trie() Overall", overallInterval)
-            logError("Failed to build lexicon trie: \(String(describing: error))")
+            await CustomLogger.shared.error("Failed to build lexicon trie: \(String(describing: error))")
             throw error
         }
     }

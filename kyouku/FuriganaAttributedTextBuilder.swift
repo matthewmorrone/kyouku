@@ -1,16 +1,8 @@
 import Foundation
 import UIKit
 import CoreText
-import OSLog
 
 enum FuriganaAttributedTextBuilder {
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "FuriganaBuilder")
-    private static let rubyTraceLogger = DiagnosticsLogging.logger(.furiganaRubyTrace)
-    private static func log(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
-        logger.info("[\(file):\(line)] \(function): \(message)")
-    }
-
     static func build(
         text: String,
         textSize: Double,
@@ -20,7 +12,7 @@ enum FuriganaAttributedTextBuilder {
         readingOverrides: [ReadingOverride] = []
     ) async throws -> NSAttributedString {
         guard text.isEmpty == false else {
-            log("[\(context)] Skipping build because the input text is empty.")
+            CustomLogger.shared.info("[\(context)] Skipping build because the input text is empty.")
             return NSAttributedString(string: text)
         }
 
@@ -40,7 +32,7 @@ enum FuriganaAttributedTextBuilder {
             context: context
         )
         let totalDuration = elapsedMilliseconds(since: buildStart)
-        log("[\(context)] Finished furigana build in \(totalDuration) ms.")
+        CustomLogger.shared.info("[\(context)] Finished furigana build in \(totalDuration) ms.")
         return attributed
     }
 
@@ -57,11 +49,11 @@ enum FuriganaAttributedTextBuilder {
         baseSpans: [TextSpan]? = nil
     ) async throws -> Stage2Result {
         guard text.isEmpty == false else {
-            log("[\(context)] Skipping span computation because the input text is empty.")
+            CustomLogger.shared.info("[\(context)] Skipping span computation because the input text is empty.")
             return Stage2Result(annotatedSpans: [], semanticSpans: [])
         }
 
-        log("[\(context)] Starting furigana span computation for \(text.count) characters.")
+        CustomLogger.shared.info("[\(context)] Starting furigana span computation for \(text.count) characters.")
         let start = CFAbsoluteTimeGetCurrent()
 
         let segmentationStart = CFAbsoluteTimeGetCurrent()
@@ -76,10 +68,10 @@ enum FuriganaAttributedTextBuilder {
 
         let gaps = coverageGaps(spans: adjustedSpans, text: text)
         if gaps.isEmpty == false {
-            log("[\(context)] Coverage gaps detected after normalization: \(gaps)")
+            CustomLogger.shared.info("[\(context)] Coverage gaps detected after normalization: \(gaps)")
         }
         let segmentationDuration = elapsedMilliseconds(since: segmentationStart)
-        log("[\(context)] Segmentation spans ready: \(adjustedSpans.count) in \(segmentationDuration) ms.")
+        CustomLogger.shared.info("[\(context)] Segmentation spans ready: \(adjustedSpans.count) in \(segmentationDuration) ms.")
 
         let attachmentStart = CFAbsoluteTimeGetCurrent()
         let stage2 = await SpanReadingAttacher().attachReadings(
@@ -94,10 +86,10 @@ enum FuriganaAttributedTextBuilder {
         let resolvedSemantic = applyReadingOverrides(stage2.semanticSpans, overrides: readingOverrides)
 
         let attachmentDuration = elapsedMilliseconds(since: attachmentStart)
-        log("[\(context)] Annotated spans ready for projection: \(resolvedAnnotated.count) in \(attachmentDuration) ms.")
+        CustomLogger.shared.info("[\(context)] Annotated spans ready for projection: \(resolvedAnnotated.count) in \(attachmentDuration) ms.")
 
         let totalDuration = elapsedMilliseconds(since: start)
-        log("[\(context)] Completed span computation in \(totalDuration) ms.")
+        CustomLogger.shared.info("[\(context)] Completed span computation in \(totalDuration) ms.")
         return Stage2Result(annotatedSpans: resolvedAnnotated, semanticSpans: resolvedSemantic)
     }
 
@@ -232,18 +224,14 @@ enum FuriganaAttributedTextBuilder {
                 mutable.addAttribute(rubyReadingKey, value: segment.reading, range: segment.range)
                 mutable.addAttribute(rubySizeKey, value: furiganaSize, range: segment.range)
 
-                if DiagnosticsLogging.isEnabled(.furiganaRubyTrace) {
-                    let headword = nsText.substring(with: segment.range)
-                    Self.rubyTraceLogger.info(
-                        "ruby headword='\(headword, privacy: .public)' reading='\(segment.reading, privacy: .public)' commonKanaRemoved='\(segment.commonKanaRemoved, privacy: .public)'"
-                    )
-                }
+                let headword = nsText.substring(with: segment.range)
+                CustomLogger.shared.info("ruby headword='\(headword)' reading='\(segment.reading)' commonKanaRemoved='\(segment.commonKanaRemoved)'")
                 appliedCount += 1
             }
         }
 
         _ = elapsedMilliseconds(since: projectionStart)
-        // log("[\(context)] Projected ruby for \(appliedCount) segments in (projectionDuration) ms.")
+        // CustomLogger.shared.info("[\(context)] Projected ruby for \(appliedCount) segments in (projectionDuration) ms.")
         return mutable.copy() as? NSAttributedString ?? NSAttributedString(string: text)
     }
 
@@ -285,18 +273,14 @@ enum FuriganaAttributedTextBuilder {
                 mutable.addAttribute(rubyReadingKey, value: segment.reading, range: segment.range)
                 mutable.addAttribute(rubySizeKey, value: furiganaSize, range: segment.range)
 
-                if DiagnosticsLogging.isEnabled(.furiganaRubyTrace) {
-                    let headword = nsText.substring(with: segment.range)
-                    Self.rubyTraceLogger.info(
-                        "ruby headword='\(headword, privacy: .public)' reading='\(segment.reading, privacy: .public)' commonKanaRemoved='\(segment.commonKanaRemoved, privacy: .public)'"
-                    )
-                }
+                // let headword = nsText.substring(with: segment.range)
+                // CustomLogger.shared.info("ruby headword='\(headword)' reading='\(segment.reading)' commonKanaRemoved='\(segment.commonKanaRemoved)'")
                 appliedCount += 1
             }
         }
 
         _ = elapsedMilliseconds(since: projectionStart)
-        // log("[\(context)] Projected ruby for \(appliedCount) segments in (projectionDuration) ms.")
+        // CustomLogger.shared.info("[\(context)] Projected ruby for \(appliedCount) segments in (projectionDuration) ms.")
         return mutable.copy() as? NSAttributedString ?? NSAttributedString(string: text)
     }
 
@@ -359,7 +343,7 @@ enum FuriganaAttributedTextBuilder {
         guard text.isEmpty == false else { return nil }
         let rubyFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, furiganaSize)))
         let attributes = [kCTFontAttributeName as NSAttributedString.Key: rubyFont] as CFDictionary
-        log("[ruby] attributes: \(String(describing: attributes))")
+        CustomLogger.shared.info("[ruby] attributes: \(String(describing: attributes))")
         return CTRubyAnnotationCreateWithAttributes(
             .center,
             // Prefer expanding the base rather than allowing ruby to overhang the base.

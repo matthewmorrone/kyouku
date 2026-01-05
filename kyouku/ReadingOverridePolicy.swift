@@ -1,6 +1,5 @@
 import Foundation
 import CoreFoundation
-import OSLog
 
 actor ReadingOverridePolicy {
     static let shared = ReadingOverridePolicy(loader: {
@@ -10,7 +9,6 @@ actor ReadingOverridePolicy {
     private let loader: () async throws -> [SurfaceReadingOverride]
     private var cachedOverrides: [String: String]?
     private var buildTask: Task<[String: String], Error>?
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "ReadingOverridePolicy")
 
     init(loader: @escaping () async throws -> [SurfaceReadingOverride]) {
         self.loader = loader
@@ -20,7 +18,7 @@ actor ReadingOverridePolicy {
         do {
             _ = try await loadOverrides()
         } catch {
-            logger.error("ReadingOverridePolicy warmUp failed: \(String(describing: error))")
+            await CustomLogger.shared.error("ReadingOverridePolicy warmUp failed: \(String(describing: error))")
         }
     }
 
@@ -38,6 +36,9 @@ actor ReadingOverridePolicy {
     private func loadOverrides() async throws -> [String: String] {
         if let cached = cachedOverrides { return cached }
         if let task = buildTask { return try await task.value }
+
+        // Capture actor-isolated state before entering the Task closure.
+        let loader = self.loader
 
         let task = Task<[String: String], Error> {
             let records = try await loader()

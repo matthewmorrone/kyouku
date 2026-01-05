@@ -1,6 +1,5 @@
 import Foundation
 import NaturalLanguage
-import OSLog
 
 /// Produces bounded segmentation spans by probing JMdict-backed surfaces inside
 /// token boundaries produced by the system tokenizer. No readings or dictionary
@@ -8,7 +7,6 @@ import OSLog
 struct DictionarySurfaceMatcher {
     static let maxSurfaceLength = 8
     private static let fallbackSampleLimit = 48
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "DictionarySurfaceMatcher")
     private static let japaneseCharacterSet: CharacterSet = {
         var set = CharacterSet()
         set.formUnion(CharacterSet(charactersIn: "\u{3040}"..."\u{309F}")) // Hiragana
@@ -35,7 +33,7 @@ struct DictionarySurfaceMatcher {
     /// resolution is handled downstream.
     func segment(text: String) async throws -> [TextSpan] {
         guard text.isEmpty == false else {
-            Self.debug("Skipping dictionary scan: input text is empty.")
+            CustomLogger.shared.debug("Skipping dictionary scan: input text is empty.")
             return []
         }
 
@@ -45,10 +43,10 @@ struct DictionarySurfaceMatcher {
         let tokenRanges = Self.wordRanges(in: text)
         let tokenizationEnd = DispatchTime.now()
         let tokenizationMs = Double(tokenizationEnd.uptimeNanoseconds - overallStart.uptimeNanoseconds) / 1_000_000.0
-        Self.log("Tokenized input length \(text.count) into \(tokenRanges.count) ranges in \(String(format: "%.2f", tokenizationMs)) ms.")
+        CustomLogger.shared.info("Tokenized input length \(text.count) into \(tokenRanges.count) ranges in \(String(format: "%.2f", tokenizationMs)) ms.")
 
         if tokenRanges.isEmpty {
-            Self.debug("Tokenizer produced zero ranges; no matches will be attempted.")
+            CustomLogger.shared.debug("Tokenizer produced zero ranges; no matches will be attempted.")
             return []
         }
 
@@ -58,12 +56,12 @@ struct DictionarySurfaceMatcher {
         for tokenRange in tokenRanges {
             let trimmed = Self.trimRange(tokenRange, in: nsText)
             guard trimmed.length > 0 else {
-                Self.debug("Skipping token at location \(tokenRange.location) because it was entirely whitespace.")
+                CustomLogger.shared.debug("Skipping token at location \(tokenRange.location) because it was entirely whitespace.")
                 continue
             }
             let word = nsText.substring(with: trimmed)
             guard Self.containsJapaneseCharacters(word) else {
-                Self.debug("Skipping token '\(word)' (len \(word.count)): contains no Japanese characters.")
+                CustomLogger.shared.debug("Skipping token '\(word)' (len \(word.count)): contains no Japanese characters.")
                 continue
             }
             guard Self.isRubyEligibleToken(word, utf16Length: trimmed.length) else {
@@ -81,7 +79,7 @@ struct DictionarySurfaceMatcher {
         let overallEnd = DispatchTime.now()
         let overallMs = Double(overallEnd.uptimeNanoseconds - overallStart.uptimeNanoseconds) / 1_000_000.0
 
-        Self.log("Surface matcher produced \(spans.count) spans for length \(text.count) in \(String(format: "%.2f", overallMs)) ms (scan loop: \(String(format: "%.2f", loopMs)) ms).")
+        CustomLogger.shared.info("Surface matcher produced \(spans.count) spans for length \(text.count) in \(String(format: "%.2f", overallMs)) ms (scan loop: \(String(format: "%.2f", loopMs)) ms).")
 
         return spans
     }
@@ -97,7 +95,7 @@ struct DictionarySurfaceMatcher {
             let end = DispatchTime.now()
             let lookupMs = Double(lookupEnd.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
             let totalMs = Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
-            Self.debug("Lookup for candidate '\(candidate)' completed in \(String(format: "%.2f", totalMs)) ms with 0 exact matches (lookup: \(String(format: "%.2f", lookupMs)) ms).")
+            CustomLogger.shared.debug("Lookup for candidate '\(candidate)' completed in \(String(format: "%.2f", totalMs)) ms with 0 exact matches (lookup: \(String(format: "%.2f", lookupMs)) ms).")
             return nil
         }
 
@@ -105,7 +103,7 @@ struct DictionarySurfaceMatcher {
         let mapEnd = DispatchTime.now()
         let lookupMs = Double(lookupEnd.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
         let totalMs = Double(mapEnd.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
-        Self.log("Matched candidate '\(candidate)' at \(range.location)-\(range.location + range.length) in \(String(format: "%.2f", totalMs)) ms (lookup: \(String(format: "%.2f", lookupMs)) ms).")
+        CustomLogger.shared.info("Matched candidate '\(candidate)' at \(range.location)-\(range.location + range.length) in \(String(format: "%.2f", totalMs)) ms (lookup: \(String(format: "%.2f", lookupMs)) ms).")
 
         return span
     }
@@ -135,7 +133,7 @@ struct DictionarySurfaceMatcher {
         }
         let endTime = DispatchTime.now()
         let ms = Double(endTime.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
-        Self.log("Fallback matching produced \(matches.count) matches across range \(range.location)-\(range.location + range.length) in \(String(format: "%.2f", ms)) ms.")
+        CustomLogger.shared.info("Fallback matching produced \(matches.count) matches across range \(range.location)-\(range.location + range.length) in \(String(format: "%.2f", ms)) ms.")
 
         return matches
     }
@@ -221,14 +219,4 @@ struct DictionarySurfaceMatcher {
     }
 }
 
-private extension DictionarySurfaceMatcher {
-    static func log(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
-        logger.info("[\(file):\(line)] \(function): \(message, privacy: .public)")
-    }
 
-    static func debug(_ message: String, file: StaticString = #fileID, line: UInt = #line, function: StaticString = #function) {
-        guard DiagnosticsLogging.isEnabled(.furigana) else { return }
-        logger.debug("[\(file):\(line)] \(function): \(message, privacy: .public)")
-    }
-}

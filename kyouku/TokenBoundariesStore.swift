@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import OSLog
 
 @MainActor
 final class TokenBoundariesStore: ObservableObject {
@@ -12,7 +11,6 @@ final class TokenBoundariesStore: ObservableObject {
 
 	@Published private(set) var spansByNote: [UUID: [StoredSpan]] = [:]
 
-	private static let logger = DiagnosticsLogging.logger(.tokenBoundaries)
 	private let fileName = "token-spans.json"
 
 	init() {
@@ -81,13 +79,13 @@ final class TokenBoundariesStore: ObservableObject {
 			spansByNote[noteID] = cleaned
 		}
 		save()
-		Self.logger.debug("Saved amended spans note=\(noteID) count=\(cleaned.count)")
+		CustomLogger.shared.debug("Saved amended spans note=\(noteID) count=\(cleaned.count)")
 	}
 
 	func removeAll(for noteID: UUID) {
 		guard spansByNote.removeValue(forKey: noteID) != nil else { return }
 		save()
-		Self.logger.debug("Removed amended spans note=\(noteID)")
+		CustomLogger.shared.debug("Removed amended spans note=\(noteID)")
 	}
 
 	// MARK: - Persistence
@@ -106,15 +104,15 @@ final class TokenBoundariesStore: ObservableObject {
 			let data = try Data(contentsOf: url)
 			if let decoded = try? JSONDecoder().decode([UUID: [StoredSpan]].self, from: data) {
 				spansByNote = decoded
-				Self.logger.debug("Loaded token spans notes=\(self.spansByNote.count)")
+				CustomLogger.shared.debug("Loaded token spans notes=\(self.spansByNote.count)")
 				return
 			}
 			// Backward-compat: older boundary index format existed briefly; ignore it.
 			_ = try? JSONDecoder().decode([UUID: [Int]].self, from: data)
 			spansByNote = [:]
-			Self.logger.debug("Loaded legacy token boundaries format; ignored")
+			CustomLogger.shared.debug("Loaded legacy token boundaries format; ignored")
 		} catch {
-			Self.logger.error("Failed to load token boundaries: \(error.localizedDescription, privacy: .public)")
+			CustomLogger.shared.error("Failed to load token boundaries: \(error)")
 			spansByNote = [:]
 		}
 	}
@@ -124,9 +122,9 @@ final class TokenBoundariesStore: ObservableObject {
 		do {
 			let data = try JSONEncoder().encode(spansByNote)
 			try data.write(to: url, options: .atomic)
-			Self.logger.debug("Saved token spans notes=\(self.spansByNote.count)")
+			CustomLogger.shared.debug("Saved token spans notes=\(self.spansByNote.count)")
 		} catch {
-			Self.logger.error("Failed to save token boundaries: \(error.localizedDescription, privacy: .public)")
+			CustomLogger.shared.error("Failed to save token boundaries: \(error)")
 		}
 	}
 }

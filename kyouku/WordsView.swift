@@ -164,7 +164,7 @@ struct WordsView: View {
                         .tag(word.id)
                 } else {
                     NavigationLink {
-                        WordDefinitionsView(surface: word.surface, kana: word.kana)
+                        WordDefinitionsView(surface: word.surface, kana: word.kana, sourceNoteID: word.sourceNoteID)
                     } label: {
                         savedRow(word)
                     }
@@ -925,3 +925,4 @@ private enum WordsCSVImport {
         return out
     }
 }
+

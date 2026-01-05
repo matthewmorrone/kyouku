@@ -30,10 +30,7 @@ struct PasteBufferStore {
             let data = text.data(using: .utf8) ?? Data()
             try data.write(to: url, options: .atomic)
         } catch {
-            // Swallow errors for now; this is best-effort persistence
-            #if DEBUG
-            print("Failed to save paste buffer:", error)
-            #endif
+            CustomLogger.shared.error("Failed to save paste buffer: \(error)")
         }
     }
 }

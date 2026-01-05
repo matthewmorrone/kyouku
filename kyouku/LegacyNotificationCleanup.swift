@@ -1,10 +1,8 @@
 import Foundation
 import UserNotifications
-import OSLog
 
 enum LegacyNotificationCleanup {
     private static let didRunKey = "didClearLegacyNotifications_v1"
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "LegacyNotificationCleanup")
 
     static func runIfNeeded() async {
         let defaults = UserDefaults.standard
@@ -17,9 +15,9 @@ enum LegacyNotificationCleanup {
         if pendingCount > 0 || deliveredCount > 0 {
             center.removeAllPendingNotificationRequests()
             center.removeAllDeliveredNotifications()
-            logger.info("Cleared legacy notifications pending=\(pendingCount) delivered=\(deliveredCount)")
+            CustomLogger.shared.info("Cleared legacy notifications pending=\(pendingCount) delivered=\(deliveredCount)")
         } else {
-            logger.debug("No legacy notifications found")
+            CustomLogger.shared.debug("No legacy notifications found")
         }
 
         defaults.set(true, forKey: didRunKey)
