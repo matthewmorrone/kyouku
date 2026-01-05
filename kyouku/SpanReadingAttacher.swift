@@ -239,8 +239,62 @@ struct SpanReadingAttacher {
             return semantic
         }
 
-        // Lexicon membership (JMdict trie). Used only for merge validation; never mutates Stage-1.
-        let trie: LexiconTrie? = try? await LexiconProvider.shared.trie()
+        // Lexicon membership (JMdict trie). Optional secondary check.
+        // IMPORTANT: must not trigger trie building or SQLite; only use cached trie.
+        let trie: LexiconTrie? = await LexiconProvider.shared.cachedTrieIfAvailable()
+
+        // INVESTIGATION instrumentation
+        struct MergeOnlyCounters {
+            var passCount: Int = 0
+            var spansStart: Int = 0
+            var spansEnd: Int = 0
+
+            var mecabBlanketMerges: Int = 0
+            var whitelistMerges: Int = 0
+
+            var kanjiKanaCandidates: Int = 0
+            var kanjiKanaAccepted: Int = 0
+            var kanjiKanaRejected_hardBoundary: Int = 0
+            var kanjiKanaRejected_notContiguous: Int = 0
+            var kanjiKanaRejected_rightNotAllHiragana: Int = 0
+            var kanjiKanaRejected_leftEndNotKanji: Int = 0
+            var kanjiKanaRejected_noMecabCrossingToken: Int = 0
+            var kanjiKanaRejected_notInLexiconSurfaceSet: Int = 0
+
+            var kanjiKanaChainCandidates: Int = 0
+            var kanjiKanaChainAccepted: Int = 0
+            var kanjiKanaChainRejected_hardBoundary: Int = 0
+            var kanjiKanaChainRejected_notContiguous: Int = 0
+            var kanjiKanaChainRejected_leftNoKanji: Int = 0
+            var kanjiKanaChainRejected_BorCNotAllHiragana: Int = 0
+            var kanjiKanaChainRejected_noMecabSingleTokenCover: Int = 0
+            var kanjiKanaChainRejected_notInLexiconSurfaceSet: Int = 0
+        }
+
+        var counters = MergeOnlyCounters()
+        var rejectionSamplesRemaining = 20
+        var chainRejectionSamplesRemaining = 20
+        var didLogLexiconUnavailable = false
+        var didLogLexiconUnavailableChain = false
+
+        @inline(__always)
+        func fmtRange(_ r: NSRange) -> String {
+            "\(r.location)-\(r.length)"
+        }
+
+        @inline(__always)
+        func logKanjiKanaReject(reason: String, A: String, ARange: NSRange, B: String, BRange: NSRange, combined: String) {
+            guard rejectionSamplesRemaining > 0 else { return }
+            rejectionSamplesRemaining -= 1
+            CustomLogger.shared.debug("[STAGE-2.5] kanjiKana reject reason=\(reason) A=«\(A)».(\(fmtRange(ARange))) B=«\(B)».(\(fmtRange(BRange))) combined=«\(combined)»")
+        }
+
+        @inline(__always)
+        func logKanjiKanaChainReject(reason: String, A: String, B: String, C: String, combined: String) {
+            guard chainRejectionSamplesRemaining > 0 else { return }
+            chainRejectionSamplesRemaining -= 1
+            CustomLogger.shared.debug("[STAGE-2.5] kanjiKanaChain reject reason=\(reason) A=«\(A)» B=«\(B)» C=«\(C)» combined=«\(combined)»")
+        }
 
         struct Segment {
             var range: NSRange
@@ -289,6 +343,16 @@ struct SpanReadingAttacher {
                 break
             }
             return allBoundary
+        }
+
+        func endsWithKanji(_ segment: Segment) -> Bool {
+            let end = NSMaxRange(segment.range)
+            guard segment.range.location != NSNotFound, segment.range.length > 0 else { return false }
+            guard end > segment.range.location else { return false }
+            let lastCharRange = nsText.rangeOfComposedCharacterSequence(at: end - 1)
+            guard lastCharRange.location != NSNotFound, lastCharRange.length > 0 else { return false }
+            let lastChar = nsText.substring(with: lastCharRange)
+            return containsKanji(lastChar)
         }
 
         func merge(_ segments: inout [Segment], from start: Int, to endExclusive: Int) -> Bool {
@@ -378,10 +442,13 @@ struct SpanReadingAttacher {
             Segment(range: span.range, sourceSpanIndices: idx..<(idx + 1))
         }
 
+        counters.spansStart = segments.count
+
         let maxPasses = 64
         var pass = 0
         while pass < maxPasses {
             pass += 1
+            counters.passCount = pass
             let beforeCount = segments.count
             ivlog("Stage2.5.mergeOnly pass=\(pass) spans=\(beforeCount)")
 
@@ -395,6 +462,7 @@ struct SpanReadingAttacher {
                         if let endExclusive = tokenEndExclusiveCoveringSegments(tokenRange: token.range, segments: segments, startIndex: i) {
                             if merge(&segments, from: i, to: endExclusive) {
                                 didMerge = true
+                                counters.mecabBlanketMerges += 1
                                 mergedThisIndex = true
                                 break
                             }
@@ -406,51 +474,154 @@ struct SpanReadingAttacher {
                 }
 
                 // Rule 2: Kanji-head + kana-tail continuation merge (adjacent only).
-                // Merge S[i], S[i+1] iff:
-                //  1) left contains at least one Kanji
-                //  2) right is entirely Hiragana
-                //  3) (a) combined surface exists in lexicon trie, OR
-                //     (b) MeCab produced a single lemma/token whose range exactly covers the combined range.
+                // Merge A + B iff:
+                //  1) A ends with Kanji (join boundary is Kanji → Hiragana)
+                //  2) B is entirely Hiragana
+                //  3) Either:
+                //     a) MeCab has a token that starts at A and crosses the join (e.g. "閉じ" crosses "閉|じ")
+                //     b) (secondary) (A+B) exists in cached lexicon trie
                 if i + 1 < segments.count {
                     let leftSeg = segments[i]
                     let rightSeg = segments[i + 1]
+                    let left = surface(of: leftSeg)
+                    let right = surface(of: rightSeg)
+                    let combinedSurface = left + right
+
                     let contiguous = NSMaxRange(leftSeg.range) == rightSeg.range.location
-                    if contiguous {
-                        let left = surface(of: leftSeg)
-                        let right = surface(of: rightSeg)
-                        if isHardBoundarySurface(left) == false,
-                           isHardBoundarySurface(right) == false,
-                           containsKanji(left),
-                           isHiraganaOnly(right) {
-                            let combinedRange = NSRange(location: leftSeg.range.location, length: leftSeg.range.length + rightSeg.range.length)
-                            let combinedSurface = left + right
+                    if contiguous == false {
+                        counters.kanjiKanaRejected_notContiguous += 1
+                        logKanjiKanaReject(reason: "notContiguous", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
+                    } else if isHardBoundarySurface(left) || isHardBoundarySurface(right) {
+                        counters.kanjiKanaRejected_hardBoundary += 1
+                        logKanjiKanaReject(reason: "hardBoundary", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
+                    } else if endsWithKanji(leftSeg) == false {
+                        counters.kanjiKanaRejected_leftEndNotKanji += 1
+                        logKanjiKanaReject(reason: "leftEndNotKanji", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
+                    } else if isHiraganaOnly(right) == false {
+                        counters.kanjiKanaRejected_rightNotAllHiragana += 1
+                        logKanjiKanaReject(reason: "rightNotAllHiragana", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
+                    } else {
+                        counters.kanjiKanaCandidates += 1
+                        let combinedRange = NSRange(location: leftSeg.range.location, length: leftSeg.range.length + rightSeg.range.length)
 
-                            var ok = false
+                        // Prefer MeCab grouping signal over lexicon membership.
+                        let join = NSMaxRange(leftSeg.range)
+                        let combinedEnd = NSMaxRange(combinedRange)
+
+                        // If MeCab emits a token that starts at A and extends past the join (but not beyond combined),
+                        // it means MeCab is grouping across the boundary we want to repair.
+                        var mecabCrossesJoin = false
+                        if let startingTokens = tokensByStart[combinedRange.location] {
+                            for token in startingTokens {
+                                let tokenEnd = NSMaxRange(token.range)
+                                if tokenEnd > join && tokenEnd <= combinedEnd {
+                                    mecabCrossesJoin = true
+                                    break
+                                }
+                            }
+                        }
+
+                        var lexiconOk = false
+                        if mecabCrossesJoin == false {
                             if let trie {
-                                ok = trie.containsWord(in: nsText, from: combinedRange.location, through: NSMaxRange(combinedRange), requireKanji: true)
+                                lexiconOk = trie.containsWord(in: nsText, from: combinedRange.location, through: NSMaxRange(combinedRange), requireKanji: true)
+                            } else if didLogLexiconUnavailable == false {
+                                didLogLexiconUnavailable = true
+                                CustomLogger.shared.debug("[STAGE-2.5] kanjiKana: lexicon unavailable (cached trie missing); lexicon check disabled")
                             }
-                            if ok == false {
-                                if let candidates = tokensByStart[combinedRange.location] {
-                                    ok = candidates.contains(where: { token in
-                                        token.range.location == combinedRange.location &&
-                                            token.range.length == combinedRange.length &&
-                                            token.dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                                    })
-                                }
-                            }
+                        }
 
-                            if ok {
-                                CustomLogger.shared.debug("[STAGE-2.5] merge kanjiKana '\(left)' + '\(right)' -> '\(combinedSurface)'")
-                                if merge(&segments, from: i, to: i + 2) {
-                                    didMerge = true
-                                    continue
-                                }
+                        if mecabCrossesJoin || lexiconOk {
+                            if merge(&segments, from: i, to: i + 2) {
+                                didMerge = true
+                                counters.kanjiKanaAccepted += 1
+                                continue
                             }
+                        } else {
+                            counters.kanjiKanaRejected_noMecabCrossingToken += 1
+                            if lexiconOk == false {
+                                counters.kanjiKanaRejected_notInLexiconSurfaceSet += 1
+                            }
+                            logKanjiKanaReject(reason: "noMecabCrossingToken+lexicon", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
                         }
                     }
                 }
 
-                // Rule 3: explicit whitelist merges (adjacent only).
+                // Rule 3: Kanji-head + kana-kana chain merge (adjacent only).
+                // Merge A + B + C iff ALL are true:
+                //  1) A contains at least one Kanji scalar
+                //  2) B is all Hiragana
+                //  3) C is all Hiragana
+                //  4) A, B, C are UTF-16 contiguous (no gaps)
+                //  5) No hard boundary between any of A|B or B|C
+                //  6) Either:
+                //     a) MeCab has exactly ONE token whose range == (A ∪ B ∪ C)
+                //     b) (secondary) (A+B+C) exists in cached lexicon trie
+                if i + 2 < segments.count {
+                    let aSeg = segments[i]
+                    let bSeg = segments[i + 1]
+                    let cSeg = segments[i + 2]
+
+                    let a = surface(of: aSeg)
+                    let b = surface(of: bSeg)
+                    let c = surface(of: cSeg)
+                    let combinedSurface = a + b + c
+
+                    let abContig = NSMaxRange(aSeg.range) == bSeg.range.location
+                    let bcContig = NSMaxRange(bSeg.range) == cSeg.range.location
+                    if abContig == false || bcContig == false {
+                        counters.kanjiKanaChainRejected_notContiguous += 1
+                        logKanjiKanaChainReject(reason: "notContiguous", A: a, B: b, C: c, combined: combinedSurface)
+                    } else if isHardBoundarySurface(a) || isHardBoundarySurface(b) || isHardBoundarySurface(c) {
+                        counters.kanjiKanaChainRejected_hardBoundary += 1
+                        logKanjiKanaChainReject(reason: "hardBoundary", A: a, B: b, C: c, combined: combinedSurface)
+                    } else if containsKanji(a) == false {
+                        counters.kanjiKanaChainRejected_leftNoKanji += 1
+                        logKanjiKanaChainReject(reason: "leftNoKanji", A: a, B: b, C: c, combined: combinedSurface)
+                    } else if isHiraganaOnly(b) == false || isHiraganaOnly(c) == false {
+                        counters.kanjiKanaChainRejected_BorCNotAllHiragana += 1
+                        logKanjiKanaChainReject(reason: "BorCNotAllHiragana", A: a, B: b, C: c, combined: combinedSurface)
+                    } else {
+                        counters.kanjiKanaChainCandidates += 1
+                        let combinedRange = NSRange(location: aSeg.range.location, length: aSeg.range.length + bSeg.range.length + cSeg.range.length)
+
+                        var mecabCoverOk = false
+                        if let candidates = tokensByStart[combinedRange.location] {
+                            let matches = candidates.filter { token in
+                                token.range.location == combinedRange.location && token.range.length == combinedRange.length
+                            }
+                            mecabCoverOk = (matches.count == 1)
+                        }
+
+                        var lexiconOk = false
+                        if mecabCoverOk == false {
+                            if let trie {
+                                lexiconOk = trie.containsWord(in: nsText, from: combinedRange.location, through: NSMaxRange(combinedRange), requireKanji: true)
+                            } else {
+                                counters.kanjiKanaChainRejected_notInLexiconSurfaceSet += 1
+                                if didLogLexiconUnavailableChain == false {
+                                    didLogLexiconUnavailableChain = true
+                                    CustomLogger.shared.debug("[STAGE-2.5] kanjiKanaChain: lexicon unavailable (cached trie missing); lexicon check disabled")
+                                }
+                                logKanjiKanaChainReject(reason: "lexiconUnavailable", A: a, B: b, C: c, combined: combinedSurface)
+                            }
+                        }
+
+                        if mecabCoverOk || lexiconOk {
+                            if merge(&segments, from: i, to: i + 3) {
+                                didMerge = true
+                                counters.kanjiKanaChainAccepted += 1
+                                continue
+                            }
+                        } else {
+                            counters.kanjiKanaChainRejected_noMecabSingleTokenCover += 1
+                            counters.kanjiKanaChainRejected_notInLexiconSurfaceSet += 1
+                            logKanjiKanaChainReject(reason: "mecabCover+lexicon", A: a, B: b, C: c, combined: combinedSurface)
+                        }
+                    }
+                }
+
+                // Rule 4: explicit whitelist merges (adjacent only).
                 if i + 1 < segments.count {
                     let left = surface(of: segments[i])
                     let right = surface(of: segments[i + 1])
@@ -459,6 +630,7 @@ struct SpanReadingAttacher {
                         if whitelistMerges.contains(right) {
                             if merge(&segments, from: i, to: i + 2) {
                                 didMerge = true
+                                counters.whitelistMerges += 1
                                 continue
                             }
                         }
@@ -486,7 +658,21 @@ struct SpanReadingAttacher {
             )
         }
 
+        counters.spansEnd = segments.count
         ivlog("Stage2.5.mergeOnly end spansIn=\(spans.count) spansOut=\(semantic.count)")
+
+        CustomLogger.shared.debug(
+            "[STAGE-2.5] mergeOnly summary passes=\(counters.passCount) spans start=\(counters.spansStart) end=\(counters.spansEnd) " +
+                "mecabBlanket=\(counters.mecabBlanketMerges) whitelist=\(counters.whitelistMerges) " +
+                "kanjiKana cand=\(counters.kanjiKanaCandidates) ok=\(counters.kanjiKanaAccepted) " +
+                "rej(HB=\(counters.kanjiKanaRejected_hardBoundary) contig=\(counters.kanjiKanaRejected_notContiguous) " +
+                "leftEndKanji=\(counters.kanjiKanaRejected_leftEndNotKanji) rightHira=\(counters.kanjiKanaRejected_rightNotAllHiragana) " +
+                "mecabCross=\(counters.kanjiKanaRejected_noMecabCrossingToken) lex=\(counters.kanjiKanaRejected_notInLexiconSurfaceSet))"
+                " kanjiKanaChain cand=\(counters.kanjiKanaChainCandidates) ok=\(counters.kanjiKanaChainAccepted) " +
+                "rej(HB=\(counters.kanjiKanaChainRejected_hardBoundary) contig=\(counters.kanjiKanaChainRejected_notContiguous) " +
+                "leftKanji=\(counters.kanjiKanaChainRejected_leftNoKanji) hira=\(counters.kanjiKanaChainRejected_BorCNotAllHiragana) " +
+                "mecab=\(counters.kanjiKanaChainRejected_noMecabSingleTokenCover) lex=\(counters.kanjiKanaChainRejected_notInLexiconSurfaceSet))"
+        )
         return semantic
     }
 
