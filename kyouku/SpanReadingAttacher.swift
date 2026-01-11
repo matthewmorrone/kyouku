@@ -434,6 +434,9 @@ struct SpanReadingAttacher {
             while k < endExclusive {
                 if segments[k].range.location != cursor { return false }
                 let s = surface(of: segments[k])
+                // Absolute invariant: never merge segments that contain line breaks.
+                // A token/span must never include a newline or cross paragraphs.
+                if s.rangeOfCharacter(from: .newlines) != nil { return false }
                 if isHardBoundarySurface(s) { return false }
                 cursor = NSMaxRange(segments[k].range)
                 k += 1
@@ -460,6 +463,8 @@ struct SpanReadingAttacher {
                 let r = segments[j].range
                 guard r.location == cursor else { return nil }
                 let s = surface(of: segments[j])
+                // Never allow token coverage merges to include line breaks.
+                if s.rangeOfCharacter(from: .newlines) != nil { return nil }
                 if isHardBoundarySurface(s) { return nil }
                 cursor = NSMaxRange(r)
                 if cursor > tokenEnd { return nil }
@@ -547,8 +552,40 @@ struct SpanReadingAttacher {
             }
         }
 
-        var segments: [Segment] = spans.enumerated().map { idx, span in
-            Segment(range: span.range, sourceSpanIndices: idx..<(idx + 1))
+        // Newlines are absolute hard boundaries for semantic grouping.
+        // If a Stage-1 span (or user-edited span) accidentally contains a line break,
+        // split it here so Stage-2.5 cannot ever produce a semantic span with `\n`/`\r`.
+        var segments: [Segment] = []
+        segments.reserveCapacity(spans.count)
+        for (idx, span) in spans.enumerated() {
+            let r = span.range
+            guard r.location != NSNotFound, r.length > 0 else { continue }
+            guard r.location < nsText.length else { continue }
+            let end = min(nsText.length, NSMaxRange(r))
+            guard end > r.location else { continue }
+
+            var cursor = r.location
+            while cursor < end {
+                let search = NSRange(location: cursor, length: end - cursor)
+                let newlineRange = nsText.rangeOfCharacter(from: .newlines, options: [], range: search)
+                if newlineRange.location == NSNotFound {
+                    let piece = NSRange(location: cursor, length: end - cursor)
+                    if piece.length > 0 {
+                        segments.append(Segment(range: piece, sourceSpanIndices: idx..<(idx + 1)))
+                    }
+                    break
+                }
+
+                if newlineRange.location > cursor {
+                    let piece = NSRange(location: cursor, length: newlineRange.location - cursor)
+                    if piece.length > 0 {
+                        segments.append(Segment(range: piece, sourceSpanIndices: idx..<(idx + 1)))
+                    }
+                }
+
+                // Skip over the newline character(s).
+                cursor = max(cursor, NSMaxRange(newlineRange))
+            }
         }
 
         counters.spansStart = segments.count

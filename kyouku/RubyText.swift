@@ -4,6 +4,10 @@ import UIKit
 import ObjectiveC
 #endif
 
+extension Notification.Name {
+    static let kyoukuSplitPaneScrollSync = Notification.Name("kyouku.splitPane.scrollSync")
+}
+
 extension NSAttributedString.Key {
     static let rubyAnnotation = NSAttributedString.Key("RubyAnnotation")
     static let rubyReadingText = NSAttributedString.Key("RubyReadingText")
@@ -45,6 +49,7 @@ struct RubyText: UIViewRepresentable {
     var allowSystemTextSelection: Bool = true
     var wrapLines: Bool = true
     var horizontalScrollEnabled: Bool = false
+    var scrollSyncGroupID: String? = nil
     var tokenOverlays: [TokenOverlay] = []
     var semanticSpans: [SemanticSpan] = []
     var selectedRange: NSRange? = nil
@@ -102,6 +107,8 @@ struct RubyText: UIViewRepresentable {
         textView.contextMenuStateProvider = contextMenuStateProvider
         textView.contextMenuActionHandler = onContextMenuAction
         textView.delegate = context.coordinator
+
+        context.coordinator.attach(textView: textView, scrollSyncGroupID: scrollSyncGroupID)
 
         if allowSystemTextSelection == false {
             textView.selectedRange = NSRange(location: 0, length: 0)
@@ -249,6 +256,8 @@ struct RubyText: UIViewRepresentable {
         context.coordinator.stateProvider = contextMenuStateProvider
         context.coordinator.actionHandler = onContextMenuAction
 
+        context.coordinator.attach(textView: uiView, scrollSyncGroupID: scrollSyncGroupID)
+
         // Help the view expand vertically rather than compress
         uiView.setContentCompressionResistancePriority(.required, for: .vertical)
         uiView.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -330,6 +339,143 @@ struct RubyText: UIViewRepresentable {
     class Coordinator: NSObject, UITextViewDelegate {
         var stateProvider: (() -> RubyContextMenuState?)?
         var actionHandler: ((RubyContextMenuAction) -> Void)?
+
+        private weak var textView: UITextView?
+        private var scrollSyncGroupID: String? = nil
+        private let scrollSyncSourceID: String = UUID().uuidString
+        private var scrollObserver: NSObjectProtocol? = nil
+        private var isApplyingExternalScroll: Bool = false
+
+        deinit {
+            if let scrollObserver {
+                NotificationCenter.default.removeObserver(scrollObserver)
+            }
+        }
+
+        func attach(textView: UITextView, scrollSyncGroupID: String?) {
+            self.textView = textView
+            if self.scrollSyncGroupID != scrollSyncGroupID {
+                self.scrollSyncGroupID = scrollSyncGroupID
+            }
+
+            if scrollObserver == nil {
+                scrollObserver = NotificationCenter.default.addObserver(
+                    forName: .kyoukuSplitPaneScrollSync,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] note in
+                    self?.handleScrollSyncNotification(note)
+                }
+            }
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            guard isApplyingExternalScroll == false else { return }
+            guard let group = scrollSyncGroupID, group.isEmpty == false else { return }
+            guard let tv = textView, tv === scrollView else { return }
+
+            // Only broadcast user-driven motion. Programmatic offset updates (from sync)
+            // can trigger additional delegate callbacks; broadcasting those creates
+            // a feedback loop that manifests as elastic snap-back.
+            guard scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating else { return }
+
+            // Sync by (fraction within scrollable range) + (overscroll delta) so both panes
+            // stay aligned even when their content sizes differ.
+            let inset = scrollView.adjustedContentInset
+            let normalizedX = scrollView.contentOffset.x + inset.left
+            let normalizedY = scrollView.contentOffset.y + inset.top
+            let maxX = max(0, scrollView.contentSize.width - scrollView.bounds.width + inset.left + inset.right)
+            let maxY = max(0, scrollView.contentSize.height - scrollView.bounds.height + inset.top + inset.bottom)
+
+            let inRangeX = min(max(normalizedX, 0), maxX)
+            let inRangeY = min(max(normalizedY, 0), maxY)
+            let fracX: CGFloat = (maxX > 0) ? (inRangeX / maxX) : 0
+            let fracY: CGFloat = (maxY > 0) ? (inRangeY / maxY) : 0
+
+            let overscrollX: CGFloat = {
+                if normalizedX < 0 { return normalizedX }
+                if normalizedX > maxX { return normalizedX - maxX }
+                return 0
+            }()
+            let overscrollY: CGFloat = {
+                if normalizedY < 0 { return normalizedY }
+                if normalizedY > maxY { return normalizedY - maxY }
+                return 0
+            }()
+
+            NotificationCenter.default.post(
+                name: .kyoukuSplitPaneScrollSync,
+                object: nil,
+                userInfo: [
+                    "group": group,
+                    "source": scrollSyncSourceID,
+                    "fx": fracX,
+                    "fy": fracY,
+                    "ox": overscrollX,
+                    "oy": overscrollY,
+                    "sx": maxX,
+                    "sy": maxY
+                ]
+            )
+        }
+
+        private func handleScrollSyncNotification(_ note: Notification) {
+            guard let tv = textView else { return }
+            guard let group = scrollSyncGroupID, group.isEmpty == false else { return }
+            guard let info = note.userInfo else { return }
+            guard let noteGroup = info["group"] as? String, noteGroup == group else { return }
+            guard let source = info["source"] as? String, source != scrollSyncSourceID else { return }
+
+            let fx = (info["fx"] as? CGFloat) ?? CGFloat((info["fx"] as? Double) ?? 0)
+            let fy = (info["fy"] as? CGFloat) ?? CGFloat((info["fy"] as? Double) ?? 0)
+            let ox = (info["ox"] as? CGFloat) ?? CGFloat((info["ox"] as? Double) ?? 0)
+            let oy = (info["oy"] as? CGFloat) ?? CGFloat((info["oy"] as? Double) ?? 0)
+            let sx = (info["sx"] as? CGFloat) ?? CGFloat((info["sx"] as? Double) ?? 0)
+            let sy = (info["sy"] as? CGFloat) ?? CGFloat((info["sy"] as? Double) ?? 0)
+
+            tv.layoutIfNeeded()
+
+            let inset = tv.adjustedContentInset
+            let maxX = max(0, tv.contentSize.width - tv.bounds.width + inset.left + inset.right)
+            let maxY = max(0, tv.contentSize.height - tv.bounds.height + inset.top + inset.bottom)
+
+            let clampedFX: CGFloat = min(max(fx, 0), 1)
+            let clampedFY: CGFloat = min(max(fy, 0), 1)
+
+            // When source has no scrollable range in an axis, treat fraction as 0.
+            let effectiveFX: CGFloat = (sx > 0) ? clampedFX : 0
+            let effectiveFY: CGFloat = (sy > 0) ? clampedFY : 0
+
+            let desiredNormalized = CGPoint(
+                x: (maxX * effectiveFX) + ox,
+                y: (maxY * effectiveFY) + oy
+            )
+
+            let desired = CGPoint(
+                x: desiredNormalized.x - inset.left,
+                y: desiredNormalized.y - inset.top
+            )
+
+            // Clamp to an extended range so "bounce" overscroll stays synchronized.
+            let minX = -inset.left
+            let maxOffsetX = max(minX, tv.contentSize.width - tv.bounds.width + inset.right)
+            let minY = -inset.top
+            let maxOffsetY = max(minY, tv.contentSize.height - tv.bounds.height + inset.bottom)
+            let allowX = max(60, tv.bounds.width * 0.25)
+            let allowY = max(60, tv.bounds.height * 0.25)
+            let clamped = CGPoint(
+                x: min(max(desired.x, minX - allowX), maxOffsetX + allowX),
+                y: min(max(desired.y, minY - allowY), maxOffsetY + allowY)
+            )
+
+            isApplyingExternalScroll = true
+            if abs(tv.contentOffset.x - clamped.x) > 0.5 || abs(tv.contentOffset.y - clamped.y) > 0.5 {
+                tv.setContentOffset(clamped, animated: false)
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.isApplyingExternalScroll = false
+            }
+        }
 
         @available(iOS 16.0, *)
         func textView(_ textView: UITextView,
@@ -719,6 +865,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     }
 
     private func updateHorizontalScrollConfig() {
+        // Match editor behavior: allow vertical bounce even when content is short,
+        // so overscroll can be synchronized between panes.
+        alwaysBounceVertical = true
         alwaysBounceHorizontal = horizontalScrollEnabled
         showsHorizontalScrollIndicator = horizontalScrollEnabled
         // Keep vertical scroll behavior as-is; the view can be vertically scrollable regardless.
