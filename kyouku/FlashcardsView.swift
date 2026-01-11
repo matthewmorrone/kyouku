@@ -2,6 +2,7 @@ import SwiftUI
 
 struct FlashcardsView: View {
     @EnvironmentObject var store: WordsStore
+    @EnvironmentObject var notes: NotesStore
 
     @State private var session: [Word] = []
     @State private var sessionSource: [Word] = []
@@ -326,6 +327,8 @@ private struct FlashcardCard: View {
     let onKnow: () -> Void
     let onAgain: () -> Void
 
+    @EnvironmentObject var notes: NotesStore
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 16)
@@ -357,24 +360,25 @@ private struct FlashcardCard: View {
 
     @ViewBuilder
     private var frontFace: some View {
+        let displaySurface = displaySurfaceForCard(word)
+        let displayKana = displayKanaForCard(word, displaySurface: displaySurface)
         switch direction {
         case .kanjiToKana:
-            Text(word.surface).font(.largeTitle.weight(.bold))
+            Text(displaySurface).font(.largeTitle.weight(.bold))
         case .kanaToEnglish:
-            if let kana = word.kana, !kana.isEmpty {
-                Text(kana).font(.largeTitle.weight(.bold))
-            } else {
-                Text(word.surface).font(.largeTitle.weight(.bold))
-            }
+            Text((displayKana?.isEmpty == false) ? (displayKana ?? displaySurface) : displaySurface)
+                .font(.largeTitle.weight(.bold))
         }
     }
 
     @ViewBuilder
     private var backFace: some View {
+        let displaySurface = displaySurfaceForCard(word)
+        let displayKana = displayKanaForCard(word, displaySurface: displaySurface)
         switch direction {
         case .kanjiToKana:
-            Text(word.surface).font(.title2).bold()
-            if let kana = word.kana, !kana.isEmpty {
+            Text(displaySurface).font(.title2).bold()
+            if let kana = displayKana, kana.isEmpty == false, kana != displaySurface {
                 Text(kana).font(.title3).foregroundStyle(.secondary)
             }
             if !word.meaning.isEmpty {
@@ -387,14 +391,82 @@ private struct FlashcardCard: View {
             if !word.meaning.isEmpty {
                 Text(word.meaning).font(.title3).bold()
             }
-            if let kana = word.kana, !kana.isEmpty {
+            if let kana = displayKana, kana.isEmpty == false {
                 Text(kana).font(.title2)
+            } else if displaySurface.isEmpty == false {
+                Text(displaySurface).font(.title2)
             }
-            if !word.surface.isEmpty {
-                Text(word.surface)
+
+            // Only show an additional surface line if it's kana-only.
+            let rawSurface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            if rawSurface.isEmpty == false,
+               rawSurface != displaySurface,
+               isKanaOnlySurface(rawSurface) {
+                Text(rawSurface)
                     .font(.body)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private func displaySurfaceForCard(_ word: Word) -> String {
+        let surface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedKana = (kana?.isEmpty == false) ? kana : nil
+
+        guard let noteID = word.sourceNoteID else {
+            return surface
+        }
+        guard let noteText = notes.notes.first(where: { $0.id == noteID })?.text, noteText.isEmpty == false else {
+            return surface
+        }
+
+        // Prefer the form that actually appears in the source note.
+        if surface.isEmpty == false, noteText.contains(surface) {
+            return surface
+        }
+        if let normalizedKana, noteContains(noteText, candidate: normalizedKana) {
+            return normalizedKana
+        }
+        return surface
+    }
+
+    private func displayKanaForCard(_ word: Word, displaySurface: String) -> String? {
+        if let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines), kana.isEmpty == false {
+            return kana
+        }
+        // If the saved/displayed surface is kana-only, treat it as the kana line.
+        if isKanaOnlySurface(displaySurface) {
+            return displaySurface
+        }
+        return nil
+    }
+
+    private func noteContains(_ noteText: String, candidate: String) -> Bool {
+        if noteText.contains(candidate) { return true }
+        // Kana-folded containment so hiragana/katakana differences don't matter.
+        let foldedNote = kanaFoldToHiragana(noteText)
+        let foldedCandidate = kanaFoldToHiragana(candidate)
+        return foldedNote.contains(foldedCandidate)
+    }
+
+    private func kanaFoldToHiragana(_ value: String) -> String {
+        value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
+    }
+
+    private func isKanaOnlySurface(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return false }
+        return trimmed.unicodeScalars.allSatisfy { scalar in
+            // Hiragana
+            if (0x3040...0x309F).contains(scalar.value) { return true }
+            // Katakana
+            if (0x30A0...0x30FF).contains(scalar.value) { return true }
+            // Prolonged sound mark
+            if scalar.value == 0x30FC { return true }
+            // Half-width katakana
+            if (0xFF66...0xFF9F).contains(scalar.value) { return true }
+            return false
         }
     }
 

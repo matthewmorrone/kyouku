@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct WordsView: View {
     @EnvironmentObject var store: WordsStore
+    @EnvironmentObject var notesStore: NotesStore
     @StateObject private var lookup = DictionaryLookupViewModel()
     @State private var searchText: String = ""
     @State private var editModeState: EditMode = .inactive
@@ -28,7 +29,7 @@ struct WordsView: View {
                 .environment(\.editMode, $editModeState)
                 .listStyle(.insetGrouped)
             }
-            .navigationTitle("Dictionary")
+            .navigationTitle("Words")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
@@ -164,7 +165,11 @@ struct WordsView: View {
                         .tag(word.id)
                 } else {
                     NavigationLink {
-                        WordDefinitionsView(surface: word.surface, kana: word.kana, sourceNoteID: word.sourceNoteID)
+                        WordDefinitionsView(
+                            surface: displayHeadword(for: word),
+                            kana: word.kana,
+                            sourceNoteID: word.sourceNoteID
+                        )
                     } label: {
                         savedRow(word)
                     }
@@ -174,11 +179,12 @@ struct WordsView: View {
     }
 
     private func savedRow(_ word: Word) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        let headword = displayHeadword(for: word)
+        return HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading) {
-                Text(word.surface)
+                Text(headword)
                     .font(.headline)
-                if let kana = word.kana, kana.isEmpty == false, kana != word.surface {
+                if let kana = word.kana, kana.isEmpty == false, kana != headword {
                     Text(kana)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -221,6 +227,39 @@ struct WordsView: View {
             return trimmedSearchText
         }
         return entry.kanji
+    }
+
+    private func displayHeadword(for word: Word) -> String {
+        let surface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedKana = (kana?.isEmpty == false) ? kana : nil
+
+        guard let noteID = word.sourceNoteID else {
+            return surface
+        }
+        guard let noteText = notesStore.notes.first(where: { $0.id == noteID })?.text, noteText.isEmpty == false else {
+            return surface
+        }
+
+        // Prefer whatever appears in the note verbatim.
+        if surface.isEmpty == false, noteText.contains(surface) {
+            return surface
+        }
+        if let normalizedKana, noteContains(noteText, candidate: normalizedKana) {
+            return normalizedKana
+        }
+        return surface
+    }
+
+    private func noteContains(_ noteText: String, candidate: String) -> Bool {
+        if noteText.contains(candidate) { return true }
+        let foldedNote = kanaFoldToHiragana(noteText)
+        let foldedCandidate = kanaFoldToHiragana(candidate)
+        return foldedNote.contains(foldedCandidate)
+    }
+
+    private func kanaFoldToHiragana(_ value: String) -> String {
+        value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
     }
 
     private func firstGloss(for entry: DictionaryEntry) -> String {

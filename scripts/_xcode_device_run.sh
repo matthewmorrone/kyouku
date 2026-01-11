@@ -115,7 +115,19 @@ echo "Installing to device…"
 xcrun devicectl device install app --device "$DEVICE" "$APP_PATH" >/dev/null
 
 echo "Launching…"
+# Strict TextKit 2 mode: crash immediately if any TextKit 1 API is accessed.
+# Default ON for these scripts; override by exporting KYOUKU_STRICT_TEXTKIT2=0.
+if [[ "${KYOUKU_STRICT_TEXTKIT2:-}" == "" ]]; then
+  KYOUKU_STRICT_TEXTKIT2=1
+fi
+
 # --terminate-existing makes iterative runs behave more like Xcode Run.
-xcrun devicectl device process launch --terminate-existing --device "$DEVICE" "$BUNDLE_ID" >/dev/null
+if [[ "${KYOUKU_STRICT_TEXTKIT2:-}" != "0" ]]; then
+  xcrun devicectl device process launch --terminate-existing --device "$DEVICE" \
+    --environment-variables '{"KYOUKU_STRICT_TEXTKIT2":"1"}' \
+    "$BUNDLE_ID" >/dev/null
+else
+  xcrun devicectl device process launch --terminate-existing --device "$DEVICE" "$BUNDLE_ID" >/dev/null
+fi
 
 echo "OK"

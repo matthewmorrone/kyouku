@@ -9,12 +9,12 @@ internal import StringTools
 
 // INVESTIGATION: timing/logging helpers (2026-01-05)
 // NOTE: Investigation-only instrumentation. Do not change control flow beyond adding logs.
-@preconcurrency @MainActor @inline(__always)
+@preconcurrency @inline(__always)
 func ivlog(_ msg: String) {
     print("[INVESTIGATION] \(msg) main=\(Thread.isMainThread)")
 }
 
-@preconcurrency @MainActor @inline(__always)
+@preconcurrency @inline(__always)
 func ivtime<T>(_ label: String, _ f: () throws -> T) rethrows -> T {
     let t0 = CACurrentMediaTime()
     defer {
@@ -24,7 +24,7 @@ func ivtime<T>(_ label: String, _ f: () throws -> T) rethrows -> T {
     return try f()
 }
 
-@preconcurrency @MainActor @inline(__always)
+@preconcurrency @inline(__always)
 func ivtimeAsync<T>(_ label: String, _ f: () async throws -> T) async rethrows -> T {
     let t0 = CACurrentMediaTime()
     defer {
@@ -55,7 +55,7 @@ struct SpanReadingAttacher {
     }
 
     func attachReadings(text: String, spans: [TextSpan]) async -> [AnnotatedSpan] {
-        let result = await attachReadings(text: text, spans: spans, treatSpanBoundariesAsAuthoritative: false)
+        let result = await attachReadings(text: text, spans: spans, treatSpanBoundariesAsAuthoritative: false, hardCuts: [])
         return result.annotatedSpans
     }
 
@@ -77,9 +77,10 @@ struct SpanReadingAttacher {
     func attachReadings(
         text: String,
         spans: [TextSpan],
-        treatSpanBoundariesAsAuthoritative: Bool
+        treatSpanBoundariesAsAuthoritative: Bool,
+        hardCuts: [Int] = []
     ) async -> Result {
-        ivlog("Stage2.attachReadings enter len=\(text.count) spans=\(spans.count) authoritative=\(treatSpanBoundariesAsAuthoritative)")
+        ivlog("Stage2.attachReadings enter len=\(text.count) spans=\(spans.count) authoritative=\(treatSpanBoundariesAsAuthoritative) hardCuts=\(hardCuts.count)")
         guard text.isEmpty == false, spans.isEmpty == false else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
             let semantic = spans.enumerated().map { idx, span in
@@ -96,7 +97,8 @@ struct SpanReadingAttacher {
         let key = ReadingAttachmentCacheKey(
             textHash: Self.hash(text),
             spanSignature: Self.signature(for: spans),
-            treatSpanBoundariesAsAuthoritative: treatSpanBoundariesAsAuthoritative
+            treatSpanBoundariesAsAuthoritative: treatSpanBoundariesAsAuthoritative,
+            hardCutsSignature: Self.signature(forCuts: hardCuts)
         )
         if let cached = await Self.cache.value(for: key) {
             let duration = Self.elapsedMilliseconds(since: start)
@@ -168,7 +170,8 @@ struct SpanReadingAttacher {
                         spans: spans,
                         annotatedSpans: annotated,
                         annotations: annotations,
-                        treatSpanBoundariesAsAuthoritative: treatSpanBoundariesAsAuthoritative
+                        treatSpanBoundariesAsAuthoritative: treatSpanBoundariesAsAuthoritative,
+                        hardCuts: hardCuts
                     )
                 }
                 await ivlog("Stage2.5.detached end out=\(out.count)")
@@ -195,7 +198,8 @@ struct SpanReadingAttacher {
         spans: [TextSpan],
         annotatedSpans: [AnnotatedSpan],
         annotations: [MeCabAnnotation],
-        treatSpanBoundariesAsAuthoritative: Bool
+        treatSpanBoundariesAsAuthoritative: Bool,
+        hardCuts: [Int]
     ) async -> [SemanticSpan] {
         // INVESTIGATION/ROLLBACK (2026-01-05)
         // Merge-only, multi-pass boundary repair.
@@ -205,7 +209,6 @@ struct SpanReadingAttacher {
         //  3) No head/dependent logic, no syntactic parsing, no POS ownership.
         // Merge criteria (only):
         //  • A MeCab token whose surface range exactly covers multiple adjacent Stage-1 spans → merge them.
-        //  • Explicit small whitelist merges (e.g. verb stem + auxiliaries like てる, ていく, てくる).
         // Safety:
         //  • Never cross hard boundaries (punctuation / whitespace). We enforce contiguity and reject hard-boundary spans.
 
@@ -220,24 +223,63 @@ struct SpanReadingAttacher {
 
         ivlog("Stage2.5.mergeOnly start spans=\(spans.count)")
 
-        // User-amended spans are authoritative: do not regroup across their boundaries.
-        guard treatSpanBoundariesAsAuthoritative == false else {
-            let semantic = passthroughSemanticSpans(reason: "authoritative boundaries")
+        // RANGE-SCOPED AUTHORITY (2026-01-05)
+        // When the caller provides `baseSpans` (manual token edits), we must still run Stage-2.5,
+        // but we must not merge across *explicit user-inserted* boundaries.
+        // Important nuance:
+        // - The app stores a full span snapshot when the user edits anything, which includes many
+        //   boundaries that the user did not explicitly create.
+        // - If we treat all base-span edges as authoritative, we prevent useful regrouping and
+        //   cause regressions like “splitting 出逢ってか into 出逢って + か yields 出逢,って,か”.
+        // Therefore we diff amended spans vs fresh Stage-1 segmentation and treat ONLY inserted
+        // boundaries (splits) as non-crossable cuts. Stage-2.5 is merge-only, so deleted boundaries
+        // (merges) cannot be reintroduced here.
+        let authoritativeCuts: Set<Int> = await {
+            guard treatSpanBoundariesAsAuthoritative else { return [] }
 
-#if DEBUG
-            assert(semantic.count == spans.count, "Stage2 invariant failed: authoritative semantic passthrough count mismatch")
-            var expectedCursor = 0
-            for (idx, s) in semantic.enumerated() {
-                assert(s.sourceSpanIndices.lowerBound == idx && s.sourceSpanIndices.upperBound == (idx + 1), "Stage2 invariant failed: authoritative semantic indices mismatch at \(idx)")
-                assert(s.range.location == expectedCursor, "Stage2 invariant failed: authoritative semantic ranges have gap/overlap at \(s.range.location), expected \(expectedCursor)")
-                expectedCursor = NSMaxRange(s.range)
+            func endBoundaries(of spans: [TextSpan]) -> Set<Int> {
+                var out: Set<Int> = []
+                out.reserveCapacity(min(256, spans.count))
+                for s in spans {
+                    let end = NSMaxRange(s.range)
+                    if end > 0, end < nsText.length {
+                        out.insert(end)
+                    }
+                }
+                return out
             }
-            assert(expectedCursor == nsText.length, "Stage2 invariant failed: authoritative semantic ranges do not cover full text")
-#endif
 
-            CustomLogger.shared.debug("[STAGE-2] end spansIn=\(spans.count) spansOut=\(semantic.count)")
-            return semantic
-        }
+            let amendedEnds = endBoundaries(of: spans)
+
+            // We diff against a fresh Stage-1 segmentation to detect *which* boundaries are custom.
+            // If segmentation fails, fall back conservatively to treating all amended boundaries as cuts.
+            do {
+                let stage1 = try await SegmentationService.shared.segment(text: text)
+                let stage1Ends = endBoundaries(of: stage1)
+
+                let insertedBoundaries = amendedEnds.subtracting(stage1Ends)
+
+                // Inserted boundaries (user splits) are always non-crossable cuts.
+                // NOTE: We do NOT treat all katakana-internal boundaries as authoritative here.
+                // Explicit user splits are persisted separately as `hardCuts` and enforced below.
+                return insertedBoundaries
+            } catch {
+                CustomLogger.shared.debug("[STAGE-2.5] authoritativeCuts: fallback (segmentation failed)")
+                return amendedEnds
+            }
+        }()
+
+        let explicitCuts: Set<Int> = {
+            guard hardCuts.isEmpty == false else { return [] }
+            var out: Set<Int> = []
+            out.reserveCapacity(min(64, hardCuts.count))
+            for c in hardCuts {
+                if c > 0, c < nsText.length { out.insert(c) }
+            }
+            return out
+        }()
+
+        let allAuthoritativeCuts = authoritativeCuts.union(explicitCuts)
 
         // Lexicon membership (JMdict trie). Optional secondary check.
         // IMPORTANT: must not trigger trie building or SQLite; only use cached trie.
@@ -250,7 +292,6 @@ struct SpanReadingAttacher {
             var spansEnd: Int = 0
 
             var mecabBlanketMerges: Int = 0
-            var whitelistMerges: Int = 0
 
             var kanjiKanaCandidates: Int = 0
             var kanjiKanaAccepted: Int = 0
@@ -317,6 +358,22 @@ struct SpanReadingAttacher {
             return true
         }
 
+        func isKatakanaLikeScalar(_ scalar: UnicodeScalar) -> Bool {
+            // Fullwidth katakana block (includes '・' U+30FB and 'ー' U+30FC).
+            if (0x30A0...0x30FF).contains(scalar.value) { return true }
+            // Halfwidth katakana block.
+            // Include dakuten/handakuten marks (FF9E/FF9F) so sequences like "ｶﾞ" are treated as katakana-like.
+            if (0xFF66...0xFF9F).contains(scalar.value) { return true }
+            // Halfwidth prolonged sound mark.
+            if scalar.value == 0xFF70 { return true }
+            return false
+        }
+
+        func isKatakanaLikeString(_ s: String) -> Bool {
+            guard s.isEmpty == false else { return false }
+            return s.unicodeScalars.allSatisfy(isKatakanaLikeScalar)
+        }
+
         func isHiraganaOnly(_ s: String) -> Bool {
             guard s.isEmpty == false else { return false }
             for scalar in s.unicodeScalars {
@@ -357,6 +414,18 @@ struct SpanReadingAttacher {
 
         func merge(_ segments: inout [Segment], from start: Int, to endExclusive: Int) -> Bool {
             guard start >= 0, endExclusive <= segments.count, endExclusive - start >= 2 else { return false }
+
+            // Do not merge across authoritative boundaries.
+            if allAuthoritativeCuts.isEmpty == false {
+                var j = start
+                while j < endExclusive - 1 {
+                    let join = NSMaxRange(segments[j].range)
+                    if allAuthoritativeCuts.contains(join) {
+                        return false
+                    }
+                    j += 1
+                }
+            }
 
             // Never cross hard boundaries: only merge if spans are strictly contiguous in UTF-16.
             var cursor = segments[start].range.location
@@ -408,6 +477,48 @@ struct SpanReadingAttacher {
                 if r.isEmpty == false { return r }
             }
 
+            // Next-best: assemble reading from MeCab token coverage over this exact range.
+            // This prevents duplicated readings when individual Stage-1 spans each inherit a larger token's reading.
+            // (e.g. 出 + 逢 both getting "であ" separately.)
+            let segStart = segment.range.location
+            let segEnd = NSMaxRange(segment.range)
+            if segStart != NSNotFound, segEnd > segStart {
+                var cursor = segStart
+                var out = ""
+                while cursor < segEnd {
+                    // Choose a token that starts at the cursor and stays within the segment.
+                    var best: MeCabAnnotation?
+                    for t in annotations {
+                        if t.range.location != cursor { continue }
+                        let tEnd = NSMaxRange(t.range)
+                        if tEnd > segEnd { continue }
+                        if let currentBest = best {
+                            if t.range.length > currentBest.range.length {
+                                best = t
+                            }
+                        } else {
+                            best = t
+                        }
+                    }
+
+                    guard let token = best else {
+                        out = ""
+                        break
+                    }
+
+                    let chunkSource = token.reading.isEmpty ? token.surface : token.reading
+                    out.append(chunkSource)
+                    cursor = NSMaxRange(token.range)
+                }
+
+                if out.isEmpty == false {
+                    let normalized = Self.toHiragana(out).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if normalized.isEmpty == false {
+                        return normalized
+                    }
+                }
+            }
+
             // Fallback: concatenate underlying span readings, including kana-only surfaces.
             var out = ""
             for idx in segment.sourceSpanIndices {
@@ -436,8 +547,6 @@ struct SpanReadingAttacher {
             }
         }
 
-        let whitelistMerges: Set<String> = ["てる", "ていく", "てくる"]
-
         var segments: [Segment] = spans.enumerated().map { idx, span in
             Segment(range: span.range, sourceSpanIndices: idx..<(idx + 1))
         }
@@ -460,6 +569,17 @@ struct SpanReadingAttacher {
                     var mergedThisIndex = false
                     for token in candidates {
                         if let endExclusive = tokenEndExclusiveCoveringSegments(tokenRange: token.range, segments: segments, startIndex: i) {
+                            // IMPORTANT: preserve Stage-1 katakana decomposition.
+                            // MeCab often emits a single token for a long katakana run; if we blindly merge,
+                            // we undo Stage-1's lexicon-driven DP splitting (e.g. ロンリー|ロンリー|ハート).
+                            // However, if Stage-1 produced only singleton katakana spans (no lex hits),
+                            // allow MeCab to merge so we don't leave per-character katakana tokens.
+                            let candidateSlice = segments[i..<endExclusive]
+                            let allKatakanaLike = candidateSlice.allSatisfy { isKatakanaLikeString(surface(of: $0)) }
+                            let hasAnyNonSingleton = candidateSlice.contains { $0.range.length > 1 }
+                            if allKatakanaLike && hasAnyNonSingleton {
+                                continue
+                            }
                             if merge(&segments, from: i, to: endExclusive) {
                                 didMerge = true
                                 counters.mecabBlanketMerges += 1
@@ -547,6 +667,56 @@ struct SpanReadingAttacher {
                     }
                 }
 
+                // Rule 2.5: Kanji+kanji compound merge (adjacent only).
+                // Motivation: allow compounds like 出 + 逢 to merge when MeCab or the lexicon says they're a unit.
+                // Merge A + B iff:
+                //  1) A contains at least one Kanji
+                //  2) B contains at least one Kanji
+                //  3) A and B are contiguous and neither is a hard boundary
+                //  4) Either:
+                //     a) MeCab has a token starting at A that extends at least through the end of (A ∪ B)
+                //     b) (secondary) (A+B) exists in cached lexicon trie
+                if i + 1 < segments.count {
+                    let leftSeg = segments[i]
+                    let rightSeg = segments[i + 1]
+                    let left = surface(of: leftSeg)
+                    let right = surface(of: rightSeg)
+
+                    let contiguous = NSMaxRange(leftSeg.range) == rightSeg.range.location
+                    if contiguous,
+                       isHardBoundarySurface(left) == false,
+                       isHardBoundarySurface(right) == false,
+                       containsKanji(left),
+                       containsKanji(right) {
+                        let combinedRange = NSRange(location: leftSeg.range.location, length: leftSeg.range.length + rightSeg.range.length)
+                        let combinedEnd = NSMaxRange(combinedRange)
+
+                        var mecabExtendsThroughCombined = false
+                        if let startingTokens = tokensByStart[combinedRange.location] {
+                            for token in startingTokens {
+                                if NSMaxRange(token.range) >= combinedEnd {
+                                    mecabExtendsThroughCombined = true
+                                    break
+                                }
+                            }
+                        }
+
+                        var lexiconOk = false
+                        if mecabExtendsThroughCombined == false {
+                            if let trie {
+                                lexiconOk = trie.containsWord(in: nsText, from: combinedRange.location, through: combinedEnd, requireKanji: true)
+                            }
+                        }
+
+                        if mecabExtendsThroughCombined || lexiconOk {
+                            if merge(&segments, from: i, to: i + 2) {
+                                didMerge = true
+                                continue
+                            }
+                        }
+                    }
+                }
+
                 // Rule 3: Kanji-head + kana-kana chain merge (adjacent only).
                 // Merge A + B + C iff ALL are true:
                 //  1) A contains at least one Kanji scalar
@@ -621,22 +791,6 @@ struct SpanReadingAttacher {
                     }
                 }
 
-                // Rule 4: explicit whitelist merges (adjacent only).
-                if i + 1 < segments.count {
-                    let left = surface(of: segments[i])
-                    let right = surface(of: segments[i + 1])
-                    let contiguous = NSMaxRange(segments[i].range) == segments[i + 1].range.location
-                    if contiguous && isHardBoundarySurface(left) == false && isHardBoundarySurface(right) == false {
-                        if whitelistMerges.contains(right) {
-                            if merge(&segments, from: i, to: i + 2) {
-                                didMerge = true
-                                counters.whitelistMerges += 1
-                                continue
-                            }
-                        }
-                    }
-                }
-
                 i += 1
             }
 
@@ -663,15 +817,15 @@ struct SpanReadingAttacher {
 
         CustomLogger.shared.debug(
             "[STAGE-2.5] mergeOnly summary passes=\(counters.passCount) spans start=\(counters.spansStart) end=\(counters.spansEnd) " +
-                "mecabBlanket=\(counters.mecabBlanketMerges) whitelist=\(counters.whitelistMerges) " +
-                "kanjiKana cand=\(counters.kanjiKanaCandidates) ok=\(counters.kanjiKanaAccepted) " +
-                "rej(HB=\(counters.kanjiKanaRejected_hardBoundary) contig=\(counters.kanjiKanaRejected_notContiguous) " +
-                "leftEndKanji=\(counters.kanjiKanaRejected_leftEndNotKanji) rightHira=\(counters.kanjiKanaRejected_rightNotAllHiragana) " +
-                "mecabCross=\(counters.kanjiKanaRejected_noMecabCrossingToken) lex=\(counters.kanjiKanaRejected_notInLexiconSurfaceSet))"
-                " kanjiKanaChain cand=\(counters.kanjiKanaChainCandidates) ok=\(counters.kanjiKanaChainAccepted) " +
-                "rej(HB=\(counters.kanjiKanaChainRejected_hardBoundary) contig=\(counters.kanjiKanaChainRejected_notContiguous) " +
-                "leftKanji=\(counters.kanjiKanaChainRejected_leftNoKanji) hira=\(counters.kanjiKanaChainRejected_BorCNotAllHiragana) " +
-                "mecab=\(counters.kanjiKanaChainRejected_noMecabSingleTokenCover) lex=\(counters.kanjiKanaChainRejected_notInLexiconSurfaceSet))"
+            "mecabBlanket=\(counters.mecabBlanketMerges) " +
+            "kanjiKana cand=\(counters.kanjiKanaCandidates) ok=\(counters.kanjiKanaAccepted) " +
+            "rej(HB=\(counters.kanjiKanaRejected_hardBoundary) contig=\(counters.kanjiKanaRejected_notContiguous) " +
+            "leftEndKanji=\(counters.kanjiKanaRejected_leftEndNotKanji) rightHira=\(counters.kanjiKanaRejected_rightNotAllHiragana) " +
+            "mecabCross=\(counters.kanjiKanaRejected_noMecabCrossingToken) lex=\(counters.kanjiKanaRejected_notInLexiconSurfaceSet)) " +
+            "kanjiKanaChain cand=\(counters.kanjiKanaChainCandidates) ok=\(counters.kanjiKanaChainAccepted) " +
+            "rej(HB=\(counters.kanjiKanaChainRejected_hardBoundary) contig=\(counters.kanjiKanaChainRejected_notContiguous) " +
+            "leftKanji=\(counters.kanjiKanaChainRejected_leftNoKanji) hira=\(counters.kanjiKanaChainRejected_BorCNotAllHiragana) " +
+            "mecab=\(counters.kanjiKanaChainRejected_noMecabSingleTokenCover) lex=\(counters.kanjiKanaChainRejected_notInLexiconSurfaceSet))"
         )
         return semantic
     }
@@ -1051,6 +1205,17 @@ struct SpanReadingAttacher {
         return hasher.finalize()
     }
 
+    private static func signature(forCuts cuts: [Int]) -> Int {
+        guard cuts.isEmpty == false else { return 0 }
+        var hasher = Hasher()
+        hasher.combine(cuts.count)
+        // Order-independent.
+        for c in cuts.sorted() {
+            hasher.combine(c)
+        }
+        return hasher.finalize()
+    }
+
     private static func elapsedMilliseconds(since start: CFAbsoluteTime) -> Double {
         (CFAbsoluteTimeGetCurrent() - start) * 1000
     }
@@ -1082,15 +1247,20 @@ private struct ReadingAttachmentCacheKey: Sendable, nonisolated Hashable {
     let textHash: Int
     let spanSignature: Int
     let treatSpanBoundariesAsAuthoritative: Bool
+    let hardCutsSignature: Int
 
     nonisolated static func == (lhs: ReadingAttachmentCacheKey, rhs: ReadingAttachmentCacheKey) -> Bool {
-        lhs.textHash == rhs.textHash && lhs.spanSignature == rhs.spanSignature && lhs.treatSpanBoundariesAsAuthoritative == rhs.treatSpanBoundariesAsAuthoritative
+        lhs.textHash == rhs.textHash &&
+        lhs.spanSignature == rhs.spanSignature &&
+        lhs.treatSpanBoundariesAsAuthoritative == rhs.treatSpanBoundariesAsAuthoritative &&
+        lhs.hardCutsSignature == rhs.hardCutsSignature
     }
 
     nonisolated func hash(into hasher: inout Hasher) {
         hasher.combine(textHash)
         hasher.combine(spanSignature)
         hasher.combine(treatSpanBoundariesAsAuthoritative)
+        hasher.combine(hardCutsSignature)
     }
 }
 

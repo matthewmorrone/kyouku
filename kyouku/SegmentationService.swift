@@ -43,12 +43,11 @@ actor SegmentationService {
 
     func segment(text: String) async throws -> [TextSpan] {
         guard text.isEmpty == false else { return [] }
-        ivlog("Stage1.segment enter len=\(text.count)")
+        await CustomLogger.shared.debug("[Segmentation] enter len=\(text.count)")
         let overallStart = CFAbsoluteTimeGetCurrent()
         let segInterval = signposter.beginInterval("Segment", id: .exclusive, "len=\(text.count)")
         let key = SegmentationCacheKey(textHash: Self.hash(text), length: text.utf16.count)
         if let cached = cache[key] {
-            ivlog("Stage1.segment cacheHit spans=\(cached.count)")
             await CustomLogger.shared.debug("[Segmentation] Cache hit for len=\(text.count) -> \(cached.count) spans.")
             signposter.endInterval("Segment", segInterval)
             await CustomLogger.shared.print("[STAGE-1 SEGMENTS @ SEGMENTATION]")
@@ -70,24 +69,20 @@ actor SegmentationService {
 
         let rangesInterval = signposter.beginInterval("SegmentRanges")
         let segmentationStart = CFAbsoluteTimeGetCurrent()
-        let ranges = await ivtimeAsync("Stage1.segmentRanges") {
-            await segmentRanges(using: trie, text: nsText)
-        }
+        let ranges = await segmentRanges(using: trie, text: nsText)
         let segmentationMs = (CFAbsoluteTimeGetCurrent() - segmentationStart) * 1000
         await CustomLogger.shared.debug("SegmentationService: segmentRanges took \(String(format: "%.3f", segmentationMs)) ms.")
         signposter.endInterval("SegmentRanges", rangesInterval)
 
         let mapInterval = signposter.beginInterval("MapRangesToSpans")
         let mapStart = CFAbsoluteTimeGetCurrent()
-        let spans: [TextSpan] = ivtime("Stage1.mapRangesToSpans") {
-            ranges.flatMap { segmented -> [TextSpan] in
-                guard let trimmedRange = Self.trimmedRange(from: segmented.range, in: nsText) else { return [] }
-                let newlineSeparated = Self.splitRangeByNewlines(trimmedRange, in: nsText)
-                return newlineSeparated.compactMap { segment -> TextSpan? in
-                    guard let clamped = Self.trimmedRange(from: segment, in: nsText) else { return nil }
-                    let surface = nsText.substring(with: clamped)
-                    return TextSpan(range: clamped, surface: surface, isLexiconMatch: segmented.isLexiconMatch)
-                }
+        let spans: [TextSpan] = ranges.flatMap { segmented -> [TextSpan] in
+            guard let trimmedRange = Self.trimmedRange(from: segmented.range, in: nsText) else { return [] }
+            let newlineSeparated = Self.splitRangeByNewlines(trimmedRange, in: nsText)
+            return newlineSeparated.compactMap { segment -> TextSpan? in
+                guard let clamped = Self.trimmedRange(from: segment, in: nsText) else { return nil }
+                let surface = nsText.substring(with: clamped)
+                return TextSpan(range: clamped, surface: surface, isLexiconMatch: segmented.isLexiconMatch)
             }
         }
         let mapMs = (CFAbsoluteTimeGetCurrent() - mapStart) * 1000
@@ -99,7 +94,7 @@ actor SegmentationService {
 
         store(spans, for: key)
         let overallDurationMsDouble = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-        ivlog("Stage1.segment exit spans=\(spans.count) dt=\(String(format: "%.2f", overallDurationMsDouble))ms")
+        await CustomLogger.shared.debug("[Segmentation] exit spans=\(spans.count) dt=\(String(format: "%.2f", overallDurationMsDouble))ms")
         await CustomLogger.shared.debug("Segmented text length \(text.count) into \(spans.count) spans in \(String(format: "%.3f", overallDurationMsDouble)) ms (trie: \(String(format: "%.3f", trieLoadMs)) ms, segment: \(String(format: "%.3f", segmentationMs)) ms, map: \(String(format: "%.3f", mapMs)) ms).")
         signposter.endInterval("Segment", segInterval)
         return spans
@@ -125,7 +120,7 @@ actor SegmentationService {
         guard let pending = start, pending < cursor else { return false }
         let pendingRange = NSRange(location: pending, length: cursor - pending)
         if let scriptKind = kind, scriptKind == .katakana {
-            ranges.append(contentsOf: await Self.splitKatakana(range: pendingRange, text: text, trie: trie))
+            ranges.append(contentsOf: splitKatakana(range: pendingRange, text: text, trie: trie))
         } else {
             ranges.append(SegmentedRange(range: pendingRange, isLexiconMatch: false))
         }
@@ -134,25 +129,120 @@ actor SegmentationService {
         return true
     }
 
-    private static func splitKatakana(range: NSRange, text: NSString, trie: LexiconTrie) async -> [SegmentedRange] {
+    private func splitKatakana(range: NSRange, text: NSString, trie: LexiconTrie) -> [SegmentedRange] {
         var results: [SegmentedRange] = []
-        let swiftText: String = text as String
-        let end = NSMaxRange(range)
-        var cursor = range.location
-        while cursor < end {
-            let current = cursor
-            let matchEnd: Int? = await MainActor.run { [current, swiftText] in
-                let ns = swiftText as NSString
-                return trie.longestMatchEnd(in: ns, from: current, requireKanji: false)
-            }
-            if let matchEnd, matchEnd <= end, matchEnd > cursor {
-                results.append(SegmentedRange(range: NSRange(location: cursor, length: matchEnd - cursor), isLexiconMatch: true))
-                cursor = matchEnd
-                continue
-            }
-            results.append(SegmentedRange(range: NSRange(location: cursor, length: 1), isLexiconMatch: false))
-            cursor += 1
+        let runStart = range.location
+        let runEnd = NSMaxRange(range)
+        let runLength = runEnd - runStart
+        guard runLength > 0 else { return [] }
+
+        var matchEndsByOffset: [[Int]] = Array(repeating: [], count: runLength)
+        var anyMatches = false
+
+        for offset in 0..<runLength {
+            let abs = runStart + offset
+            let ends = trie.allMatchEnds(in: text, from: abs, requireKanji: false)
+            if ends.isEmpty { continue }
+            let filtered = ends.filter { $0 <= runEnd }
+            if filtered.isEmpty { continue }
+            matchEndsByOffset[offset] = filtered
+            anyMatches = true
         }
+
+        // Defensive fallback: if the “all ends” traversal yields nothing across the entire run,
+        // try the simpler longest-match traversal.
+        if anyMatches == false {
+            for offset in 0..<runLength {
+                let abs = runStart + offset
+                if let end = trie.longestMatchEnd(in: text, from: abs, requireKanji: false), end <= runEnd, end > abs {
+                    matchEndsByOffset[offset] = [end]
+                    anyMatches = true
+                }
+            }
+        }
+
+        // Focused probe for the reported failing case.
+        // Intentionally not behind `#if DEBUG` so we can diagnose Release builds.
+        let runSurface = text.substring(with: NSRange(location: runStart, length: runLength))
+        if runSurface.contains("ロンリーロンリーハート") {
+            let probeLonely = ("ロンリー" as NSString)
+            let probeHeart = ("ハート" as NSString)
+            let hasLonely = trie.containsWord(in: probeLonely, from: 0, through: probeLonely.length, requireKanji: false)
+            let hasHeart = trie.containsWord(in: probeHeart, from: 0, through: probeHeart.length, requireKanji: false)
+            CustomLogger.shared.print("[KATAKANA PROBE] run=\(runSurface) anyMatches=\(anyMatches) trieHasロンリー=\(hasLonely) trieHasハート=\(hasHeart)")
+            if runLength >= 11 {
+                let offsets = [0, 4, 8]
+                for o in offsets where o < runLength {
+                    let abs = runStart + o
+                    let ends = matchEndsByOffset[o]
+                    let pieces = ends.map { end -> String in
+                        let r = NSRange(location: abs, length: end - abs)
+                        return text.substring(with: r)
+                    }
+                    CustomLogger.shared.print("[KATAKANA PROBE] offset=\(o) ends=\(ends) surfaces=\(pieces)")
+                }
+            }
+        }
+
+        struct State {
+            var nonLexChars: Int
+            var segments: Int
+            var nextOffset: Int
+            var isLex: Bool
+        }
+
+        let inf = Int.max / 8
+        var dp: [State] = Array(
+            repeating: State(nonLexChars: inf, segments: inf, nextOffset: -1, isLex: false),
+            count: runLength + 1
+        )
+        dp[runLength] = State(nonLexChars: 0, segments: 0, nextOffset: runLength, isLex: false)
+
+        func better(_ a: State, than b: State) -> Bool {
+            if a.nonLexChars != b.nonLexChars { return a.nonLexChars < b.nonLexChars }
+            // Among equally-covered paths, prefer fewer segments (longer words).
+            if a.segments != b.segments { return a.segments < b.segments }
+            // Stable tie-break: prefer advancing further.
+            return a.nextOffset > b.nextOffset
+        }
+
+        // DP from end → start: minimize non-lex chars, then minimize number of segments.
+        if runLength > 0 {
+            for i in stride(from: runLength - 1, through: 0, by: -1) {
+                var best = State(nonLexChars: inf, segments: inf, nextOffset: i + 1, isLex: false)
+
+                // Option A: take a lexicon word starting here.
+                for endAbs in matchEndsByOffset[i] {
+                    let j = endAbs - runStart
+                    guard j > i, j <= runLength else { continue }
+                    let tail = dp[j]
+                    if tail.nonLexChars >= inf { continue }
+                    let cand = State(nonLexChars: tail.nonLexChars, segments: tail.segments + 1, nextOffset: j, isLex: true)
+                    if better(cand, than: best) { best = cand }
+                }
+
+                // Option B: fallback singleton.
+                let tail = dp[i + 1]
+                if tail.nonLexChars < inf {
+                    let cand = State(nonLexChars: tail.nonLexChars + 1, segments: tail.segments + 1, nextOffset: i + 1, isLex: false)
+                    if better(cand, than: best) { best = cand }
+                }
+
+                dp[i] = best
+            }
+        }
+
+        // Reconstruct.
+        var offset = 0
+        while offset < runLength {
+            let s = dp[offset]
+            let absStart = runStart + offset
+            let absEnd = runStart + s.nextOffset
+            let len = max(1, absEnd - absStart)
+            results.append(SegmentedRange(range: NSRange(location: absStart, length: len), isLexiconMatch: s.isLex))
+            offset = s.nextOffset
+        }
+
         return results
     }
 
@@ -254,6 +344,25 @@ actor SegmentationService {
         var pendingNonKanjiKind: ScriptKind? = nil
         while cursor < length {
             let currentUnit = text.character(at: cursor)
+
+            // Katakana runs are intentionally decomposed (lexicon DP) instead of using
+            // greedy longest-match at each cursor. This preserves tokenization like
+            // "ロンリーロンリーハート" → "ロンリー","ロンリー","ハート" even when the
+            // full concatenation exists in the lexicon.
+            if Self.isKatakana(currentUnit) {
+                nonKanjiCount += 1
+                let kind: ScriptKind = .katakana
+                if let currentKind = pendingNonKanjiKind, currentKind != kind {
+                    _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
+                }
+                if pendingNonKanjiStart == nil {
+                    pendingNonKanjiStart = cursor
+                    pendingNonKanjiKind = kind
+                }
+                cursor += 1
+                continue
+            }
+
             trieLookups += 1
             let lookupStart = CFAbsoluteTimeGetCurrent()
             let current = cursor
@@ -361,6 +470,11 @@ actor SegmentationService {
             let start = range.range.location
             guard start >= 0, start < text.length else { continue }
             let firstUnit = text.character(at: start)
+            // Katakana runs intentionally allow non-longest lexicon matches due to
+            // DP-based decomposition (e.g. splitting concatenations into multiple words).
+            if Self.isKatakana(firstUnit) {
+                continue
+            }
             let requireKanjiMatch = (Self.isHiragana(firstUnit) == false && Self.isKatakana(firstUnit) == false)
             let computedEnd: Int? = await MainActor.run { [start, swiftText, requireKanjiMatch] in
                 let ns = swiftText as NSString
@@ -432,6 +546,9 @@ actor SegmentationService {
 
     private static func isKatakana(_ unit: unichar) -> Bool {
         if (0x30A0...0x30FF).contains(Int(unit)) { return true }
+        // Halfwidth katakana block.
+        // Include dakuten/handakuten marks (FF9E/FF9F) so sequences like "ｶﾞ" stay in the run.
+        if (0xFF66...0xFF9F).contains(Int(unit)) { return true }
         if unit == 0x30FC || unit == 0xFF70 { return true } // prolonged sound marks
         return false
     }
@@ -447,7 +564,7 @@ actor SegmentationService {
 
     private static func scriptKind(for scalar: UnicodeScalar) -> ScriptKind {
         if (0x3040...0x309F).contains(Int(scalar.value)) { return .hiragana }
-        if (0x30A0...0x30FF).contains(Int(scalar.value)) || scalar.value == 0x30FC || scalar.value == 0xFF70 {
+        if (0x30A0...0x30FF).contains(Int(scalar.value)) || (0xFF66...0xFF9F).contains(Int(scalar.value)) || scalar.value == 0x30FC || scalar.value == 0xFF70 {
             return .katakana
         }
         if (0x0030...0x0039).contains(Int(scalar.value)) { return .numeric }

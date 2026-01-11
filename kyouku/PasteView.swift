@@ -37,7 +37,6 @@ struct PasteView: View {
     @State private var furiganaSemanticSpans: [SemanticSpan] = []
     @State private var furiganaRefreshToken: Int = 0
     @State private var furiganaTaskHandle: Task<Void, Never>? = nil
-    @State private var suppressNextEditingRefresh: Bool = false
     @StateObject private var inlineLookup = DictionaryLookupViewModel()
     @StateObject private var selectionController = TokenSelectionController()
     @State private var overrideSignature: Int = 0
@@ -48,6 +47,14 @@ struct PasteView: View {
     @State private var skipNextInitialFuriganaEnsure: Bool = false
     @State private var isDictionarySheetPresented: Bool = false
     @State private var measuredSheetHeight: CGFloat = 0
+
+    // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
+    @State private var incrementalPopupHits: [IncrementalLookupHit] = []
+    @State private var isIncrementalPopupVisible: Bool = false
+    @State private var incrementalLookupTask: Task<Void, Never>? = nil
+    @State private var savedWordOverlays: [RubyText.TokenOverlay] = []
+    @State private var incrementalSelectedCharacterRange: NSRange? = nil
+    @State private var incrementalSheetDetent: PresentationDetent = .height(420)
 
     @State private var showWordDefinitionsSheet: Bool = false
     @State private var wordDefinitionsSurface: String = ""
@@ -127,12 +134,14 @@ struct PasteView: View {
 
     
     private static let coordinateSpaceName = "PasteViewRootSpace"
-    private static let inlineDictionaryPanelEnabledFlag = false
-    private static let dictionaryPopupEnabledFlag = true // Temporary debug switch so highlight behavior can be isolated without showing the popup.
+    private static let inlineDictionaryPanelEnabledFlag = true
+    private static let dictionaryPopupEnabledFlag = true // Tap in paste area shows popup + highlight.
+    private static let incrementalLookupEnabledFlag = false
     private static let sheetMaxHeightFraction: CGFloat = 0.8
     private static let sheetExtraPadding: CGFloat = 36
     private let furiganaPipeline = FuriganaPipelineService()
-    private var dictionaryPopupEnabled: Bool { Self.dictionaryPopupEnabledFlag }
+    private var incrementalLookupEnabled: Bool { Self.incrementalLookupEnabledFlag }
+    private var dictionaryPopupEnabled: Bool { Self.dictionaryPopupEnabledFlag && incrementalLookupEnabled == false }
     private var inlineDictionaryPanelEnabled: Bool { Self.inlineDictionaryPanelEnabledFlag && dictionaryPopupEnabled }
     private var sheetDictionaryPanelEnabled: Bool { dictionaryPopupEnabled && inlineDictionaryPanelEnabled == false }
     private var pasteAreaDictionaryEnabled: Bool { false }
@@ -150,362 +159,224 @@ struct PasteView: View {
         ]
     }
     private var unknownTokenColor: UIColor { UIColor.systemOrange }
-    private var tokenHighlightsEnabled: Bool { alternateTokenColors || highlightUnknownTokens }
+    private var tokenHighlightsEnabled: Bool {
+        guard incrementalLookupEnabled == false else { return false }
+        return alternateTokenColors || highlightUnknownTokens
+    }
     private var sheetSelectionBinding: Binding<TokenSelectionContext?> {
         Binding(
-            get: { showTokensPopover ? nil : sheetSelection },
+            // The Extract Words sheet relies on this binding to display the in-sheet
+            // dictionary popup. Do not nil it out while the sheet is presented.
+            get: { sheetSelection },
             set: { sheetSelection = $0 }
         )
     }
     private var commonParticleSet: Set<String> {
         Set(CommonParticleSettings.decodeList(from: commonParticlesRaw))
     }
-    
-    private var preferredOverscrollPadding: CGFloat {
-        guard isDictionarySheetPresented else { return 0 }
-        let screenHeight: CGFloat = {
-            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-                return scene.screen.bounds.height
-            }
-            return 480
-        }()
-        let halfScreen = screenHeight * 0.5
-        let measured = max(0, measuredSheetHeight + 50) // add some breathing room
-        let basePadding = max(measured, halfScreen)
-        return basePadding * 0.75
+
+    private var navigationTitleText: String {
+        noteTitleInput.isEmpty ? "Paste" : noteTitleInput
     }
 
     var body: some View {
         NavigationStack {
-            contentView
+            applyDictionarySheet(to: coreContent)
+        }
+        .coordinateSpace(name: Self.coordinateSpaceName)
+        .onPreferenceChange(TokenActionPanelFramePreferenceKey.self) { newValue in
+            tokenPanelFrame = newValue
         }
         .sheet(isPresented: $showWordDefinitionsSheet) {
             NavigationStack {
-                WordDefinitionsView(surface: wordDefinitionsSurface, kana: wordDefinitionsKana, sourceNoteID: currentNote?.id)
+                WordDefinitionsView(
+                    surface: wordDefinitionsSurface,
+                    kana: wordDefinitionsKana,
+                    sourceNoteID: currentNote?.id
+                )
             }
         }
-    }
-
-    @ViewBuilder
-    private var contentView: some View {
-        if inlineDictionaryPanelEnabled {
-            inlineDictionaryContainer
-        } else {
-            applyDictionarySheet(to: coreContent)
-        }
-    }
-
-    @ViewBuilder
-    private var inlineDictionaryContainer: some View {
-        if #available(iOS 17.0, *) {
-            coreContent
-                .coordinateSpace(name: Self.coordinateSpaceName)
-                .onPreferenceChange(TokenActionPanelFramePreferenceKey.self) { frame in
-                    tokenPanelFrame = frame
-                }
-        } else {
-            coreContent
-        }
-    }
-
-    private var tokenListButton: some View {
-        Button {
-            showTokensPopover = true
-        } label: {
-            Image(systemName: "list.bullet.rectangle")
-        }
-        .accessibilityLabel("Extract Words")
-        .sheet(isPresented: $showTokensPopover) {
-            tokenListSheet
-                .presentationDetents([.large])
+        .sheet(isPresented: $isIncrementalPopupVisible, onDismiss: {
+            dismissIncrementalLookupSheet()
+        }) {
+            incrementalLookupSheet
+                .presentationDetents(incrementalSheetDetents, selection: $incrementalSheetDetent)
                 .presentationDragIndicator(.visible)
         }
     }
 
-    private var transformPasteTextButton: some View {
-        Button {
-            let transformed = PasteTextTransforms.transform(inputText)
-            if transformed != inputText {
-                inputText = transformed
-            }
-        } label: {
-            Image(systemName: "character.cursor.ibeam")
-        }
-        .accessibilityLabel("Transform Paste Text")
-    }
-
-    private var resetSpansButton: some View {
-        Button {
-            // Intentionally reuse the global reset path shared with NotesView to keep behavior consistent.
-            resetAllCustomSpans()
-        } label: {
-            Image(systemName: "arrow.counterclockwise")
-        }
-        .accessibilityLabel("Reset Spans")
-    }
-
-    private var adjustedSpansButton: some View {
-        Button {
-            showAdjustedSpansPopover = true
-        } label: {
-            Image(systemName: "list.bullet")
-        }
-        .accessibilityLabel("Show Adjusted Spans")
-        .popover(isPresented: $showAdjustedSpansPopover) {
-            ScrollView {
-                Text(adjustedSpansDebugText)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .contextMenu {
-                        Button {
-                            UIPasteboard.general.string = adjustedSpansDebugText
-                        } label: {
-                            Label("Copy All", systemImage: "doc.on.doc")
-                        }
-                        if #available(iOS 16.0, *) {
-                            ShareLink(item: adjustedSpansDebugText) {
-                                Label("Share…", systemImage: "square.and.arrow.up")
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-            }
-        }
-    }
-
-    private var adjustedSpansDebugText: String {
-        guard let spans = furiganaSpans, spans.isEmpty == false else {
-            return "(No spans yet)"
-        }
-        return SegmentationService.describe(spans: spans.map(\.span))
-    }
-
     private var coreContent: some View {
+        let base = coreStack
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .navigationTitle(navigationTitleText)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { coreToolbar }
+            .safeAreaInset(edge: .bottom) { coreBottomInset }
+            .onAppear { onAppearHandler() }
+            .onDisappear {
+                NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+                furiganaTaskHandle?.cancel()
+            }
+
+        return base
+            .onChange(of: inputText) { _, newValue in
+                skipNextInitialFuriganaEnsure = false
+                clearSelection()
+                if incrementalLookupEnabled {
+                    incrementalLookupTask?.cancel()
+                    isIncrementalPopupVisible = false
+                    incrementalPopupHits = []
+                    incrementalSelectedCharacterRange = nil
+                    recomputeSavedWordOverlays()
+                }
+                DispatchQueue.main.async {
+                    syncNoteForInputChange(newValue)
+                }
+                PasteBufferStore.save(newValue)
+                if newValue.isEmpty {
+                    furiganaAttributedText = nil
+                    furiganaSpans = nil
+                    furiganaTaskHandle?.cancel()
+                }
+                triggerFuriganaRefreshIfNeeded(reason: "input changed", recomputeSpans: true)
+            }
+            .onChange(of: isEditing) { _, editing in
+                if editing {
+                    clearSelection()
+                }
+            }
+
+            .onChange(of: words.words.count) {
+                guard incrementalLookupEnabled else { return }
+                recomputeSavedWordOverlays()
+            }
+            .onChange(of: showFurigana) { _, enabled in
+                if enabled {
+                    triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: true)
+                } else {
+                    furiganaTaskHandle?.cancel()
+                }
+            }
+            .onChange(of: alternateTokenColors) { _, enabled in
+                triggerFuriganaRefreshIfNeeded(
+                    reason: enabled ? "alternate token colors toggled on" : "alternate token colors toggled off",
+                    recomputeSpans: false
+                )
+            }
+            .onChange(of: highlightUnknownTokens) { _, enabled in
+                triggerFuriganaRefreshIfNeeded(
+                    reason: enabled ? "unknown highlight toggled on" : "unknown highlight toggled off",
+                    recomputeSpans: false
+                )
+            }
+            .onChange(of: readingFuriganaSize) {
+                triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
+            }
+            .onChange(of: selectionController.tokenSelection?.id) { (_: String?, newID: String?) in
+                let newSelection = selectionController.tokenSelection
+                if newSelection == nil {
+                    if isDictionarySheetPresented {
+                        isDictionarySheetPresented = false
+                    }
+                    // Also clear the token panel frame when selection is cleared.
+                    tokenPanelFrame = nil
+                }
+                if dictionaryPopupEnabled {
+                    if let _ = newID {
+                        if let ctx = newSelection {
+                            let r = ctx.range
+                            CustomLogger.shared.debug("Dictionary popup shown (selection change) tokenIndex=\(ctx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
+                        } else {
+                            CustomLogger.shared.debug("Dictionary popup shown (selection change)")
+                        }
+                    } else {
+                        CustomLogger.shared.debug("Dictionary popup hidden (selection cleared)")
+                    }
+                }
+                handleSelectionLookup(for: newSelection?.surface ?? "")
+            }
+            .onChange(of: sheetSelection?.id) { (_: String?, newID: String?) in
+                guard dictionaryPopupEnabled else { return }
+                if let _ = newID {
+                    if let ctx = sheetSelection {
+                        let r = ctx.range
+                        CustomLogger.shared.debug("Dictionary popup shown (sheet binding) tokenIndex=\(ctx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface)")
+                    } else {
+                        CustomLogger.shared.debug("Dictionary popup shown (sheet binding)")
+                    }
+                } else {
+                    CustomLogger.shared.debug("Dictionary popup hidden (sheet binding cleared)")
+                }
+            }
+            .onChange(of: currentNote?.id) { _, newValue in
+                lastOpenedNoteIDRaw = newValue?.uuidString ?? ""
+                clearSelection()
+                overrideSignature = computeOverrideSignature()
+                updateCustomizedRanges()
+                if incrementalLookupEnabled {
+                    incrementalLookupTask?.cancel()
+                    isIncrementalPopupVisible = false
+                    incrementalPopupHits = []
+                    incrementalSelectedCharacterRange = nil
+                    recomputeSavedWordOverlays()
+                }
+                processPendingRouterResetRequest()
+            }
+            .onReceive(readingOverrides.$overrides) { _ in
+                handleOverridesExternalChange()
+            }
+            .onChange(of: router.pendingResetNoteID) { _, newValue in
+                pendingRouterResetNoteID = newValue
+                processPendingRouterResetRequest()
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if isDictionarySheetPresented {
+                    isDictionarySheetPresented = false
+                    clearSelection(resetPersistent: true)
+                }
+            }
+    }
+
+    private var coreStack: some View {
         ZStack(alignment: .bottom) {
             editorColumn
             inlineDictionaryOverlay
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle(noteTitleInput.isEmpty ? "Paste" : noteTitleInput)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                adjustedSpansButton
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 12) {
-                    transformPasteTextButton
-                    resetSpansButton
-                    tokenListButton
-                }
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if selectionController.tokenSelection == nil {
-                Color.clear.frame(height: 24)
-            }
-        }
-        .onAppear { onAppearHandler() }
-        .onDisappear {
-            NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
-            furiganaTaskHandle?.cancel()
-        }
-        .onChange(of: inputText) { _, newValue in
-            skipNextInitialFuriganaEnsure = false
-            clearSelection()
-            DispatchQueue.main.async {
-                syncNoteForInputChange(newValue)
-            }
-            PasteBufferStore.save(newValue)
-            if newValue.isEmpty {
-                furiganaAttributedText = nil
-                furiganaSpans = nil
-                furiganaTaskHandle?.cancel()
-            }
-            triggerFuriganaRefreshIfNeeded(reason: "input changed", recomputeSpans: true)
-        }
-        .onChange(of: isEditing) { _, editing in
-            if editing {
-                clearSelection()
-                triggerFuriganaRefreshIfNeeded(reason: "editing toggled on", recomputeSpans: true)
-            } else {
-                if suppressNextEditingRefresh {
-                    suppressNextEditingRefresh = false
-                    CustomLogger.shared.info("Skipping refresh: editing toggle was programmatic.")
-                    return
-                }
-                triggerFuriganaRefreshIfNeeded(reason: "editing toggled off", recomputeSpans: true)
-            }
-        }
-        .onChange(of: showFurigana) { _, enabled in
-            if enabled {
-                triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: true)
-            } else {
-                furiganaTaskHandle?.cancel()
-            }
-        }
-        .onChange(of: alternateTokenColors) { _, enabled in
-            triggerFuriganaRefreshIfNeeded(
-                reason: enabled ? "alternate token colors toggled on" : "alternate token colors toggled off",
-                recomputeSpans: false
-            )
-        }
-        .onChange(of: highlightUnknownTokens) { _, enabled in
-            triggerFuriganaRefreshIfNeeded(
-                reason: enabled ? "unknown highlight toggled on" : "unknown highlight toggled off",
-                recomputeSpans: false
-            )
-        }
-        .onChange(of: readingFuriganaSize) { _, _ in
-            triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
-        }
-        .onChange(of: selectionController.tokenSelection) { oldSelection, newSelection in
-            if newSelection == nil {
-                if isDictionarySheetPresented {
-                    isDictionarySheetPresented = false
-                }
-            }
-            if dictionaryPopupEnabled {
-                switch (oldSelection, newSelection) {
-                case (nil, .some(let newCtx)):
-                    let r = newCtx.range
-                    CustomLogger.shared.debug("Dictionary popup shown (selection change) tokenIndex=\(newCtx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(newCtx.surface) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
-                case (.some(_), nil):
-                    CustomLogger.shared.debug("Dictionary popup hidden (selection cleared)")
-                case (.some(let oldCtx), .some(let newCtx)):
-                    if oldCtx.id != newCtx.id {
-                        let oldR = oldCtx.range
-                        let newR = newCtx.range
-                        CustomLogger.shared.debug("Dictionary popup replaced oldTokenIndex=\(oldCtx.tokenIndex) oldRange=\(oldR.location)-\(NSMaxRange(oldR)) -> newTokenIndex=\(newCtx.tokenIndex) newRange=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface)")
-                    } else if oldCtx.range.location != newCtx.range.location || oldCtx.range.length != newCtx.range.length || oldCtx.surface != newCtx.surface {
-                        let newR = newCtx.range
-                        CustomLogger.shared.debug("Dictionary popup updated tokenIndex=\(newCtx.tokenIndex) range=\(newR.location)-\(NSMaxRange(newR)) surface=\(newCtx.surface)")
-                    }
-                default:
-                    break
-                }
-            }
-            handleSelectionLookup(for: newSelection?.surface ?? "")
-        }
-        .onChange(of: sheetSelection?.id) { oldID, newID in
-            guard dictionaryPopupEnabled else { return }
-            if oldID == nil, let _ = newID {
-                if let ctx = sheetSelection {
-                    let r = ctx.range
-                    CustomLogger.shared.debug("Dictionary popup shown (sheet binding) tokenIndex=\(ctx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface)")
-                } else {
-                    CustomLogger.shared.debug("Dictionary popup shown (sheet binding)")
-                }
-            } else if let _ = oldID, newID == nil {
-                CustomLogger.shared.debug("Dictionary popup hidden (sheet binding cleared)")
-            } else if let _ = oldID, let _ = newID, let ctx = sheetSelection {
-                let r = ctx.range
-                CustomLogger.shared.debug("Dictionary popup replaced (sheet binding) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface)")
-            }
-        }
-        .onChange(of: currentNote?.id) { _, newValue in
-            lastOpenedNoteIDRaw = newValue?.uuidString ?? ""
-            clearSelection()
-            overrideSignature = computeOverrideSignature()
-            updateCustomizedRanges()
-            processPendingRouterResetRequest()
-        }
-        .onReceive(readingOverrides.$overrides) { _ in
-            handleOverridesExternalChange()
-        }
-        .onChange(of: router.pendingResetNoteID) { _, newValue in
-            pendingRouterResetNoteID = newValue
-            processPendingRouterResetRequest()
-        }
-        .onChange(of: tokenSelection == nil) { _, isNil in
-            if isNil {
-                tokenPanelFrame = nil
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if isDictionarySheetPresented {
-                isDictionarySheetPresented = false
-                clearSelection(resetPersistent: true)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var tokenListSheet: some View {
-        NavigationStack {
-            ZStack(alignment: .bottom) {
-                VStack(alignment: .leading, spacing: 16) {
-                    tokenFilterControls
-                    Divider()
-                    TokenListPanel(
-                        items: tokenListItems,
-                        isReady: furiganaSpans != nil,
-                        isEditing: isEditing,
-                        selectedRange: persistentSelectionRange,
-                        onSelect: { presentDictionaryForSpan(at: $0, focusSplitMenu: false) },
-                        onGoTo: { goToSpanInNote(at: $0) },
-                        onAdd: { bookmarkToken(at: $0) },
-                        onMergeLeft: { mergeSpan(at: $0, direction: .previous) },
-                        onMergeRight: { mergeSpan(at: $0, direction: .next) },
-                        onSplit: { startSplitFlow(for: $0) },
-                        canMergeLeft: { canMergeSpan(at: $0, direction: .previous) },
-                        canMergeRight: { canMergeSpan(at: $0, direction: .next) }
-                    )
-                    .frame(maxHeight: .infinity, alignment: .top)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-
-                if sheetDictionaryPanelEnabled, let selection = sheetSelection {
-                    ZStack(alignment: .bottom) {
-                        Color.black.opacity(0.25)
-                            .ignoresSafeArea()
-                            .transition(.opacity)
-                            .onTapGesture { clearSelection(resetPersistent: false) }
-
-                        dictionaryPanel(for: selection, enableDragToDismiss: true, embedInMaterialBackground: true)
-                            .id("\(selection.id)-\(overrideSignature)")
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 24)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                    .zIndex(1)
-                }
-            }
-            .navigationTitle("Extract Words")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        saveAllVisibleTokens()
-                    } label: {
-                        Label("Save All", systemImage: "tray.and.arrow.down")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { showTokensPopover = false }
-                }
-            }
-            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: sheetSelection?.id)
-        }
-    }
-
-    private var tokenFilterControls: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Toggle("Hide duplicates", isOn: $hideDuplicateTokens)
-            Toggle("Hide particles", isOn: $hideCommonParticles)
-        }
-        .toggleStyle(.switch)
     }
 
     private var editorColumn: some View {
-        VStack(spacing: 0) {
-            // Debug/forcing wrap: a fixed logical width (points), not pixels.
-            // This is intentionally hard-coded to prove wrapping is possible even
-            // if the surrounding SwiftUI layout ends up unconstrained.
-            let forcedWrapWidth: CGFloat = 390
+        // Precompute helpers outside of the ViewBuilder to avoid non-View statements inside VStack
+        let extraOverlays: [RubyText.TokenOverlay] = incrementalLookupEnabled ? savedWordOverlays : []
+
+        let spanSelectionHandler: ((RubySpanSelection?) -> Void)?
+        if incrementalLookupEnabled {
+            spanSelectionHandler = nil
+        } else {
+            spanSelectionHandler = { selection in
+                handleInlineSpanSelection(selection)
+            }
+        }
+
+        let contextMenuStateProvider: (() -> RubyContextMenuState?)?
+        if incrementalLookupEnabled {
+            contextMenuStateProvider = nil
+        } else {
+            contextMenuStateProvider = {
+                inlineContextMenuState
+            }
+        }
+
+        let contextMenuActionHandler: ((RubyContextMenuAction) -> Void)?
+        if incrementalLookupEnabled {
+            contextMenuActionHandler = nil
+        } else {
+            contextMenuActionHandler = { action in
+                handleContextMenuAction(action)
+            }
+        }
+
+        return VStack(spacing: 0) {
             FuriganaRenderingHost(
                 text: $inputText,
                 furiganaText: furiganaAttributedText,
@@ -513,53 +384,104 @@ struct PasteView: View {
                 semanticSpans: furiganaSemanticSpans,
                 textSize: readingTextSize,
                 isEditing: isEditing,
-                showFurigana: showFurigana,
+                showFurigana: incrementalLookupEnabled ? false : showFurigana,
                 lineSpacing: readingLineSpacing,
-                alternateTokenColors: alternateTokenColors,
-                highlightUnknownTokens: highlightUnknownTokens,
+                alternateTokenColors: incrementalLookupEnabled ? false : alternateTokenColors,
+                highlightUnknownTokens: incrementalLookupEnabled ? false : highlightUnknownTokens,
                 tokenPalette: alternateTokenPalette,
                 unknownTokenColor: unknownTokenColor,
-                selectedRangeHighlight: persistentSelectionRange,
+                selectedRangeHighlight: incrementalLookupEnabled ? incrementalSelectedCharacterRange : persistentSelectionRange,
                 customizedRanges: customizedRanges,
+                extraTokenOverlays: extraOverlays,
                 enableTapInspection: true,
-                bottomOverscrollPadding: preferredOverscrollPadding,
-                onSpanSelection: handleInlineSpanSelection,
-                contextMenuStateProvider: { inlineContextMenuState },
-                onContextMenuAction: handleContextMenuAction
+                onCharacterTap: { utf16Index in
+                    if incrementalLookupEnabled {
+                            // Existing incremental lookup behavior
+                        let ns = inputText as NSString
+                        if ns.length == 0 {
+                            incrementalSelectedCharacterRange = nil
+                        } else {
+                            let clamped = min(max(0, utf16Index), max(0, ns.length - 1))
+                            let r = ns.rangeOfComposedCharacterSequence(at: clamped)
+                            let ch = ns.substring(with: r)
+                            if ch == "\n" || ch == "\r" {
+                                incrementalSelectedCharacterRange = nil
+                                incrementalLookupTask?.cancel()
+                                isIncrementalPopupVisible = false
+                                incrementalPopupHits = []
+                                return
+                            }
+                            incrementalSelectedCharacterRange = r
+                        }
+                        startIncrementalLookup(atUTF16Index: utf16Index)
+                    } else {
+                            // Fallback: map tap position to the semantic span containing the tapped UTF-16 index
+                        let ns = inputText as NSString
+                        guard ns.length > 0 else { return }
+                        let clamped = min(max(0, utf16Index), max(0, ns.length - 1))
+                        let r = ns.rangeOfComposedCharacterSequence(at: clamped)
+                        let ch = ns.substring(with: r)
+                        if ch == "\n" || ch == "\r" {
+                            clearSelection()
+                            return
+                        }
+                        if let match = furiganaSemanticSpans.enumerated().first(where: { NSLocationInRange(clamped, $0.element.range) }) {
+                            let surface = ns.substring(with: match.element.range)
+                            if surface.contains("ロン") || surface.contains("ハ") {
+                                let scalars = surface.unicodeScalars.map { String(format: "%04X", $0.value) }.joined(separator: " ")
+                                CustomLogger.shared.print("[TAP PROBE] surface=\(surface) utf16Len=\(surface.utf16.count) scalars=\(scalars)")
+                            }
+                            presentDictionaryForSpan(at: match.offset, focusSplitMenu: false)
+                        } else {
+                                // No token at this location; clear selection
+                            clearSelection()
+                        }
+                    }
+                }, onSpanSelection: spanSelectionHandler, enableDragSelection: incrementalLookupEnabled ? false : (alternateTokenColors == false),
+                onDragSelectionBegan: {
+                    guard incrementalLookupEnabled == false else { return }
+                        // Avoid showing stale popup content while the user is selecting.
+                    clearSelection(resetPersistent: true)
+                },
+                onDragSelectionEnded: { range in
+                    guard incrementalLookupEnabled == false else { return }
+                    guard alternateTokenColors == false else { return }
+                    presentDictionaryForArbitraryRange(range)
+                },
+                contextMenuStateProvider: contextMenuStateProvider,
+                onContextMenuAction: contextMenuActionHandler
             )
-            .frame(width: forcedWrapWidth, alignment: .topLeading)
             .padding(.vertical, 16)
+
             Divider()
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
-            editorToolbar
-        }
-    }
 
-    private var editorToolbar: some View {
-        HStack(alignment: .center, spacing: 0) {
-            ControlCell {
-                Button { hideKeyboard() } label: {
-                    Image(systemName: "keyboard.chevron.compact.down").font(.title2)
+            HStack(alignment: .center, spacing: 0) {
+                ControlCell {
+                    Button { hideKeyboard() } label: {
+                        Image(systemName: "keyboard.chevron.compact.down").font(.title2)
+                    }
+                    .accessibilityLabel("Hide Keyboard")
                 }
-                .accessibilityLabel("Hide Keyboard")
-            }
 
-            ControlCell {
-                Button(action: pasteFromClipboard) {
-                    Image(systemName: "doc.on.clipboard").font(.title2)
+                ControlCell {
+                    Button(action: pasteFromClipboard) {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.title2)
+                    }
+                    .accessibilityLabel("Paste")
                 }
-                .accessibilityLabel("Paste")
-            }
 
-            ControlCell {
-                Button(action: saveNote) {
-                    Image(systemName: "square.and.arrow.down").font(.title2)
+                ControlCell {
+                    Button(action: saveNote) {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.title2)
+                    }
+                    .accessibilityLabel("Save")
                 }
-                .accessibilityLabel("Save")
-            }
 
-            ControlCell {
+                ControlCell {
                 Button {
                     guard isEditing == false else { return }
                     showFurigana.toggle()
@@ -591,74 +513,168 @@ struct PasteView: View {
 
             ControlCell {
                 Toggle(isOn: $isEditing) {
-                    if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
-                        Image(systemName: "character.cursor.ibeam.ja")
-                    } else {
-                        Image(systemName: "character.cursor.ibeam")
+                        if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
+                            Image(systemName: "character.cursor.ibeam.ja")
+                        } else {
+                            Image(systemName: "character.cursor.ibeam")
+                        }
                     }
+                    .labelsHidden()
+                    .toggleStyle(.button)
+                    .tint(.accentColor)
+                    .font(.title2)
+                    .accessibilityLabel("Edit")
                 }
-                .labelsHidden()
-                .toggleStyle(.button)
-                .tint(.accentColor)
-                .font(.title2)
-                .accessibilityLabel("Edit")
             }
+            .controlSize(.small)
         }
-        .controlSize(.small)
     }
 
-    private var tokenInspectorPanel: some View {
-        TokenListPanel(
-            items: tokenListItems,
-            isReady: furiganaSpans != nil,
-            isEditing: isEditing,
-            selectedRange: persistentSelectionRange,
-            onSelect: { presentDictionaryForSpan(at: $0, focusSplitMenu: false) },
-            onGoTo: { goToSpanInNote(at: $0) },
-            onAdd: { bookmarkToken(at: $0) },
-            onMergeLeft: { mergeSpan(at: $0, direction: .previous) },
-            onMergeRight: { mergeSpan(at: $0, direction: .next) },
-            onSplit: { startSplitFlow(for: $0) },
-            canMergeLeft: { canMergeSpan(at: $0, direction: .previous) },
-            canMergeRight: { canMergeSpan(at: $0, direction: .next) }
-        )
-        .padding(.top, 12)
+    private var transformPasteTextButton: some View {
+        Button {
+            let transformed = PasteTextTransforms.transform(inputText)
+            if transformed != inputText {
+                inputText = transformed
+            }
+        } label: {
+            Image(systemName: "wand.and.stars")
+        }
+        .accessibilityLabel("Transform Paste Text")
+    }
+
+    private var resetSpansButton: some View {
+        Button {
+            resetAllCustomSpans()
+        } label: {
+            Image(systemName: "arrow.counterclockwise")
+        }
+        .accessibilityLabel("Reset Spans")
+    }
+
+    private var adjustedSpansButton: some View {
+        Button {
+            showAdjustedSpansPopover = true
+        } label: {
+            Image(systemName: "list.bullet")
+        }
+        .accessibilityLabel("Show Adjusted Spans")
+        .popover(isPresented: $showAdjustedSpansPopover) {
+            ScrollView {
+                Text(adjustedSpansDebugText)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+        }
+    }
+
+    private var adjustedSpansDebugText: String {
+        guard let spans = furiganaSpans, spans.isEmpty == false else {
+            return "(No spans yet)"
+        }
+        return SegmentationService.describe(spans: spans.map(\.span))
+    }
+
+    private var tokenListButton: some View {
+        Button {
+            showTokensPopover = true
+        } label: {
+            Image(systemName: "list.bullet.rectangle")
+        }
+        .accessibilityLabel("Extract Words")
+        .sheet(isPresented: $showTokensPopover) {
+            tokenListSheet
+                .presentationDetents(Set([.large]))
+                .presentationDragIndicator(.visible)
+        }
+    }
+
+    private var tokenListSheet: some View {
+        NavigationStack {
+            ExtractWordsView(
+                items: tokenListItems,
+                isReady: (furiganaSemanticSpans.isEmpty == false) || (furiganaSpans != nil),
+                isEditing: isEditing,
+                selectedRange: tokenSelection?.range ?? persistentSelectionRange,
+                hideDuplicateTokens: $hideDuplicateTokens,
+                hideCommonParticles: $hideCommonParticles,
+                onSelect: { presentDictionaryForSpan(at: $0, focusSplitMenu: false) },
+                onGoTo: { goToSpanInNote(at: $0) },
+                onAdd: { bookmarkToken(at: $0) },
+                onMergeLeft: { mergeSpan(at: $0, direction: .previous) },
+                onMergeRight: { mergeSpan(at: $0, direction: .next) },
+                onSplit: { startSplitFlow(for: $0) },
+                canMergeLeft: { canMergeSpan(at: $0, direction: .previous) },
+                canMergeRight: { canMergeSpan(at: $0, direction: .next) },
+                sheetSelection: sheetSelectionBinding,
+                dictionaryPanel: { selection in
+                    dictionaryPanel(for: selection, enableDragToDismiss: true, embedInMaterialBackground: true)
+                },
+                onDone: { showTokensPopover = false }
+            )
+        }
     }
 
     private var tokenListItems: [TokenListItem] {
-        let spans = furiganaSemanticSpans
-        guard spans.isEmpty == false else { return [] }
-        var seenKeys: Set<String> = []
-        let particleSet: Set<String> = hideCommonParticles ? commonParticleSet : []
+        guard furiganaSemanticSpans.isEmpty == false else { return [] }
         let noteID = currentNote?.id
 
-        return spans.enumerated().compactMap { index, span in
-            guard let trimmed = trimmedRangeAndSurface(for: span.range) else { return nil }
-            let normalizedSurface = trimmed.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        var items: [TokenListItem] = []
+        items.reserveCapacity(furiganaSemanticSpans.count)
 
-            if hideCommonParticles, particleSet.contains(normalizedSurface) {
-                return nil
+        var seenKeys: Set<String> = []
+        for (index, semantic) in furiganaSemanticSpans.enumerated() {
+            guard let trimmed = trimmedRangeAndSurface(for: semantic.range) else { continue }
+            let surface = trimmed.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard surface.isEmpty == false else { continue }
+
+            if hideCommonParticles, commonParticleSet.contains(surface) {
+                continue
             }
 
-            let reading = normalizedReading(span.readingKana)
-            let displayReading = readingWithOkurigana(surface: trimmed.surface, baseReading: reading)
-            if hideDuplicateTokens {
-                let key = tokenDuplicateKey(surface: normalizedSurface, reading: reading)
-                if seenKeys.contains(key) {
-                    return nil
-                }
-                seenKeys.insert(key)
+            let reading = normalizedReading(semantic.readingKana)
+            let key = "\(surface)|\(reading ?? "")"
+            if hideDuplicateTokens, seenKeys.contains(key) {
+                continue
             }
+            seenKeys.insert(key)
 
-            let alreadySaved = hasSavedWord(surface: trimmed.surface, reading: reading, noteID: noteID)
-            return TokenListItem(
-                spanIndex: index,
-                range: trimmed.range,
-                surface: trimmed.surface,
-                reading: reading,
-                displayReading: displayReading,
-                isAlreadySaved: alreadySaved
+            let displayReading = readingWithOkurigana(surface: surface, baseReading: reading)
+            let alreadySaved = hasSavedWord(surface: surface, reading: reading, noteID: noteID)
+            items.append(
+                TokenListItem(
+                    spanIndex: index,
+                    range: trimmed.range,
+                    surface: surface,
+                    reading: reading,
+                    displayReading: displayReading,
+                    isAlreadySaved: alreadySaved
+                )
             )
+        }
+
+        return items
+    }
+
+    @ToolbarContentBuilder
+    private var coreToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            adjustedSpansButton
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            HStack(spacing: 12) {
+                transformPasteTextButton
+                resetSpansButton
+                tokenListButton
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var coreBottomInset: some View {
+        if selectionController.tokenSelection == nil {
+            Color.clear.frame(height: 24)
         }
     }
 
@@ -672,6 +688,30 @@ struct PasteView: View {
                 inlineTokenActionPanel(for: selection)
             }
         }
+    }
+
+    @ViewBuilder
+    private var incrementalLookupOverlay: some View { EmptyView() }
+
+    private var incrementalSheetDetents: Set<PresentationDetent> {
+        Set([.height(300), .height(420), .height(560), .large])
+    }
+
+    private var incrementalPreferredSheetDetent: PresentationDetent {
+        let groupCount = incrementalPopupGroups.count
+        if groupCount <= 1 {
+            return .height(300)
+        } else if groupCount <= 3 {
+            return .height(420)
+        } else {
+            return .height(560)
+        }
+    }
+
+    private func dismissIncrementalLookupSheet() {
+        incrementalLookupTask?.cancel()
+        incrementalPopupHits = []
+        incrementalSelectedCharacterRange = nil
     }
 
     private func inlineTokenActionPanel(for selection: TokenSelectionContext) -> some View {
@@ -788,7 +828,7 @@ struct PasteView: View {
                 setEditing(true)
             }
             else {
-                setEditing(false, suppressRefresh: true)
+                setEditing(false)
             }
             router.pasteShouldBeginEditing = false
             router.noteToOpen = nil
@@ -800,7 +840,7 @@ struct PasteView: View {
             assignInputTextFromExternalSource(note.text)
             noteTitleInput = note.title ?? ""
             hasManuallyEditedTitle = (note.title?.isEmpty == false)
-            setEditing(false, suppressRefresh: true)
+            setEditing(false)
         } else if let existingNote = currentNote, noteTitleInput.isEmpty {
             noteTitleInput = existingNote.title ?? ""
             hasManuallyEditedTitle = (existingNote.title?.isEmpty == false)
@@ -815,7 +855,7 @@ struct PasteView: View {
             let persisted = PasteBufferStore.load()
             if !persisted.isEmpty {
                 assignInputTextFromExternalSource(persisted)
-                setEditing(false, suppressRefresh: true)
+                setEditing(false)
             }
             noteTitleInput = ""
             hasManuallyEditedTitle = false
@@ -825,6 +865,24 @@ struct PasteView: View {
         migrateBoundaryOverridesIfNeeded()
         pendingRouterResetNoteID = router.pendingResetNoteID
         processPendingRouterResetRequest()
+
+        if incrementalLookupEnabled {
+            // New paste strategy: furigana + token highlighting disabled (pipeline remains).
+            if showFurigana {
+                showFurigana = false
+            }
+            if alternateTokenColors {
+                alternateTokenColors = false
+            }
+            if highlightUnknownTokens {
+                highlightUnknownTokens = false
+            }
+            incrementalLookupTask?.cancel()
+            isIncrementalPopupVisible = false
+            incrementalPopupHits = []
+            recomputeSavedWordOverlays()
+        }
+
         ensureInitialFuriganaReady(reason: "onAppear initialization")
     }
 
@@ -950,6 +1008,8 @@ struct PasteView: View {
         persistentSelectionRange = selection.highlightRange
     }
 
+
+
     private func handleContextMenuAction(_ action: RubyContextMenuAction) {
         switch action {
         case .mergeLeft:
@@ -964,6 +1024,38 @@ struct PasteView: View {
     private func focusSplitMenuForCurrentSelection() {
         guard let selection = tokenSelection else { return }
         startSplitFlow(for: selection.tokenIndex)
+    }
+
+    private func presentDictionaryForArbitraryRange(_ rawRange: NSRange) {
+        guard rawRange.location != NSNotFound, rawRange.length > 0 else {
+            clearSelection()
+            return
+        }
+        guard let trimmed = trimmedRangeAndSurface(for: rawRange) else {
+            clearSelection()
+            return
+        }
+        let surface = trimmed.surface
+        guard surface.isEmpty == false else {
+            clearSelection()
+            return
+        }
+
+        let semantic = SemanticSpan(range: trimmed.range, surface: surface, sourceSpanIndices: 0..<0, readingKana: nil)
+        let annotated = AnnotatedSpan(span: TextSpan(range: trimmed.range, surface: surface, isLexiconMatch: false), readingKana: nil, lemmaCandidates: [], partOfSpeech: nil)
+        let ctx = TokenSelectionContext(
+            tokenIndex: -1,
+            range: trimmed.range,
+            surface: surface,
+            semanticSpan: semantic,
+            sourceSpanIndices: 0..<0,
+            annotatedSpan: annotated
+        )
+
+        pendingSelectionRange = nil
+        persistentSelectionRange = trimmed.range
+        tokenSelection = ctx
+        pendingSplitFocusSelectionID = nil
     }
 
     @MainActor
@@ -1035,8 +1127,12 @@ struct PasteView: View {
         let kana = (k?.isEmpty == false) ? k : nil
         guard s.isEmpty == false else { return false }
         let noteID = currentNote?.id
+        let targetSurface = kanaFoldToHiragana(resolvedSurface(from: entry, fallback: s))
+        let targetKana = kanaFoldToHiragana(kana)
         return words.words.contains { word in
-            word.surface == s && word.kana == kana && word.sourceNoteID == noteID
+            guard word.sourceNoteID == noteID else { return false }
+            guard kanaFoldToHiragana(word.surface) == targetSurface else { return false }
+            return kanaFoldToHiragana(word.kana) == targetKana
         }
     }
 
@@ -1047,14 +1143,25 @@ struct PasteView: View {
         guard s.isEmpty == false else { return }
         let noteID = currentNote?.id
 
+        let targetSurface = kanaFoldToHiragana(resolvedSurface(from: entry, fallback: s))
+        let targetKana = kanaFoldToHiragana(kana)
+
         let matchingIDs = Set(
             words.words
-                .filter { $0.surface == s && $0.kana == kana && $0.sourceNoteID == noteID }
+                .filter {
+                    guard $0.sourceNoteID == noteID else { return false }
+                    guard kanaFoldToHiragana($0.surface) == targetSurface else { return false }
+                    return kanaFoldToHiragana($0.kana) == targetKana
+                }
                 .map(\.id)
         )
 
         if matchingIDs.isEmpty {
-            defineWord(using: entry)
+            let meaning = normalizedMeaning(from: entry.gloss)
+            guard meaning.isEmpty == false else { return }
+            let resolvedSurface = resolvedSurface(from: entry, fallback: s)
+            let resolvedKana = normalizedReading(entry.kana)
+            words.add(surface: resolvedSurface, kana: resolvedKana, meaning: meaning, note: nil, sourceNoteID: noteID)
         } else {
             words.delete(ids: matchingIDs)
         }
@@ -1119,9 +1226,7 @@ struct PasteView: View {
                                 measuredSheetHeight = newValue
                             }
                             .presentationDragIndicator(.visible)
-                            .presentationDetents([
-                                .height(max(sheetPanelHeight + 50, 300))
-                            ])
+                            .presentationDetents(Set([.height(max(sheetPanelHeight + 50, 300))]))
                             .presentationBackgroundInteraction(.enabled)
                     } else {
                         // If the selection is nil while presented, close the sheet.
@@ -1266,9 +1371,19 @@ struct PasteView: View {
         pendingSelectionRange = nil
         persistentSelectionRange = context.range
         tokenSelection = context
+        // If the Extract Words sheet is open, keep its in-sheet dictionary panel in sync.
+        // (The inline dictionary overlay is behind the sheet and not visible.)
+        if showTokensPopover {
+            sheetSelection = context
+        }
         if sheetDictionaryPanelEnabled {
             sheetSelection = context
-            isDictionarySheetPresented = true
+            // If the Extract Words sheet is open, do not present another sheet (which would
+            // dismiss/replace the token list). The token list sheet already renders an
+            // in-sheet dictionary panel when `sheetSelection` is set.
+            if showTokensPopover == false {
+                isDictionarySheetPresented = true
+            }
         }
         if dictionaryPopupEnabled {
             let r = context.range
@@ -1306,7 +1421,8 @@ struct PasteView: View {
         }
 
         Task {
-            let entry = await lookupPreferredDictionaryEntry(surface: context.surface, reading: reading)
+            let entry = await lookupPreferredDictionaryEntry(surface: surface, reading: reading)
+
             await MainActor.run {
                 guard let entry else {
                     presentDictionaryForSpan(at: index, focusSplitMenu: false)
@@ -1358,6 +1474,14 @@ struct PasteView: View {
     }
 
     private func resolvedSurface(from entry: DictionaryEntry, fallback: String) -> String {
+        let trimmedFallback = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If the user created/saved a word from a kana surface, preserve that kana surface.
+        // Do NOT replace it with the dictionary's kanji spelling.
+        if isKanaOnlySurface(trimmedFallback) {
+            return trimmedFallback
+        }
+
         let trimmedKanji = entry.kanji.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedKanji.isEmpty == false {
             return trimmedKanji
@@ -1365,12 +1489,40 @@ struct PasteView: View {
         if let kana = normalizedReading(entry.kana) {
             return kana
         }
-        return fallback
+        return trimmedFallback
+    }
+
+    private func isKanaOnlySurface(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return false }
+        return trimmed.unicodeScalars.allSatisfy { scalar in
+            if isKanaScalar(scalar) { return true }
+            // Half-width katakana block.
+            if (0xFF66...0xFF9F).contains(scalar.value) { return true }
+            return false
+        }
     }
 
     private func normalizedReading(_ reading: String?) -> String? {
         guard let value = reading?.trimmingCharacters(in: .whitespacesAndNewlines), value.isEmpty == false else { return nil }
         return value
+    }
+
+    private func kanaFoldToHiragana(_ value: String) -> String {
+        // Fold katakana/hiragana differences so "カタカナ" and "かたかな" compare equal.
+        value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
+    }
+
+    private func kanaFoldToHiragana(_ value: String?) -> String? {
+        guard let value else { return nil }
+        return kanaFoldToHiragana(value)
+    }
+
+    private func kanaVariants(_ value: String) -> [String] {
+        let hira = kanaFoldToHiragana(value)
+        let kata = hira.applyingTransform(.hiraganaToKatakana, reverse: false) ?? hira
+        if hira == kata { return [hira] }
+        return [hira, kata]
     }
 
     private func readingWithOkurigana(surface: String, baseReading: String?) -> String? {
@@ -1405,8 +1557,12 @@ struct PasteView: View {
 
     // Overloaded hasSavedWord with explicit noteID
     private func hasSavedWord(surface: String, reading: String?, noteID: UUID?) -> Bool {
-        words.words.contains { word in
-            word.surface == surface && word.kana == reading && word.sourceNoteID == noteID
+        let targetSurface = kanaFoldToHiragana(surface)
+        let targetKana = kanaFoldToHiragana(reading)
+        return words.words.contains { word in
+            guard word.sourceNoteID == noteID else { return false }
+            guard kanaFoldToHiragana(word.surface) == targetSurface else { return false }
+            return kanaFoldToHiragana(word.kana) == targetKana
         }
     }
 
@@ -1437,7 +1593,11 @@ struct PasteView: View {
         tokenSelection = ctx
         if sheetDictionaryPanelEnabled {
             sheetSelection = ctx
-            isDictionarySheetPresented = true
+            // If the Extract Words sheet is open, do not present another sheet.
+            // The token list sheet renders an in-sheet dictionary panel via `sheetSelection`.
+            if wasShowingTokensPopover == false {
+                isDictionarySheetPresented = true
+            }
         }
         showTokensPopover = wasShowingTokensPopover
     }
@@ -1554,7 +1714,10 @@ struct PasteView: View {
         tokenSelection = ctx
         if sheetDictionaryPanelEnabled {
             sheetSelection = ctx
-            isDictionarySheetPresented = true
+            // If the Extract Words sheet is open, do not present another sheet.
+            if wasShowingTokensPopover == false {
+                isDictionarySheetPresented = true
+            }
         }
         showTokensPopover = wasShowingTokensPopover
     }
@@ -1582,10 +1745,28 @@ struct PasteView: View {
             return stage1.enumerated().first(where: { NSLocationInRange(splitUTF16Index, $0.element.span.range) })?.offset
         }()
 
+        // If the requested split falls exactly on an existing Stage-1 boundary, we can't split
+        // inside a span. Instead, record an explicit non-crossable cut so Stage-2.5 won't merge
+        // across it.
+        if stage1Index == nil {
+            // (Should be rare because the search above typically finds a containing span.)
+            tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
+            triggerFuriganaRefreshIfNeeded(reason: "Split Token", recomputeSpans: true)
+            clearSelection(resetPersistent: false)
+            return
+        }
+
         guard let spanIndex = stage1Index, stage1.indices.contains(spanIndex) else { return }
         let spanRange = stage1[spanIndex].span.range
         let localOffset = splitUTF16Index - spanRange.location
-        guard localOffset > 0, localOffset < spanRange.length else { return }
+
+        if localOffset <= 0 || localOffset >= spanRange.length {
+            tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
+            triggerFuriganaRefreshIfNeeded(reason: "Split Token", recomputeSpans: true)
+            clearSelection(resetPersistent: false)
+            return
+        }
+
         applySpanSplit(spanIndex: spanIndex, range: spanRange, offset: localOffset, actionName: "Split Token")
         clearSelection(resetPersistent: false)
     }
@@ -1800,10 +1981,7 @@ struct PasteView: View {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
-    private func setEditing(_ editing: Bool, suppressRefresh: Bool = false) {
-        if suppressRefresh && editing == false {
-            suppressNextEditingRefresh = true
-        }
+    private func setEditing(_ editing: Bool) {
         isEditing = editing
     }
 
@@ -1865,6 +2043,7 @@ struct PasteView: View {
         let currentSemanticSpans = furiganaSemanticSpans
         let currentOverrides = readingOverrides.overrides(for: activeNoteID).filter { $0.userKana != nil }
         let currentAmendedSpans = tokenBoundaries.spans(for: activeNoteID, text: currentText)
+        let currentHardCuts = tokenBoundaries.hardCuts(for: activeNoteID, text: currentText)
         let pipelineInput = FuriganaPipelineService.Input(
             text: currentText,
             showFurigana: currentShowFurigana,
@@ -1875,6 +2054,7 @@ struct PasteView: View {
             existingSpans: currentSpans,
             existingSemanticSpans: currentSemanticSpans,
             amendedSpans: currentAmendedSpans,
+            hardCuts: currentHardCuts,
             readingOverrides: currentOverrides,
             context: "PasteView"
         )
@@ -2013,178 +2193,395 @@ private struct ControlCell<Content: View>: View {
     }
 }
 
-private struct TokenListItem: Identifiable {
-    let spanIndex: Int
-    let range: NSRange
-    let surface: String
-    let reading: String?
-    let displayReading: String?
-    let isAlreadySaved: Bool
+// MARK: - Incremental Lookup (PasteView)
 
-    var id: Int { spanIndex }
-    var canSplit: Bool { range.length > 1 }
+private struct IncrementalLookupHit: Identifiable, Hashable {
+    let matchedSurface: String
+    let entry: DictionaryEntry
+
+    var id: String { "\(matchedSurface)#\(entry.id)" }
 }
 
-private struct TokenListPanel: View {
-    let items: [TokenListItem]
-    let isReady: Bool
-    let isEditing: Bool
-    let selectedRange: NSRange?
-    let onSelect: (Int) -> Void
-    let onGoTo: (Int) -> Void
-    let onAdd: (Int) -> Void
-    let onMergeLeft: (Int) -> Void
-    let onMergeRight: (Int) -> Void
-    let onSplit: (Int) -> Void
-    let canMergeLeft: (Int) -> Bool
-    let canMergeRight: (Int) -> Bool
+private struct IncrementalLookupCollapsed: Identifiable, Hashable {
+    let matchedSurface: String
+    let kanji: String
+    let gloss: String
+    let kanaList: String?
+    let entries: [DictionaryEntry]
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Spacer()
-                if isReady == false, isEditing == false {
-                    ProgressView()
-                        .scaleEffect(0.75)
+    var id: String {
+        let k = kanji.isEmpty ? "(no-kanji)" : kanji
+        return "\(matchedSurface)#\(k)#\(gloss)"
+    }
+}
+
+private struct IncrementalLookupGroup: Identifiable, Hashable {
+    let matchedSurface: String
+    let pages: [IncrementalLookupCollapsed]
+
+    var id: String { matchedSurface }
+}
+
+extension PasteView {
+    private var incrementalPopupGroups: [IncrementalLookupGroup] {
+        guard incrementalPopupHits.isEmpty == false else { return [] }
+
+        // Preserve first-seen order per surface.
+        struct Bucket {
+            var firstIndex: Int
+            var surface: String
+            var hits: [IncrementalLookupHit]
+        }
+
+        var buckets: [String: Bucket] = [:]
+        buckets.reserveCapacity(min(32, incrementalPopupHits.count))
+
+        for (idx, hit) in incrementalPopupHits.enumerated() {
+            let foldedKey = kanaFoldToHiragana(hit.matchedSurface.trimmingCharacters(in: .whitespacesAndNewlines))
+            if var existing = buckets[foldedKey] {
+                existing.hits.append(hit)
+                buckets[foldedKey] = existing
+            } else {
+                buckets[foldedKey] = Bucket(firstIndex: idx, surface: hit.matchedSurface, hits: [hit])
+            }
+        }
+
+        let ordered = buckets.values.sorted { $0.firstIndex < $1.firstIndex }
+
+        func normalizeKanji(_ raw: String) -> String {
+            raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        func normalizeGloss(_ raw: String) -> String {
+            raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return ordered.map { bucket in
+            // Collapse entries that share (kanji, gloss) by combining their kana variants.
+            var collapsedByKey: [String: (kanji: String, gloss: String, kana: [String], entries: [DictionaryEntry], firstIndex: Int)] = [:]
+            collapsedByKey.reserveCapacity(min(16, bucket.hits.count))
+
+            for (localIndex, hit) in bucket.hits.enumerated() {
+                let kanji = normalizeKanji(hit.entry.kanji)
+                let gloss = normalizeGloss(hit.entry.gloss)
+                let key = "\(kanji)#\(gloss)"
+                let kana = normalizedReading(hit.entry.kana)
+
+                if var existing = collapsedByKey[key] {
+                    if let kana, existing.kana.contains(kana) == false {
+                        existing.kana.append(kana)
+                    }
+                    existing.entries.append(hit.entry)
+                    collapsedByKey[key] = existing
+                } else {
+                    collapsedByKey[key] = (
+                        kanji: kanji,
+                        gloss: gloss,
+                        kana: kana.map { [$0] } ?? [],
+                        entries: [hit.entry],
+                        firstIndex: localIndex
+                    )
                 }
             }
 
-            if isEditing {
-                Text("Tokens appear after exiting edit mode.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else if items.isEmpty {
-                Text(isReady ? "No tokens detected." : "Tokenizing…")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(items) { item in
-                            TokenListRow(
-                                item: item,
-                                isSelected: isItemSelected(item),
-                                onSelect: { onSelect(item.spanIndex) },
-                                onGoTo: { onGoTo(item.spanIndex) },
-                                onAdd: { onAdd(item.spanIndex) },
-                                onMergeLeft: { onMergeLeft(item.spanIndex) },
-                                onMergeRight: { onMergeRight(item.spanIndex) },
-                                onSplit: { onSplit(item.spanIndex) },
-                                mergeLeftEnabled: canMergeLeft(item.spanIndex),
-                                mergeRightEnabled: canMergeRight(item.spanIndex)
-                            )
+            let pages: [IncrementalLookupCollapsed] = collapsedByKey.values
+                .sorted { $0.firstIndex < $1.firstIndex }
+                .map { item in
+                    let kanaList: String?
+                    if item.kana.isEmpty {
+                        kanaList = nil
+                    } else {
+                        kanaList = item.kana.joined(separator: "; ")
+                    }
+                    return IncrementalLookupCollapsed(
+                        matchedSurface: bucket.surface,
+                        kanji: item.kanji,
+                        gloss: item.gloss,
+                        kanaList: kanaList,
+                        entries: item.entries
+                    )
+                }
+
+            return IncrementalLookupGroup(matchedSurface: bucket.surface, pages: pages)
+        }
+    }
+
+    @ViewBuilder
+    fileprivate var incrementalLookupSheet: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(incrementalPopupGroups) { group in
+                    if group.pages.count <= 1, let page = group.pages.first {
+                        incrementalPopupPage(page)
+                    } else {
+                        TabView {
+                            ForEach(group.pages) { page in
+                                incrementalPopupPage(page)
+                            }
+                        }
+                        .tabViewStyle(.page(indexDisplayMode: .never))
+                        .frame(height: 110)
+                    }
+
+                    Divider()
+                }
+            }
+            .padding(14)
+        }
+        .background(Color(UIColor.systemBackground))
+        .onAppear {
+            incrementalSheetDetent = incrementalPreferredSheetDetent
+        }
+        .onChange(of: incrementalPopupHits) { _, _ in
+            incrementalSheetDetent = incrementalPreferredSheetDetent
+        }
+    }
+
+    private func incrementalPopupPage(_ page: IncrementalLookupCollapsed) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(page.matchedSurface)
+                    .font(.headline)
+                    .lineLimit(1)
+
+                Text(page.gloss)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+
+                if let kanaList = page.kanaList, kanaList.isEmpty == false {
+                    Text(kanaList)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            let isAnySaved = page.entries.contains { isSavedWord(for: page.matchedSurface, entry: $0) }
+            Button {
+                if isAnySaved {
+                    for entry in page.entries where isSavedWord(for: page.matchedSurface, entry: entry) {
+                        toggleSavedWord(surface: page.matchedSurface, entry: entry)
+                    }
+                } else if let first = page.entries.first {
+                    toggleSavedWord(surface: page.matchedSurface, entry: first)
+                }
+                recomputeSavedWordOverlays()
+            } label: {
+                Image(systemName: isAnySaved ? "bookmark.fill" : "bookmark")
+                    .font(.title3)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isAnySaved ? "Remove Bookmark" : "Bookmark")
+        }
+        .padding(.vertical, 10)
+    }
+
+    fileprivate func startIncrementalLookup(atUTF16Index index: Int) {
+        guard incrementalLookupEnabled else { return }
+        let nsText = inputText as NSString
+        guard nsText.length > 0 else { return }
+        guard index >= 0, index < nsText.length else { return }
+
+        // If the tap lands on a newline, ignore.
+        let tappedRange = nsText.rangeOfComposedCharacterSequence(at: index)
+        let tappedChar = nsText.substring(with: tappedRange)
+        if tappedChar == "\n" || tappedChar == "\r" {
+            incrementalLookupTask?.cancel()
+            incrementalSelectedCharacterRange = nil
+            isIncrementalPopupVisible = false
+            incrementalPopupHits = []
+            return
+        }
+
+        incrementalLookupTask?.cancel()
+        incrementalPopupHits = []
+        isIncrementalPopupVisible = false
+
+        let start = tappedRange.location
+        incrementalLookupTask = Task {
+            let candidates = buildIncrementalCandidates(from: start, nsText: nsText)
+            var hits: [IncrementalLookupHit] = []
+            hits.reserveCapacity(16)
+            var seen: Set<String> = []
+
+            // If Stage-2 semantic spans are ready, we can reuse their MeCab-derived lemma candidates.
+            // This lets inflected surfaces still count as "a word" (lookup via lemma) without running
+            // MeCab again per incremental candidate.
+            let lemmaCandidatesBySurface: [String: [String]] = await MainActor.run {
+                var out: [String: [String]] = [:]
+                for semantic in furiganaSemanticSpans {
+                    // Only consider spans that begin at the tapped offset.
+                    guard semantic.range.location == start else { continue }
+                    let surface = semantic.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard surface.isEmpty == false else { continue }
+                    let lemmas = aggregatedAnnotatedSpan(for: semantic)
+                        .lemmaCandidates
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { $0.isEmpty == false }
+                    if lemmas.isEmpty == false {
+                        out[surface] = lemmas
+                    }
+                }
+                return out
+            }
+
+            func appendRows(_ rows: [DictionaryEntry], matchedSurface: String) async {
+                // This Task is not main-actor isolated; only touch MainActor-isolated properties via MainActor.run.
+                let folded = matchedSurface.applyingTransform(.hiraganaToKatakana, reverse: true) ?? matchedSurface
+                for row in rows {
+                    let rowID = await MainActor.run { row.id }
+                    let key = "\(folded)#\(rowID)"
+                    if seen.contains(key) { continue }
+                    seen.insert(key)
+                    hits.append(IncrementalLookupHit(matchedSurface: matchedSurface, entry: row))
+                }
+            }
+
+            for cand in candidates {
+                guard Task.isCancelled == false else { return }
+                let trimmed = cand.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.isEmpty == false else { continue }
+
+                if let rows = try? await DictionarySQLiteStore.shared.lookup(term: trimmed, limit: 50), rows.isEmpty == false {
+                    await appendRows(rows, matchedSurface: trimmed)
+                    continue
+                }
+
+                // Lemmatization fallback: if this candidate corresponds to a Stage-2 token surface,
+                // try its lemma candidates (base forms) against the dictionary.
+                if let lemmas = lemmaCandidatesBySurface[trimmed], lemmas.isEmpty == false {
+                    for lemma in lemmas {
+                        guard Task.isCancelled == false else { return }
+                        if let rows = try? await DictionarySQLiteStore.shared.lookup(term: lemma, limit: 50), rows.isEmpty == false {
+                            await appendRows(rows, matchedSurface: trimmed)
                         }
                     }
-                    .padding(.vertical, 4)
                 }
-                .frame(maxHeight: .infinity, alignment: .top)
+            }
+
+            guard Task.isCancelled == false else { return }
+            await MainActor.run {
+                incrementalPopupHits = hits
+                isIncrementalPopupVisible = hits.isEmpty == false
+                if hits.isEmpty == false {
+                    incrementalSheetDetent = incrementalPreferredSheetDetent
+                }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func isItemSelected(_ item: TokenListItem) -> Bool {
-        guard let range = selectedRange else { return false }
-        return range.location == item.range.location && range.length == item.range.length
+    private func buildIncrementalCandidates(from start: Int, nsText: NSString) -> [String] {
+        guard start >= 0, start < nsText.length else { return [] }
+        var out: [String] = []
+        out.reserveCapacity(24)
+
+        var cursor = start
+        // First character already confirmed non-newline.
+        let first = nsText.rangeOfComposedCharacterSequence(at: cursor)
+        cursor = NSMaxRange(first)
+        out.append(nsText.substring(with: NSRange(location: start, length: cursor - start)))
+
+        while cursor < nsText.length {
+            let next = nsText.rangeOfComposedCharacterSequence(at: cursor)
+            let ch = nsText.substring(with: next)
+            if ch == "\n" || ch == "\r" { break }
+            cursor = NSMaxRange(next)
+            out.append(nsText.substring(with: NSRange(location: start, length: cursor - start)))
+        }
+
+        return out
     }
 
-    private struct TokenListRow: View {
-        let item: TokenListItem
-        let isSelected: Bool
-        let onSelect: () -> Void
-        let onGoTo: () -> Void
-        let onAdd: () -> Void
-        let onMergeLeft: () -> Void
-        let onMergeRight: () -> Void
-        let onSplit: () -> Void
-        let mergeLeftEnabled: Bool
-        let mergeRightEnabled: Bool
+    fileprivate func recomputeSavedWordOverlays() {
+        guard incrementalLookupEnabled else {
+            savedWordOverlays = []
+            return
+        }
+        guard let noteID = currentNote?.id else {
+            savedWordOverlays = []
+            return
+        }
+        let savedWords = words.words
+            .filter { $0.sourceNoteID == noteID }
+        let candidateSurfaces = savedWords
+            .map { $0.surface.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
 
-        var body: some View {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.surface)
-                        .font(.body)
-                        .lineLimit(1)
-                    if let reading = readingText {
-                        Text(reading)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+        guard candidateSurfaces.isEmpty == false else {
+            savedWordOverlays = []
+            return
+        }
+        let nsText = inputText as NSString
+        guard nsText.length > 0 else {
+            savedWordOverlays = []
+            return
+        }
+
+        let savedColor = UIColor(hexString: alternateTokenColorAHex) ?? UIColor.systemBlue
+
+        var overlays: [RubyText.TokenOverlay] = []
+        overlays.reserveCapacity(min(256, candidateSurfaces.count * 2))
+
+        var seenRanges: Set<String> = []
+
+        // Primary path: use Stage-2 spans (surface + lemma candidates) so bookmarked base forms
+        // will still color inflected occurrences in running text.
+        let savedSurfaceKeys = Set(candidateSurfaces.map { kanaFoldToHiragana($0) })
+        if furiganaSemanticSpans.isEmpty == false {
+            for semantic in furiganaSemanticSpans {
+                guard semantic.range.location != NSNotFound, semantic.range.length > 0 else { continue }
+                guard NSMaxRange(semantic.range) <= nsText.length else { continue }
+
+                let surface = semantic.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard surface.isEmpty == false else { continue }
+
+                let aggregated = aggregatedAnnotatedSpan(for: semantic)
+                var candidates: [String] = []
+                candidates.reserveCapacity(1 + aggregated.lemmaCandidates.count)
+                candidates.append(surface)
+                candidates.append(contentsOf: aggregated.lemmaCandidates)
+
+                var isSaved = false
+                for cand in candidates {
+                    let trimmed = cand.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed.isEmpty == false else { continue }
+                    if savedSurfaceKeys.contains(kanaFoldToHiragana(trimmed)) {
+                        isSaved = true
+                        break
                     }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onSelect)
-                Spacer(minLength: 12)
-                Button(action: onAdd) {
-                    if item.isAlreadySaved {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                    } else {
-                        Image(systemName: "star.circle")
-                            .foregroundColor(.accentColor)
+                guard isSaved else { continue }
+
+                let rangeKey = "\(semantic.range.location)#\(semantic.range.length)"
+                if seenRanges.contains(rangeKey) == false {
+                    seenRanges.insert(rangeKey)
+                    overlays.append(RubyText.TokenOverlay(range: semantic.range, color: savedColor))
+                }
+            }
+        }
+
+        // Fallback path: literal substring scan for cases where spans aren't available yet.
+        for surface in candidateSurfaces {
+            for variant in kanaVariants(surface) {
+                var search = NSRange(location: 0, length: nsText.length)
+                while search.length > 0 {
+                    let found = nsText.range(of: variant, options: [], range: search)
+                    if found.location == NSNotFound || found.length == 0 { break }
+                    let rangeKey = "\(found.location)#\(found.length)"
+                    if seenRanges.contains(rangeKey) == false {
+                        seenRanges.insert(rangeKey)
+                        overlays.append(RubyText.TokenOverlay(range: found, color: savedColor))
                     }
+                    let nextLoc = NSMaxRange(found)
+                    if nextLoc >= nsText.length { break }
+                    search = NSRange(location: nextLoc, length: nsText.length - nextLoc)
                 }
-                .font(.title3)
-                .buttonStyle(.plain)
-                .accessibilityLabel(item.isAlreadySaved ? "Remove from saved" : "Save")
-            }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(.secondarySystemBackground))
-            )
-            .contentShape(Rectangle())
-            .contextMenu {
-                Button(action: onGoTo) {
-                    Label("Go to in Note", systemImage: "text.magnifyingglass")
-                }
-
-                Button(action: onMergeLeft) {
-                    Label("Merge Left", systemImage: "arrow.left.to.line")
-                }
-                .disabled(mergeLeftEnabled == false)
-
-                Button(action: onMergeRight) {
-                    Label("Merge Right", systemImage: "arrow.right.to.line")
-                }
-                .disabled(mergeRightEnabled == false)
-
-                Button(action: onSplit) {
-                    Label("Split", systemImage: "scissors")
-                }
-                .disabled(item.canSplit == false)
             }
         }
 
-        private var readingText: String? {
-            guard let reading = item.displayReading?.trimmingCharacters(in: .whitespacesAndNewlines), reading.isEmpty == false else { return nil }
-            if Self.isKanaOnly(item.surface) {
-                return nil
-            }
-            return reading
-        }
-
-        private static func isKanaOnly(_ text: String) -> Bool {
-            let scalars = text.unicodeScalars
-            guard scalars.isEmpty == false else { return false }
-            return scalars.allSatisfy { scalar in
-                isHiragana(scalar) || isKatakana(scalar)
-            }
-        }
-
-        private static func isHiragana(_ scalar: UnicodeScalar) -> Bool {
-            (0x3040...0x309F).contains(Int(scalar.value))
-        }
-
-        private static func isKatakana(_ scalar: UnicodeScalar) -> Bool {
-            (0x30A0...0x30FF).contains(Int(scalar.value)) || Int(scalar.value) == 0xFF70
-        }
+        savedWordOverlays = overlays
     }
 }
 

@@ -13,15 +13,44 @@ final class LexiconTrie {
     private let maxWordLength: Int
     private let instrumentation = TrieInstrumentation()
 
+    var maxLexiconWordLength: Int { maxWordLength }
+
+#if DEBUG
+    var debugMaxWordLength: Int { maxWordLength }
+
+    func debugContainsWord(_ word: String) -> Bool {
+        let ns = word as NSString
+        guard ns.length > 0 else { return false }
+        return containsWord(in: ns, from: 0, through: ns.length, requireKanji: false)
+    }
+#endif
+
     init(words: [String]) {
         let root = Node()
         var maxLen = 1
         for word in words {
-            let normalized = word.precomposedStringWithCanonicalMapping
-            guard normalized.isEmpty == false else { continue }
-            let units = Array(normalized.utf16)
-            maxLen = max(maxLen, units.count)
-            Self.insert(units, into: root)
+            // Insert multiple normalization variants so lookups succeed across common paste forms.
+            // - NFC/NFD: canonical composition differences (e.g. カ + ゙ instead of ガ)
+            // - Halfwidth: compatibility variants (e.g. ｶﾞ instead of ガ)
+            let nfc = word.precomposedStringWithCanonicalMapping
+            let nfd = word.decomposedStringWithCanonicalMapping
+
+            func insertVariant(_ s: String) {
+                guard s.isEmpty == false else { return }
+                let units = Array(s.utf16)
+                maxLen = max(maxLen, units.count)
+                Self.insert(units, into: root)
+            }
+
+            insertVariant(nfc)
+            if nfd != nfc { insertVariant(nfd) }
+
+            if let halfwidthNfc = nfc.applyingTransform(.fullwidthToHalfwidth, reverse: false), halfwidthNfc != nfc {
+                insertVariant(halfwidthNfc)
+            }
+            if let halfwidthNfd = nfd.applyingTransform(.fullwidthToHalfwidth, reverse: false), halfwidthNfd != nfd {
+                insertVariant(halfwidthNfd)
+            }
         }
         self.root = root
         self.maxWordLength = maxLen
@@ -77,6 +106,46 @@ final class LexiconTrie {
         instrumentation.recordTrieTime(CFAbsoluteTimeGetCurrent() - loopStart)
 
         return lastMatchEnd
+    }
+
+    /// Returns all end indices of lexicon matches that begin at `index`, ordered by increasing end.
+    ///
+    /// This is useful for tokenization that prefers decomposing concatenations into multiple words
+    /// (e.g. Katakana runs like "ロンリーロンリーハート" → "ロンリー","ロンリー","ハート").
+    func allMatchEnds(in text: NSString, from index: Int, requireKanji: Bool = true) -> [Int] {
+        instrumentation.recordCursor()
+        let length = text.length
+        guard index < length else { return [] }
+        instrumentation.recordTraversal()
+
+        var node = root
+        var cursor = index
+        var steps = 0
+        var hasKanji = false
+        var ends: [Int] = []
+        ends.reserveCapacity(2)
+
+        let loopStart = CFAbsoluteTimeGetCurrent()
+
+        while cursor < length && steps < maxWordLength {
+            let unit = text.character(at: cursor)
+            instrumentation.recordCharAccess()
+            instrumentation.recordLookup()
+            guard let next = node.children[unit] else { break }
+            if Self.isKanji(unit) {
+                hasKanji = true
+            }
+            node = next
+            cursor += 1
+            steps += 1
+            if node.isWord, (requireKanji == false || hasKanji) {
+                ends.append(cursor)
+            }
+        }
+
+        instrumentation.recordSteps(steps)
+        instrumentation.recordTrieTime(CFAbsoluteTimeGetCurrent() - loopStart)
+        return ends
     }
 
     struct MatchInfo {

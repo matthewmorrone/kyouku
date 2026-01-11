@@ -11,6 +11,7 @@
 - [ ] Animation on cards tab not great
 - [ ] Toggling furigana shouldn’t jump scroll back to top
 - [ ] When a word only has one definition, don’t show the arrows on either side or the 1/1
+- [ ] high merge/split buttons behind a toggle
 
 ## Furigana / tokenization issues
 - [x] わ sometimes shows up as the furigana for 私 in 私たち, when it should be わたし

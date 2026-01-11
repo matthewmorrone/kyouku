@@ -77,7 +77,8 @@ enum FuriganaAttributedTextBuilder {
         let stage2 = await SpanReadingAttacher().attachReadings(
             text: text,
             spans: adjustedSpans,
-            treatSpanBoundariesAsAuthoritative: (baseSpans != nil)
+            treatSpanBoundariesAsAuthoritative: (baseSpans != nil),
+            hardCuts: tokenBoundaries
         )
 
         // Apply user overrides to Stage-2 outputs. This preserves the existing

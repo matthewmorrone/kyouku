@@ -26,7 +26,7 @@ struct ContentView: View {
 
             WordsView()
                 .tabItem {
-                    Label("Dictionary", systemImage: "text.page.badge.magnifyingglass")
+                    Label("Words", systemImage: "text.book.closed.fill")
                 }
                 .tag(AppTab.dictionary)
 

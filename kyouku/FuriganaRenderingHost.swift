@@ -16,27 +16,37 @@ struct FuriganaRenderingHost: View {
     var unknownTokenColor: UIColor
     var selectedRangeHighlight: NSRange?
     var customizedRanges: [NSRange]
+    var extraTokenOverlays: [RubyText.TokenOverlay] = []
     var enableTapInspection: Bool = true
     var bottomOverscrollPadding: CGFloat = 0
+    var onCharacterTap: ((Int) -> Void)? = nil
     var onSpanSelection: ((RubySpanSelection?) -> Void)? = nil
+    var enableDragSelection: Bool = false
+    var onDragSelectionBegan: (() -> Void)? = nil
+    var onDragSelectionEnded: ((NSRange) -> Void)? = nil
     var contextMenuStateProvider: (() -> RubyContextMenuState?)? = nil
     var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
 
     var body: some View {
-        Group {
-            if isEditing {
-                editorContent
-            }
-            else if text.isEmpty {
-                displayShell { EmptyView() }
-            }
-            else {
-                displayShell {
-                    rubyBlock(annotationVisibility: showFurigana ? .visible : .removed)
+        GeometryReader { proxy in
+            let halfWidth = max(1, proxy.size.width * 0.5)
+            HStack(spacing: 0) {
+                Group {
+                    if text.isEmpty {
+                        EmptyView()
+                    } else {
+                        rubyBlock(annotationVisibility: showFurigana ? .visible : .removed)
+                    }
                 }
+                .frame(width: halfWidth, alignment: .topLeading)
+
+                Divider()
+
+                editorContent
+                    .frame(width: max(1, proxy.size.width - halfWidth), alignment: .topLeading)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
         .cornerRadius(12)
         .roundedBorder(Color(.white), cornerRadius: 12)
@@ -46,6 +56,7 @@ struct FuriganaRenderingHost: View {
         VStack(spacing: 0) {
             EditingTextView(
                 text: $text,
+                isEditable: isEditing,
                 fontSize: CGFloat(textSize),
                 lineSpacing: CGFloat(lineSpacing),
                 insets: UIEdgeInsets(
@@ -76,16 +87,12 @@ struct FuriganaRenderingHost: View {
         let insetOverhang = max(ceil(rawOverhang), 2)
         let left = 12 + insetOverhang
         let right = 12 + insetOverhang
-        return EdgeInsets(top: CGFloat(topInset), leading: CGFloat(left), bottom: 12, trailing: CGFloat(right))
-    }
-
-    private func displayShell<Content: View>(@ViewBuilder content: @escaping () -> Content) -> some View {
-        GeometryReader { proxy in
-            content()
-                // Constrain width so ruby wraps correctly.
-                .frame(width: proxy.size.width, alignment: .leading)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
+        return EdgeInsets(
+            top: CGFloat(topInset),
+            leading: CGFloat(left),
+            bottom: CGFloat(12 + bottomOverscrollPadding),
+            trailing: CGFloat(right)
+        )
     }
 
     private func rubyBlock(annotationVisibility: RubyAnnotationVisibility) -> some View {
@@ -114,11 +121,17 @@ struct FuriganaRenderingHost: View {
             annotationVisibility: annotationVisibility,
             isScrollEnabled: true,
             allowSystemTextSelection: false,
+            wrapLines: false,
+            horizontalScrollEnabled: true,
             tokenOverlays: tokenColorOverlays,
             semanticSpans: semanticSpans,
             selectedRange: selectedRangeHighlight,
             customizedRanges: customizedRanges,
             enableTapInspection: enableTapInspection,
+            enableDragSelection: enableDragSelection,
+            onDragSelectionBegan: onDragSelectionBegan,
+            onDragSelectionEnded: onDragSelectionEnded,
+            onCharacterTap: onCharacterTap,
             onSpanSelection: onSpanSelection,
             contextMenuStateProvider: contextMenuStateProvider,
             onContextMenuAction: onContextMenuAction
@@ -144,8 +157,11 @@ struct FuriganaRenderingHost: View {
     }
 
     private var tokenColorOverlays: [RubyText.TokenOverlay] {
-        guard (alternateTokenColors || highlightUnknownTokens) else { return [] }
-        guard semanticSpans.isEmpty == false else { return [] }
+        let wantsTokenColors = (alternateTokenColors || highlightUnknownTokens)
+        if wantsTokenColors == false {
+            return extraTokenOverlays
+        }
+        guard semanticSpans.isEmpty == false else { return extraTokenOverlays }
         let backingString = furiganaText?.string ?? text
         let textStorage = backingString as NSString
         var overlays: [RubyText.TokenOverlay] = []
@@ -167,6 +183,9 @@ struct FuriganaRenderingHost: View {
             overlays.append(contentsOf: unknowns)
         }
 
+        if extraTokenOverlays.isEmpty == false {
+            overlays.append(contentsOf: extraTokenOverlays)
+        }
         return overlays
     }
 
@@ -248,6 +267,7 @@ struct FuriganaRenderingHost: View {
 
 private struct EditingTextView: UIViewRepresentable {
     @Binding var text: String
+    let isEditable: Bool
     let fontSize: CGFloat
     let lineSpacing: CGFloat
     let insets: UIEdgeInsets
@@ -255,15 +275,16 @@ private struct EditingTextView: UIViewRepresentable {
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
         view.backgroundColor = .clear
-        view.isEditable = true
+        view.isEditable = isEditable
+        view.delegate = context.coordinator
         view.isSelectable = true
         view.isScrollEnabled = true
         view.alwaysBounceVertical = true
-        view.alwaysBounceHorizontal = false
-        view.showsHorizontalScrollIndicator = false
-        view.textContainer.widthTracksTextView = true
+        view.alwaysBounceHorizontal = true
+        view.showsHorizontalScrollIndicator = true
+        view.textContainer.widthTracksTextView = false
         view.textContainer.maximumNumberOfLines = 0
-        view.textContainer.lineBreakMode = .byWordWrapping
+        view.textContainer.lineBreakMode = .byClipping
         view.textContainer.lineFragmentPadding = 0
         view.textContainerInset = insets
         view.keyboardDismissMode = .interactive
@@ -272,13 +293,15 @@ private struct EditingTextView: UIViewRepresentable {
         view.delegate = context.coordinator
         view.font = UIFont.systemFont(ofSize: fontSize)
         view.textColor = UIColor.label
+
+        view.textContainer.size = CGSize(width: 20000, height: CGFloat.greatestFiniteMagnitude)
         
         // Build attributed text from the same source as view mode, but remove ruby for editing.
         let baseAttributed = NSAttributedString(string: text)
         let processed = Self.removingRuby(from: baseAttributed)
         let fullRange = NSRange(location: 0, length: (processed.length))
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.lineBreakMode = .byClipping
         paragraph.lineHeightMultiple = max(0.8, 1.0)
         paragraph.lineSpacing = max(0, lineSpacing)
         let baseFont = UIFont.systemFont(ofSize: fontSize)
@@ -292,7 +315,7 @@ private struct EditingTextView: UIViewRepresentable {
         let initialLength = view.textStorage.length
         if initialLength > 0 {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.lineBreakMode = .byClipping
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
             view.textStorage.addAttributes([
@@ -319,7 +342,7 @@ private struct EditingTextView: UIViewRepresentable {
             let processed = Self.removingRuby(from: baseAttributed)
             let fullRange = NSRange(location: 0, length: processed.length)
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.lineBreakMode = .byClipping
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
             let baseFont = UIFont.systemFont(ofSize: fontSize)
@@ -341,15 +364,20 @@ private struct EditingTextView: UIViewRepresentable {
             }
         }
 
+        uiView.isEditable = isEditable
         uiView.font = UIFont.systemFont(ofSize: fontSize)
         uiView.textColor = UIColor.label
         uiView.textContainerInset = insets
-        uiView.alwaysBounceHorizontal = false
-        uiView.showsHorizontalScrollIndicator = false
-        uiView.textContainer.widthTracksTextView = true
+        uiView.alwaysBounceHorizontal = true
+        uiView.showsHorizontalScrollIndicator = true
+        uiView.textContainer.widthTracksTextView = false
         uiView.textContainer.maximumNumberOfLines = 0
-        uiView.textContainer.lineBreakMode = .byWordWrapping
+        uiView.textContainer.lineBreakMode = .byClipping
         uiView.textContainer.lineFragmentPadding = 0
+
+        if uiView.textContainer.size.width < 20000 {
+            uiView.textContainer.size = CGSize(width: 20000, height: CGFloat.greatestFiniteMagnitude)
+        }
 
         uiView.contentInset = .zero
         uiView.verticalScrollIndicatorInsets = .zero
@@ -362,7 +390,7 @@ private struct EditingTextView: UIViewRepresentable {
         let fullLength = uiView.textStorage.length
         if fullLength > 0 {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byWordWrapping
+            paragraph.lineBreakMode = .byClipping
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
             uiView.textStorage.addAttributes([

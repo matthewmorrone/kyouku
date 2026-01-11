@@ -83,6 +83,15 @@ xcrun simctl install "$SIM_UDID" "$APP_PATH" >/dev/null
 echo "Launching: $BUNDLE_ID"
 LAUNCH_ARGS=()
 
+# Strict TextKit 2 mode: crash immediately if any TextKit 1 API is accessed.
+# Default ON for these scripts; override by exporting KYOUKU_STRICT_TEXTKIT2=0.
+if [[ "${KYOUKU_STRICT_TEXTKIT2:-}" == "" ]]; then
+  KYOUKU_STRICT_TEXTKIT2=1
+fi
+if [[ "${KYOUKU_STRICT_TEXTKIT2:-}" != "0" ]]; then
+  LAUNCH_ARGS+=(--env "KYOUKU_STRICT_TEXTKIT2=1")
+fi
+
 # If RUBY_TRACE=1 is set, enable very verbose per-ruby logging inside the app.
 # This maps to DiagnosticsLogging's override key.
 if [[ "${RUBY_TRACE:-}" == "1" ]]; then

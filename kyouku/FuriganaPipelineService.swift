@@ -11,6 +11,7 @@ struct FuriganaPipelineService {
         let existingSpans: [AnnotatedSpan]?
         let existingSemanticSpans: [SemanticSpan]
         let amendedSpans: [TextSpan]?
+        let hardCuts: [Int]
         let readingOverrides: [ReadingOverride]
         let context: String
     }
@@ -35,7 +36,7 @@ struct FuriganaPipelineService {
                 let stage2 = try await FuriganaAttributedTextBuilder.computeStage2(
                     text: input.text,
                     context: input.context,
-                    tokenBoundaries: [],
+                    tokenBoundaries: input.hardCuts,
                     readingOverrides: input.readingOverrides,
                     baseSpans: input.amendedSpans
                 )

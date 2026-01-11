@@ -9,7 +9,13 @@ final class TokenBoundariesStore: ObservableObject {
 		let isLexiconMatch: Bool
 	}
 
+	private struct PersistedPayload: Codable {
+		var spansByNote: [UUID: [StoredSpan]]
+		var hardCutsByNote: [UUID: [Int]]
+	}
+
 	@Published private(set) var spansByNote: [UUID: [StoredSpan]] = [:]
+	@Published private(set) var hardCutsByNote: [UUID: [Int]] = [:]
 
 	private let fileName = "token-spans.json"
 
@@ -19,6 +25,41 @@ final class TokenBoundariesStore: ObservableObject {
 
 	func hasCustomSpans(for noteID: UUID) -> Bool {
 		(spansByNote[noteID]?.isEmpty == false)
+	}
+
+	func hasHardCuts(for noteID: UUID) -> Bool {
+		(hardCutsByNote[noteID]?.isEmpty == false)
+	}
+
+	func hardCuts(for noteID: UUID, text: String) -> [Int] {
+		guard let cuts = hardCutsByNote[noteID], cuts.isEmpty == false else { return [] }
+		let length = (text as NSString).length
+		guard length > 0 else { return [] }
+		return cuts
+			.filter { $0 > 0 && $0 < length }
+			.sorted()
+	}
+
+	func addHardCut(noteID: UUID, utf16Index: Int, text: String) {
+		let length = (text as NSString).length
+		guard length > 0 else { return }
+		guard utf16Index > 0, utf16Index < length else { return }
+		var existing = Set(hardCutsByNote[noteID] ?? [])
+		let inserted = existing.insert(utf16Index).inserted
+		guard inserted else { return }
+		hardCutsByNote[noteID] = existing.sorted()
+		save()
+		CustomLogger.shared.debug("Saved hard cut note=\(noteID) at=\(utf16Index)")
+	}
+
+	func removeHardCut(noteID: UUID, utf16Index: Int) {
+		guard var cuts = hardCutsByNote[noteID], cuts.isEmpty == false else { return }
+		let before = cuts.count
+		cuts.removeAll { $0 == utf16Index }
+		guard cuts.count != before else { return }
+		hardCutsByNote[noteID] = cuts.isEmpty ? nil : cuts
+		save()
+		CustomLogger.shared.debug("Removed hard cut note=\(noteID) at=\(utf16Index)")
 	}
 
 	func storedRanges(for noteID: UUID) -> [NSRange] {
@@ -35,6 +76,15 @@ final class TokenBoundariesStore: ObservableObject {
 			spansByNote[noteID] = snapshot
 		} else {
 			spansByNote[noteID] = nil
+		}
+		save()
+	}
+
+	func restoreHardCuts(noteID: UUID, cuts: [Int]?) {
+		if let cuts, cuts.isEmpty == false {
+			hardCutsByNote[noteID] = cuts
+		} else {
+			hardCutsByNote[noteID] = nil
 		}
 		save()
 	}
@@ -83,7 +133,9 @@ final class TokenBoundariesStore: ObservableObject {
 	}
 
 	func removeAll(for noteID: UUID) {
-		guard spansByNote.removeValue(forKey: noteID) != nil else { return }
+		let removedSpans = spansByNote.removeValue(forKey: noteID) != nil
+		let removedCuts = hardCutsByNote.removeValue(forKey: noteID) != nil
+		guard removedSpans || removedCuts else { return }
 		save()
 		CustomLogger.shared.debug("Removed amended spans note=\(noteID)")
 	}
@@ -102,25 +154,35 @@ final class TokenBoundariesStore: ObservableObject {
 		guard let url = fileURL(), FileManager.default.fileExists(atPath: url.path) else { return }
 		do {
 			let data = try Data(contentsOf: url)
+			if let decoded = try? JSONDecoder().decode(PersistedPayload.self, from: data) {
+				spansByNote = decoded.spansByNote
+				hardCutsByNote = decoded.hardCutsByNote
+				CustomLogger.shared.debug("Loaded token spans notes=\(self.spansByNote.count) hardCutsNotes=\(self.hardCutsByNote.count)")
+				return
+			}
 			if let decoded = try? JSONDecoder().decode([UUID: [StoredSpan]].self, from: data) {
 				spansByNote = decoded
-				CustomLogger.shared.debug("Loaded token spans notes=\(self.spansByNote.count)")
+				hardCutsByNote = [:]
+				CustomLogger.shared.debug("Loaded legacy token spans notes=\(self.spansByNote.count)")
 				return
 			}
 			// Backward-compat: older boundary index format existed briefly; ignore it.
 			_ = try? JSONDecoder().decode([UUID: [Int]].self, from: data)
 			spansByNote = [:]
+			hardCutsByNote = [:]
 			CustomLogger.shared.debug("Loaded legacy token boundaries format; ignored")
 		} catch {
 			CustomLogger.shared.error("Failed to load token boundaries: \(error)")
 			spansByNote = [:]
+			hardCutsByNote = [:]
 		}
 	}
 
 	private func save() {
 		guard let url = fileURL() else { return }
 		do {
-			let data = try JSONEncoder().encode(spansByNote)
+			let payload = PersistedPayload(spansByNote: spansByNote, hardCutsByNote: hardCutsByNote)
+			let data = try JSONEncoder().encode(payload)
 			try data.write(to: url, options: .atomic)
 			CustomLogger.shared.debug("Saved token spans notes=\(self.spansByNote.count)")
 		} catch {
