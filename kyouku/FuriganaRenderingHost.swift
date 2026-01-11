@@ -10,6 +10,7 @@ struct FuriganaRenderingHost: View {
     var isEditing: Bool
     var showFurigana: Bool
     var lineSpacing: Double
+    var wrapLines: Bool = false
     var alternateTokenColors: Bool
     var highlightUnknownTokens: Bool
     var tokenPalette: [UIColor]
@@ -30,6 +31,7 @@ struct FuriganaRenderingHost: View {
     var body: some View {
         GeometryReader { proxy in
             let halfWidth = max(1, proxy.size.width * 0.5)
+            let paneBackground = isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground)
             HStack(spacing: 0) {
                 Group {
                     if text.isEmpty {
@@ -39,11 +41,15 @@ struct FuriganaRenderingHost: View {
                     }
                 }
                 .frame(width: halfWidth, alignment: .topLeading)
+                .background(paneBackground)
+                .clipped()
 
                 Divider()
 
                 editorContent
                     .frame(width: max(1, proxy.size.width - halfWidth), alignment: .topLeading)
+                    .background(paneBackground)
+                    .clipped()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
@@ -59,6 +65,7 @@ struct FuriganaRenderingHost: View {
                 isEditable: isEditing,
                 fontSize: CGFloat(textSize),
                 lineSpacing: CGFloat(lineSpacing),
+                wrapLines: wrapLines,
                 insets: UIEdgeInsets(
                     top: editorInsets.top,
                     left: editorInsets.leading,
@@ -121,8 +128,8 @@ struct FuriganaRenderingHost: View {
             annotationVisibility: annotationVisibility,
             isScrollEnabled: true,
             allowSystemTextSelection: false,
-            wrapLines: false,
-            horizontalScrollEnabled: true,
+            wrapLines: wrapLines,
+            horizontalScrollEnabled: wrapLines == false,
             tokenOverlays: tokenColorOverlays,
             semanticSpans: semanticSpans,
             selectedRange: selectedRangeHighlight,
@@ -270,7 +277,10 @@ private struct EditingTextView: UIViewRepresentable {
     let isEditable: Bool
     let fontSize: CGFloat
     let lineSpacing: CGFloat
+    let wrapLines: Bool
     let insets: UIEdgeInsets
+
+    private static let noWrapContainerWidth: CGFloat = 20000
 
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
@@ -280,11 +290,11 @@ private struct EditingTextView: UIViewRepresentable {
         view.isSelectable = true
         view.isScrollEnabled = true
         view.alwaysBounceVertical = true
-        view.alwaysBounceHorizontal = true
-        view.showsHorizontalScrollIndicator = true
-        view.textContainer.widthTracksTextView = false
+        view.alwaysBounceHorizontal = wrapLines == false
+        view.showsHorizontalScrollIndicator = wrapLines == false
+        view.textContainer.widthTracksTextView = wrapLines
         view.textContainer.maximumNumberOfLines = 0
-        view.textContainer.lineBreakMode = .byClipping
+        view.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         view.textContainer.lineFragmentPadding = 0
         view.textContainerInset = insets
         view.keyboardDismissMode = .interactive
@@ -294,14 +304,22 @@ private struct EditingTextView: UIViewRepresentable {
         view.font = UIFont.systemFont(ofSize: fontSize)
         view.textColor = UIColor.label
 
-        view.textContainer.size = CGSize(width: 20000, height: CGFloat.greatestFiniteMagnitude)
+        if wrapLines == false {
+            view.textContainer.size = CGSize(width: Self.noWrapContainerWidth, height: CGFloat.greatestFiniteMagnitude)
+        } else {
+            // Start in a wrapped-friendly configuration even before the first layout pass.
+            let targetWidth = max(1, view.bounds.width - insets.left - insets.right)
+            if targetWidth.isFinite, targetWidth > 1 {
+                view.textContainer.size = CGSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude)
+            }
+        }
         
         // Build attributed text from the same source as view mode, but remove ruby for editing.
         let baseAttributed = NSAttributedString(string: text)
         let processed = Self.removingRuby(from: baseAttributed)
         let fullRange = NSRange(location: 0, length: (processed.length))
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byClipping
+        paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         paragraph.lineHeightMultiple = max(0.8, 1.0)
         paragraph.lineSpacing = max(0, lineSpacing)
         let baseFont = UIFont.systemFont(ofSize: fontSize)
@@ -315,7 +333,7 @@ private struct EditingTextView: UIViewRepresentable {
         let initialLength = view.textStorage.length
         if initialLength > 0 {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
             view.textStorage.addAttributes([
@@ -342,7 +360,7 @@ private struct EditingTextView: UIViewRepresentable {
             let processed = Self.removingRuby(from: baseAttributed)
             let fullRange = NSRange(location: 0, length: processed.length)
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
             let baseFont = UIFont.systemFont(ofSize: fontSize)
@@ -368,15 +386,28 @@ private struct EditingTextView: UIViewRepresentable {
         uiView.font = UIFont.systemFont(ofSize: fontSize)
         uiView.textColor = UIColor.label
         uiView.textContainerInset = insets
-        uiView.alwaysBounceHorizontal = true
-        uiView.showsHorizontalScrollIndicator = true
-        uiView.textContainer.widthTracksTextView = false
+        uiView.alwaysBounceHorizontal = wrapLines == false
+        uiView.showsHorizontalScrollIndicator = wrapLines == false
+        uiView.textContainer.widthTracksTextView = wrapLines
         uiView.textContainer.maximumNumberOfLines = 0
-        uiView.textContainer.lineBreakMode = .byClipping
+        uiView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         uiView.textContainer.lineFragmentPadding = 0
 
-        if uiView.textContainer.size.width < 20000 {
-            uiView.textContainer.size = CGSize(width: 20000, height: CGFloat.greatestFiniteMagnitude)
+        if wrapLines {
+            // If we previously disabled wrapping, the container can remain extremely wide.
+            // In that state, `.byWordWrapping` won't wrap. Shrink to current bounds when possible.
+            if uiView.textContainer.size.width > (Self.noWrapContainerWidth * 0.5) {
+                let targetWidth = max(1, uiView.bounds.width - insets.left - insets.right)
+                if targetWidth.isFinite, targetWidth > 1 {
+                    uiView.textContainer.size = CGSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude)
+                } else {
+                    uiView.textContainer.size = CGSize(width: 320, height: CGFloat.greatestFiniteMagnitude)
+                }
+            }
+        } else {
+            if uiView.textContainer.size.width < Self.noWrapContainerWidth {
+                uiView.textContainer.size = CGSize(width: Self.noWrapContainerWidth, height: CGFloat.greatestFiniteMagnitude)
+            }
         }
 
         uiView.contentInset = .zero
@@ -390,7 +421,7 @@ private struct EditingTextView: UIViewRepresentable {
         let fullLength = uiView.textStorage.length
         if fullLength > 0 {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
             uiView.textStorage.addAttributes([
@@ -440,7 +471,7 @@ private struct EditingTextView: UIViewRepresentable {
 
     private func applyTypingAttributes(to textView: UITextView) {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         paragraph.lineSpacing = max(0, lineSpacing)
         textView.typingAttributes = [
             NSAttributedString.Key.font: UIFont.systemFont(ofSize: fontSize),

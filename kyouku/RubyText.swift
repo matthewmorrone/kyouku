@@ -80,10 +80,14 @@ struct RubyText: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = false
         textView.textContainer.maximumNumberOfLines = 0
-        textView.textContainer.lineBreakMode = .byWordWrapping
+        textView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        if wrapLines == false {
+            // Avoid an initial wrapped layout before SwiftUI's first `sizeThatFits` pass.
+            textView.textContainer.size = CGSize(width: 20000, height: CGFloat.greatestFiniteMagnitude)
+        }
         textView.textContainerInset = textInsets
-        textView.clipsToBounds = false
-        textView.layer.masksToBounds = false
+        textView.clipsToBounds = true
+        textView.layer.masksToBounds = true
         textView.tintColor = .systemBlue
         textView.font = UIFont.systemFont(ofSize: fontSize)
         textView.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -129,6 +133,9 @@ struct RubyText: UIViewRepresentable {
         uiView.textContainer.widthTracksTextView = false
         uiView.textContainer.maximumNumberOfLines = 0
         uiView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        if wrapLines == false, uiView.textContainer.size.width < 20000 {
+            uiView.textContainer.size = CGSize(width: 20000, height: CGFloat.greatestFiniteMagnitude)
+        }
 
         if allowSystemTextSelection == false {
             uiView.selectedRange = NSRange(location: 0, length: 0)
@@ -202,7 +209,7 @@ struct RubyText: UIViewRepresentable {
         let mutable = NSMutableAttributedString(attributedString: attributed)
         let fullRange = NSRange(location: 0, length: mutable.length)
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         paragraph.lineHeightMultiple = max(0.8, lineHeightMultiple)
         paragraph.lineSpacing = max(0, extraGap)
         let baseFont = UIFont.systemFont(ofSize: fontSize)
@@ -564,6 +571,11 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         didSet {
             guard oldValue != wrapLines else { return }
             applyStableTextContainerConfig()
+            // When toggling from horizontal-scroll mode (very wide container) back to wrap,
+            // force SwiftUI to re-measure so `sizeThatFits` can clamp the container width.
+            lastMeasuredBoundsWidth = 0
+            lastMeasuredTextContainerWidth = 0
+            invalidateIntrinsicContentSize()
             setNeedsLayout()
         }
     }
@@ -683,6 +695,27 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         textContainer.lineFragmentPadding = 0
         textContainer.maximumNumberOfLines = 0
         textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+
+        if wrapLines {
+            // If we previously disabled wrapping, we may still have an extremely wide container.
+            // In that case, `lineBreakMode = .byWordWrapping` won't actually wrap until the
+            // container width is constrained. SwiftUI should correct this via `sizeThatFits`,
+            // but shrink immediately to the current bounds when possible.
+            if textContainer.size.width > 10000 {
+                let inset = textContainerInset
+                let targetWidth = max(1, bounds.width - inset.left - inset.right)
+                if targetWidth.isFinite, targetWidth > 1 {
+                    textContainer.size = CGSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude)
+                } else {
+                    // Conservative fallback; SwiftUI measurement will refine this.
+                    textContainer.size = CGSize(width: 320, height: CGFloat.greatestFiniteMagnitude)
+                }
+            }
+        } else {
+            if textContainer.size.width < 20000 {
+                textContainer.size = CGSize(width: 20000, height: CGFloat.greatestFiniteMagnitude)
+            }
+        }
     }
 
     private func updateHorizontalScrollConfig() {
@@ -714,8 +747,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         textContainer.maximumNumberOfLines = 0
         textContainer.lineBreakMode = .byWordWrapping
         textContainerInset = .zero
-        clipsToBounds = false
-        layer.masksToBounds = false
+        clipsToBounds = true
+        layer.masksToBounds = true
         showsVerticalScrollIndicator = false
         showsHorizontalScrollIndicator = false
         lastTextContainerIdentity = ObjectIdentifier(textContainer)

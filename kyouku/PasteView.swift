@@ -108,6 +108,7 @@ struct PasteView: View {
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
     @AppStorage("readingShowFurigana") private var showFurigana: Bool = true
+    @AppStorage("readingWrapLines") private var wrapLines: Bool = false
     @AppStorage("readingAlternateTokenColors") private var alternateTokenColors: Bool = false
     @AppStorage("readingHighlightUnknownTokens") private var highlightUnknownTokens: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
@@ -386,6 +387,7 @@ struct PasteView: View {
                 isEditing: isEditing,
                 showFurigana: incrementalLookupEnabled ? false : showFurigana,
                 lineSpacing: readingLineSpacing,
+                wrapLines: wrapLines,
                 alternateTokenColors: incrementalLookupEnabled ? false : alternateTokenColors,
                 highlightUnknownTokens: incrementalLookupEnabled ? false : highlightUnknownTokens,
                 tokenPalette: alternateTokenPalette,
@@ -502,6 +504,9 @@ struct PasteView: View {
                 .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
                 .opacity(isEditing ? 0.45 : 1.0)
                 .contextMenu {
+                    Toggle(isOn: $wrapLines) {
+                        Label("Wrap Lines", systemImage: "text.justify")
+                    }
                     Toggle(isOn: $alternateTokenColors) {
                         Label("Alternate Token Colors", systemImage: "textformat.alt")
                     }
