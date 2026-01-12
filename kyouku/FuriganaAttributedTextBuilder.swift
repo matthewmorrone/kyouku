@@ -344,7 +344,6 @@ enum FuriganaAttributedTextBuilder {
         guard text.isEmpty == false else { return nil }
         let rubyFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, furiganaSize)))
         let attributes = [kCTFontAttributeName as NSAttributedString.Key: rubyFont] as CFDictionary
-        CustomLogger.shared.info("[ruby] attributes: \(String(describing: attributes))")
         return CTRubyAnnotationCreateWithAttributes(
             .center,
             // Prefer expanding the base rather than allowing ruby to overhang the base.

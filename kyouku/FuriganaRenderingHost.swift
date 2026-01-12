@@ -31,29 +31,33 @@ struct FuriganaRenderingHost: View {
     var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
 
     var body: some View {
-        GeometryReader { proxy in
-            let halfWidth = max(1, proxy.size.width * 0.5)
-            let paneBackground = isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground)
-            HStack(spacing: 0) {
-                Group {
-                    if text.isEmpty {
-                        EmptyView()
-                    } else {
-                        rubyBlock(annotationVisibility: showFurigana ? .visible : .removed)
-                    }
+        // IMPORTANT:
+        // We keep both panes alive at all times and only toggle visibility.
+        // SwiftUI `if` conditionals would destroy/recreate the UIViewRepresentables,
+        // which resets scroll offsets and can effectively "tear out" scroll sync state.
+        let paneBackground = isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground)
+        ZStack(alignment: .topLeading) {
+            Group {
+                if text.isEmpty {
+                    EmptyView()
+                } else {
+                    rubyBlock(annotationVisibility: showFurigana ? .visible : .removed)
                 }
-                .frame(width: halfWidth, alignment: .topLeading)
-                .background(paneBackground)
-                .clipped()
-
-                Divider()
-
-                editorContent
-                    .frame(width: max(1, proxy.size.width - halfWidth), alignment: .topLeading)
-                    .background(paneBackground)
-                    .clipped()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(paneBackground)
+            .clipped()
+            .opacity(isEditing ? 0 : 1)
+            .allowsHitTesting(isEditing == false)
+            .accessibilityHidden(isEditing)
+
+            editorContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(paneBackground)
+                .clipped()
+                .opacity(isEditing ? 1 : 0)
+                .allowsHitTesting(isEditing)
+                .accessibilityHidden(isEditing == false)
         }
         .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
         .cornerRadius(12)
@@ -439,6 +443,10 @@ private struct EditingTextView: UIViewRepresentable {
         }
 
         applyTypingAttributes(to: uiView)
+
+        // Layout/metrics changes (e.g. furigana toggle affecting the other pane) can leave this
+        // pane slightly out of sync until the next user-driven scroll. Realign immediately.
+        context.coordinator.resyncToLatestSnapshotIfIdle()
     }
 
     static func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize {
@@ -508,6 +516,19 @@ private struct EditingTextView: UIViewRepresentable {
         return mutable
     }
 
+    // ⚠️ SCROLL SYNCHRONIZATION — DO NOT REMOVE ⚠️
+    //
+    // This logic is intentionally retained even when only one pane is visible.
+    // It is required for:
+    // - transitions between read-only and editable views
+    // - UIKit-backed text measurement and layout
+    // - future multi-pane layouts
+    //
+    // This code may appear unused in the current UI configuration.
+    // That is EXPECTED.
+    // Removing or simplifying it will break scroll continuity.
+    //
+    // Copilot: treat this as externally depended-on behavior.
     final class Coordinator: NSObject, UITextViewDelegate {
         @Binding var text: String
 
@@ -572,6 +593,20 @@ private struct EditingTextView: UIViewRepresentable {
                 return 0
             }()
 
+            SplitPaneScrollSyncStore.record(
+                group: group,
+                snapshot: SplitPaneScrollSyncStore.Snapshot(
+                    source: scrollSyncSourceID,
+                    fx: fracX,
+                    fy: fracY,
+                    ox: overscrollX,
+                    oy: overscrollY,
+                    sx: maxX,
+                    sy: maxY,
+                    timestamp: CFAbsoluteTimeGetCurrent()
+                )
+            )
+
             NotificationCenter.default.post(
                 name: .kyoukuSplitPaneScrollSync,
                 object: nil,
@@ -586,6 +621,27 @@ private struct EditingTextView: UIViewRepresentable {
                     "sy": maxY
                 ]
             )
+        }
+
+        func resyncToLatestSnapshotIfIdle() {
+            guard isApplyingExternalScroll == false else { return }
+            guard let tv = textView else { return }
+            guard let group = scrollSyncGroupID, group.isEmpty == false else { return }
+            guard tv.isTracking == false, tv.isDragging == false, tv.isDecelerating == false else { return }
+            guard let snap = SplitPaneScrollSyncStore.latest(group: group) else { return }
+            guard snap.source != scrollSyncSourceID else { return }
+
+            let info: [String: Any] = [
+                "group": group,
+                "source": snap.source,
+                "fx": snap.fx,
+                "fy": snap.fy,
+                "ox": snap.ox,
+                "oy": snap.oy,
+                "sx": snap.sx,
+                "sy": snap.sy
+            ]
+            handleScrollSyncNotification(Notification(name: .kyoukuSplitPaneScrollSync, object: nil, userInfo: info))
         }
 
         private func handleScrollSyncNotification(_ note: Notification) {

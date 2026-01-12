@@ -56,18 +56,6 @@ actor LexiconProvider {
                 }
             }
 
-            // Targeted probes for the reported katakana compounds.
-            // Intentionally not behind `#if DEBUG` so we can diagnose Release builds.
-            let hasLonelyInForms = forms.contains("ロンリー")
-            let hasHeartInForms = forms.contains("ハート")
-            let probeLonely = ("ロンリー" as NSString)
-            let probeHeart = ("ハート" as NSString)
-            let trieHasLonely = trie.containsWord(in: probeLonely, from: 0, through: probeLonely.length, requireKanji: false)
-            let trieHasHeart = trie.containsWord(in: probeHeart, from: 0, through: probeHeart.length, requireKanji: false)
-            CustomLogger.shared.print(
-                "[LEXICON PROBE] formsHasロンリー=\(hasLonelyInForms) formsHasハート=\(hasHeartInForms) trieHasロンリー=\(trieHasLonely) trieHasハート=\(trieHasHeart) maxWordLength=\(trie.maxLexiconWordLength)"
-            )
-
             signposter.endInterval("Trie() Build LexiconTrie", buildInterval)
             let buildMs = (CFAbsoluteTimeGetCurrent() - buildStart) * 1000
             await CustomLogger.shared.info("LexiconProvider.trie(): LexiconTrie build took \(String(format: "%.3f", buildMs)) ms")

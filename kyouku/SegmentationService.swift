@@ -50,8 +50,6 @@ actor SegmentationService {
         if let cached = cache[key] {
             await CustomLogger.shared.debug("[Segmentation] Cache hit for len=\(text.count) -> \(cached.count) spans.")
             signposter.endInterval("Segment", segInterval)
-            await CustomLogger.shared.print("[STAGE-1 SEGMENTS @ SEGMENTATION]")
-            await CustomLogger.shared.print(Self.describe(spans: cached))
             return cached
         } else {
             await CustomLogger.shared.debug("[Segmentation] Cache miss for len=\(text.count). Proceeding to segment.")
@@ -120,7 +118,7 @@ actor SegmentationService {
         guard let pending = start, pending < cursor else { return false }
         let pendingRange = NSRange(location: pending, length: cursor - pending)
         if let scriptKind = kind, scriptKind == .katakana {
-            ranges.append(contentsOf: splitKatakana(range: pendingRange, text: text, trie: trie))
+            ranges.append(contentsOf: await splitKatakana(range: pendingRange, text: text, trie: trie))
         } else {
             ranges.append(SegmentedRange(range: pendingRange, isLexiconMatch: false))
         }
@@ -129,59 +127,45 @@ actor SegmentationService {
         return true
     }
 
-    private func splitKatakana(range: NSRange, text: NSString, trie: LexiconTrie) -> [SegmentedRange] {
+    private func splitKatakana(range: NSRange, text: NSString, trie: LexiconTrie) async -> [SegmentedRange] {
         var results: [SegmentedRange] = []
         let runStart = range.location
         let runEnd = NSMaxRange(range)
         let runLength = runEnd - runStart
         guard runLength > 0 else { return [] }
 
-        var matchEndsByOffset: [[Int]] = Array(repeating: [], count: runLength)
-        var anyMatches = false
+        // LexiconTrie is main-actor isolated. Compute all match ends on the main actor,
+        // then run DP reconstruction off the main actor.
+        let swiftText: String = text as String
+        let (matchEndsByOffset, anyMatches): ([[Int]], Bool) = await MainActor.run { [swiftText, runStart, runEnd, runLength] in
 
-        for offset in 0..<runLength {
-            let abs = runStart + offset
-            let ends = trie.allMatchEnds(in: text, from: abs, requireKanji: false)
-            if ends.isEmpty { continue }
-            let filtered = ends.filter { $0 <= runEnd }
-            if filtered.isEmpty { continue }
-            matchEndsByOffset[offset] = filtered
-            anyMatches = true
-        }
+            let ns = swiftText as NSString
+            var matchEndsByOffset: [[Int]] = Array(repeating: [], count: runLength)
+            var _anyMatches = false
 
-        // Defensive fallback: if the “all ends” traversal yields nothing across the entire run,
-        // try the simpler longest-match traversal.
-        if anyMatches == false {
             for offset in 0..<runLength {
                 let abs = runStart + offset
-                if let end = trie.longestMatchEnd(in: text, from: abs, requireKanji: false), end <= runEnd, end > abs {
-                    matchEndsByOffset[offset] = [end]
-                    anyMatches = true
-                }
+                let ends = trie.allMatchEnds(in: ns, from: abs, requireKanji: false)
+                if ends.isEmpty { continue }
+                let filtered = ends.filter { $0 <= runEnd }
+                if filtered.isEmpty { continue }
+                matchEndsByOffset[offset] = filtered
+                _anyMatches = true
             }
-        }
 
-        // Focused probe for the reported failing case.
-        // Intentionally not behind `#if DEBUG` so we can diagnose Release builds.
-        let runSurface = text.substring(with: NSRange(location: runStart, length: runLength))
-        if runSurface.contains("ロンリーロンリーハート") {
-            let probeLonely = ("ロンリー" as NSString)
-            let probeHeart = ("ハート" as NSString)
-            let hasLonely = trie.containsWord(in: probeLonely, from: 0, through: probeLonely.length, requireKanji: false)
-            let hasHeart = trie.containsWord(in: probeHeart, from: 0, through: probeHeart.length, requireKanji: false)
-            CustomLogger.shared.print("[KATAKANA PROBE] run=\(runSurface) anyMatches=\(anyMatches) trieHasロンリー=\(hasLonely) trieHasハート=\(hasHeart)")
-            if runLength >= 11 {
-                let offsets = [0, 4, 8]
-                for o in offsets where o < runLength {
-                    let abs = runStart + o
-                    let ends = matchEndsByOffset[o]
-                    let pieces = ends.map { end -> String in
-                        let r = NSRange(location: abs, length: end - abs)
-                        return text.substring(with: r)
+            // Defensive fallback: if the “all ends” traversal yields nothing across the entire run,
+            // try the simpler longest-match traversal.
+            if _anyMatches == false {
+                for offset in 0..<runLength {
+                    let abs = runStart + offset
+                    if let end = trie.longestMatchEnd(in: ns, from: abs, requireKanji: false), end <= runEnd, end > abs {
+                        matchEndsByOffset[offset] = [end]
+                        _anyMatches = true
                     }
-                    CustomLogger.shared.print("[KATAKANA PROBE] offset=\(o) ends=\(ends) surfaces=\(pieces)")
                 }
             }
+
+            return (matchEndsByOffset, _anyMatches)
         }
 
         struct State {

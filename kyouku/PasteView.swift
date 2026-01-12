@@ -428,11 +428,6 @@ struct PasteView: View {
                             return
                         }
                         if let match = furiganaSemanticSpans.enumerated().first(where: { NSLocationInRange(clamped, $0.element.range) }) {
-                            let surface = ns.substring(with: match.element.range)
-                            if surface.contains("ロン") || surface.contains("ハ") {
-                                let scalars = surface.unicodeScalars.map { String(format: "%04X", $0.value) }.joined(separator: " ")
-                                CustomLogger.shared.print("[TAP PROBE] surface=\(surface) utf16Len=\(surface.utf16.count) scalars=\(scalars)")
-                            }
                             presentDictionaryForSpan(at: match.offset, focusSplitMenu: false)
                         } else {
                                 // No token at this location; clear selection
