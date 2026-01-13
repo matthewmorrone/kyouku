@@ -29,6 +29,7 @@ struct TokenActionPanel: View {
     @State private var dictionaryContentHeight: CGFloat = 0
 
     private let dismissTranslationThreshold: CGFloat = 80
+    private let outerPanelCornerRadius: CGFloat = 34
 
     init(
         selection: TokenSelectionContext,
@@ -88,7 +89,7 @@ struct TokenActionPanel: View {
             if embedInMaterialBackground {
                 panelSurface
                     .background(
-                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        RoundedRectangle(cornerRadius: outerPanelCornerRadius, style: .continuous)
                             .fill(.ultraThinMaterial)
                     )
             } else {
@@ -115,8 +116,7 @@ struct TokenActionPanel: View {
             }
         }
         .padding(.horizontal, 20)
-        .padding(.top, 10)
-        .padding(.bottom, 4)
+        .padding(.vertical, 20)
         .frame(maxWidth: .infinity)
         .onAppear {
             resetSplitControls()
@@ -417,7 +417,7 @@ private struct SplitMenuView: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
+                .fill(Color(uiColor: .tertiarySystemBackground))
         )
         .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
@@ -458,6 +458,8 @@ private struct LookupResultsView: View {
     let onApplyCustomReading: ((String) -> Void)?
     let onSaveWord: (DictionaryEntry) -> Void
     let isWordSaved: ((DictionaryEntry) -> Bool)?
+
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var isCustomReadingPromptPresented = false
     @State private var customReadingText = ""
@@ -503,6 +505,7 @@ private struct LookupResultsView: View {
                 }
             }
         }
+
         .alert("Custom reading", isPresented: $isCustomReadingPromptPresented) {
             TextField("", text: $customReadingText)
             Button("Cancel", role: .cancel) {
@@ -734,10 +737,7 @@ private struct LookupResultsView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
-        )
+        .background(DictionaryCardBackground(colorScheme: colorScheme))
         .overlay(alignment: .topTrailing) {
             if (lookup.results.count > 1) && positionText.isEmpty == false {
                 Text(positionText)
@@ -748,6 +748,25 @@ private struct LookupResultsView: View {
                     .background(.ultraThinMaterial, in: Capsule())
                     .padding(6)
             }
+        }
+    }
+
+    private struct DictionaryCardBackground: View {
+        let colorScheme: ColorScheme
+
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+            let material: Material = (colorScheme == .dark) ? .regularMaterial : .thinMaterial
+            let tint: Color = (colorScheme == .dark) ? Color.black.opacity(0.32) : Color.black.opacity(0.12)
+            let border: Color = (colorScheme == .dark) ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
+            let shadowOpacity: Double = (colorScheme == .dark) ? 0.30 : 0.10
+
+            ZStack {
+                shape.fill(material)
+                shape.fill(tint).blendMode(.multiply)
+                shape.stroke(border, lineWidth: 1)
+            }
+            .shadow(color: Color.black.opacity(shadowOpacity), radius: 10, x: 0, y: 4)
         }
     }
 

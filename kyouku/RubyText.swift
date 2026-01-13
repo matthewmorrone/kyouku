@@ -207,7 +207,10 @@ struct RubyText: UIViewRepresentable {
         )
 
         var insets = textInsets
-        insets.top = max(insets.top, rubyHeadroom)
+        // Give ruby a tiny extra cushion to avoid occasional clipping on the first line
+        // due to rounding/subpixel layout, especially at larger text sizes.
+        let rubyTopFudge: CGFloat = 2
+        insets.top = max(insets.top, rubyHeadroom + rubyTopFudge)
         uiView.rubyHighlightHeadroom = rubyHeadroom
         uiView.rubyBaselineGap = rubyBaselineGap
 
@@ -2053,12 +2056,25 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
         layoutIfNeeded()
 
-        let rects = baseHighlightRects(in: characterRange)
+        // Use TextKit 2 segment geometry for stability. `selectionRects(for:)` can be stale
+        // during early layout passes (notably when ruby/insets are changing), which can
+        // cause incorrect autoscroll.
+        var rects: [CGRect] = []
+        if #available(iOS 15.0, *) {
+            rects = textKit2SegmentRectsInViewCoordinates(for: characterRange)
+        }
+        if rects.isEmpty {
+            rects = baseHighlightRects(in: characterRange)
+        }
         guard let lowest = rects.max(by: { $0.maxY < $1.maxY }) else { return }
 
         // The token action panel overlays the bottom of the view.
         let visibleMaxY = (bounds.height - bottomOverlayHeight) - 8
         guard lowest.maxY > visibleMaxY else { return }
+
+        if Self.verboseRubyLoggingEnabled {
+            CustomLogger.shared.debug(String(format: "ensureVisible covered: lowestMaxY=%.2f visibleMaxY=%.2f overlayH=%.2f offY=%.2f", lowest.maxY, visibleMaxY, bottomOverlayHeight, contentOffset.y))
+        }
 
         let delta = lowest.maxY - visibleMaxY
         var target = contentOffset

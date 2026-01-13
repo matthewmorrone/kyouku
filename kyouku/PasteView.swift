@@ -1477,7 +1477,12 @@ struct PasteView: View {
         func matchesSavedKey(_ word: Word) -> Bool {
             guard word.sourceNoteID == noteID else { return false }
             guard kanaFoldToHiragana(word.surface) == kanaFoldToHiragana(surface) else { return false }
-            return kanaFoldToHiragana(word.kana) == kanaFoldToHiragana(reading)
+            // If we don't know the token's reading (common when we haven't attached readings
+            // for this token), treat reading as a wildcard so the star can still toggle.
+            if let foldedReading = kanaFoldToHiragana(reading) {
+                return kanaFoldToHiragana(word.kana) == foldedReading
+            }
+            return true
         }
 
         // Toggle behavior: if already saved, delete; otherwise add
@@ -1633,7 +1638,12 @@ struct PasteView: View {
         return words.words.contains { word in
             guard word.sourceNoteID == noteID else { return false }
             guard kanaFoldToHiragana(word.surface) == targetSurface else { return false }
-            return kanaFoldToHiragana(word.kana) == targetKana
+            // If we don't know the reading for this token, match on surface alone.
+            // This keeps the Extract Words star button reliable (no "can't bookmark" feeling).
+            if let targetKana {
+                return kanaFoldToHiragana(word.kana) == targetKana
+            }
+            return true
         }
     }
 

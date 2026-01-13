@@ -8,7 +8,6 @@ struct WordsView: View {
     @State private var searchText: String = ""
     @State private var editModeState: EditMode = .inactive
     @State private var selectedWordIDs: Set<Word.ID> = []
-    @State private var showDeleteAllConfirmation = false
     @State private var showCSVImportSheet = false
 
     var body: some View {
@@ -42,12 +41,12 @@ struct WordsView: View {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if isEditing {
                         if canEditSavedWords {
-                            Button(role: .destructive) {
-                                showDeleteAllConfirmation = true
+                            Button {
+                                selectAllSavedWords()
                             } label: {
-                                Label("Clear All", systemImage: "square.stack.3d.down.right")
+                                Label("Select All", systemImage: "checkmark.circle")
                             }
-                            .accessibilityLabel("Delete all saved entries")
+                            .accessibilityLabel("Select all saved entries")
                         }
                         Button(role: .destructive) {
                             deleteSelection()
@@ -84,16 +83,6 @@ struct WordsView: View {
             let ids = Set(words.map { $0.id })
             selectedWordIDs.formIntersection(ids)
         }
-        .confirmationDialog(
-            "Delete all saved entries?",
-            isPresented: $showDeleteAllConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Delete All", role: .destructive) {
-                emptySavedWords()
-            }
-            Button("Cancel", role: .cancel) { }
-        }
         .sheet(isPresented: $showCSVImportSheet) {
             NavigationStack {
                 WordsCSVImportView()
@@ -104,7 +93,7 @@ struct WordsView: View {
     private var searchField: some View {
         TextField("Search Japanese or English", text: $searchText)
             .padding(.horizontal, 8)
-            .padding(.vertical, 8)
+            .padding(.top, 8)
             .textFieldStyle(.roundedBorder)
             .textInputAutocapitalization(.never)
             .disableAutocorrection(true)
@@ -296,10 +285,9 @@ struct WordsView: View {
         selectedWordIDs.removeAll()
     }
 
-    private func emptySavedWords() {
-        store.deleteAll()
-        selectedWordIDs.removeAll()
-        editModeState = .inactive
+    private func selectAllSavedWords() {
+        guard canEditSavedWords else { return }
+        selectedWordIDs = Set(sortedWords.map { $0.id })
     }
 }
 
