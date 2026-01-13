@@ -137,7 +137,7 @@ actor SegmentationService {
         // LexiconTrie is main-actor isolated. Compute all match ends on the main actor,
         // then run DP reconstruction off the main actor.
         let swiftText: String = text as String
-        let (matchEndsByOffset, anyMatches): ([[Int]], Bool) = await MainActor.run { [swiftText, runStart, runEnd, runLength] in
+        let (matchEndsByOffset, _): ([[Int]], Bool) = await MainActor.run { [swiftText, runStart, runEnd, runLength] in
 
             let ns = swiftText as NSString
             var matchEndsByOffset: [[Int]] = Array(repeating: [], count: runLength)

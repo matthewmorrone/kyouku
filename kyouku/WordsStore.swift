@@ -22,12 +22,20 @@ final class WordsStore: ObservableObject {
     ///
     /// - Parameters:
     ///   - surface: The written form captured from a dictionary lookup.
-    ///   - kana: The authoritative dictionary kana reading. Pass `nil` when the
-    ///     dictionary does not supply one; do not pass heuristics from pasted text.
+    ///   - kana: The reading to store for the saved word. This is typically the
+    ///     dictionary kana, but may be a user-confirmed reading override.
+    ///     Pass `nil` when no reading is available; do not pass heuristics from pasted text.
     ///   - meaning: Required localized gloss.
     /// Callers must provide a non-empty meaning/definition.
-    func add(surface: String, kana: String?, meaning: String, note: String? = nil, sourceNoteID: UUID? = nil) {
+    func add(surface: String, dictionarySurface: String? = nil, kana: String?, meaning: String, note: String? = nil, sourceNoteID: UUID? = nil) {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ds = dictionarySurface?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDictionarySurface: String?
+        if let ds, ds.isEmpty == false {
+            normalizedDictionarySurface = ds
+        } else {
+            normalizedDictionarySurface = nil
+        }
         let trimmedKana = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKana: String?
         if let tk = trimmedKana, tk.isEmpty == false {
@@ -46,6 +54,7 @@ final class WordsStore: ObservableObject {
 
         let word = Word(
             surface: s,
+            dictionarySurface: normalizedDictionarySurface,
             kana: normalizedKana,
             meaning: m,
             note: note,
@@ -57,12 +66,14 @@ final class WordsStore: ObservableObject {
 
     struct WordToAdd: Hashable {
         let surface: String
+        let dictionarySurface: String?
         let kana: String?
         let meaning: String
         let note: String?
 
-        init(surface: String, kana: String?, meaning: String, note: String? = nil) {
+        init(surface: String, dictionarySurface: String? = nil, kana: String?, meaning: String, note: String? = nil) {
             self.surface = surface
+            self.dictionarySurface = dictionarySurface
             self.kana = kana
             self.meaning = meaning
             self.note = note
@@ -90,6 +101,13 @@ final class WordsStore: ObservableObject {
 
         for item in items {
             let s = item.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            let ds = item.dictionarySurface?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedDictionarySurface: String?
+            if let ds, ds.isEmpty == false {
+                normalizedDictionarySurface = ds
+            } else {
+                normalizedDictionarySurface = nil
+            }
             let trimmedKana = item.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedKana: String?
             if let tk = trimmedKana, tk.isEmpty == false {
@@ -109,6 +127,7 @@ final class WordsStore: ObservableObject {
             newWords.append(
                 Word(
                     surface: s,
+                    dictionarySurface: normalizedDictionarySurface,
                     kana: normalizedKana,
                     meaning: m,
                     note: n,

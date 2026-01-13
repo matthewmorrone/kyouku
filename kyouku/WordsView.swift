@@ -166,7 +166,7 @@ struct WordsView: View {
                 } else {
                     NavigationLink {
                         WordDefinitionsView(
-                            surface: displayHeadword(for: word),
+                            surface: word.dictionarySurface ?? displayHeadword(for: word),
                             kana: word.kana,
                             sourceNoteID: word.sourceNoteID
                         )

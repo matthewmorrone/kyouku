@@ -21,7 +21,11 @@ struct FuriganaRenderingHost: View {
     var customizedRanges: [NSRange]
     var extraTokenOverlays: [RubyText.TokenOverlay] = []
     var enableTapInspection: Bool = true
-    var bottomOverscrollPadding: CGFloat = 0
+    /// Extra empty scroll space below the text, in points.
+    ///
+    /// Used to keep the last lines readable when bottom overlays (e.g. the token
+    /// action panel) cover part of the text area.
+    var bottomObstructionHeight: CGFloat = 0
     var onCharacterTap: ((Int) -> Void)? = nil
     var onSpanSelection: ((RubySpanSelection?) -> Void)? = nil
     var enableDragSelection: Bool = false
@@ -31,41 +35,46 @@ struct FuriganaRenderingHost: View {
     var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
 
     var body: some View {
-        // IMPORTANT:
-        // We keep both panes alive at all times and only toggle visibility.
-        // SwiftUI `if` conditionals would destroy/recreate the UIViewRepresentables,
-        // which resets scroll offsets and can effectively "tear out" scroll sync state.
-        let paneBackground = isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground)
-        ZStack(alignment: .topLeading) {
-            Group {
-                if text.isEmpty {
-                    EmptyView()
-                } else {
-                    rubyBlock(annotationVisibility: showFurigana ? .visible : .removed)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(paneBackground)
-            .clipped()
-            .opacity(isEditing ? 0 : 1)
-            .allowsHitTesting(isEditing == false)
-            .accessibilityHidden(isEditing)
+        GeometryReader { proxy in
+            let obstruction = min(max(0, bottomObstructionHeight), max(0, proxy.size.height))
 
-            editorContent
+            // IMPORTANT:
+            // We keep both panes alive at all times and only toggle visibility.
+            // SwiftUI `if` conditionals would destroy/recreate the UIViewRepresentables,
+            // which resets scroll offsets and can effectively "tear out" scroll sync state.
+            let paneBackground = isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground)
+            ZStack(alignment: .topLeading) {
+                Group {
+                    if text.isEmpty {
+                        EmptyView()
+                    } else {
+                        rubyBlock(annotationVisibility: showFurigana ? .visible : .removed, bottomObstruction: obstruction)
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .background(paneBackground)
                 .clipped()
-                .opacity(isEditing ? 1 : 0)
-                .allowsHitTesting(isEditing)
-                .accessibilityHidden(isEditing == false)
+                .opacity(isEditing ? 0 : 1)
+                .allowsHitTesting(isEditing == false)
+                .accessibilityHidden(isEditing)
+
+                editorContent(bottomObstruction: obstruction)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .background(paneBackground)
+                    .clipped()
+                    .opacity(isEditing ? 1 : 0)
+                    .allowsHitTesting(isEditing)
+                    .accessibilityHidden(isEditing == false)
+            }
+            .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
+            .cornerRadius(12)
+            .roundedBorder(Color(.white), cornerRadius: 12)
         }
-        .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
-        .cornerRadius(12)
-        .roundedBorder(Color(.white), cornerRadius: 12)
     }
 
-    private var editorContent: some View {
-        VStack(spacing: 0) {
+    private func editorContent(bottomObstruction: CGFloat) -> some View {
+        let insets = editorInsets(bottomObstruction: bottomObstruction)
+        return VStack(spacing: 0) {
             EditingTextView(
                 text: $text,
                 isEditable: isEditing,
@@ -74,17 +83,17 @@ struct FuriganaRenderingHost: View {
                 wrapLines: wrapLines,
                 scrollSyncGroupID: scrollSyncGroupID,
                 insets: UIEdgeInsets(
-                    top: editorInsets.top,
-                    left: editorInsets.leading,
-                    bottom: editorInsets.bottom,
-                    right: editorInsets.trailing
+                    top: insets.top,
+                    left: insets.leading,
+                    bottom: insets.bottom,
+                    right: insets.trailing
                 )
             )
             .padding(0)
         }
     }
 
-    private var editorInsets: EdgeInsets {
+    private func editorInsets(bottomObstruction: CGFloat) -> EdgeInsets {
         let rubyHeadroom = max(0.0, textSize * 0.6 + lineSpacing)
         let topInset = max(8.0, rubyHeadroom)
 
@@ -104,12 +113,12 @@ struct FuriganaRenderingHost: View {
         return EdgeInsets(
             top: CGFloat(topInset),
             leading: CGFloat(left),
-            bottom: CGFloat(12 + bottomOverscrollPadding),
+            bottom: CGFloat(12) + bottomObstruction,
             trailing: CGFloat(right)
         )
     }
 
-    private func rubyBlock(annotationVisibility: RubyAnnotationVisibility) -> some View {
+    private func rubyBlock(annotationVisibility: RubyAnnotationVisibility, bottomObstruction: CGFloat) -> some View {
         let attributed = resolvedAttributedText
         let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
         let defaultRubyFontSize = max(1, CGFloat(textSize) * 0.6)
@@ -122,7 +131,7 @@ struct FuriganaRenderingHost: View {
         let insets = UIEdgeInsets(
             top: 8,
             left: 12 + insetOverhang,
-            bottom: 12 + bottomOverscrollPadding,
+            bottom: 12 + bottomObstruction,
             right: 12 + insetOverhang
         )
 
@@ -132,6 +141,7 @@ struct FuriganaRenderingHost: View {
             lineHeightMultiple: 1.0,
             extraGap: CGFloat(max(0, lineSpacing)),
             textInsets: insets,
+            bottomOverlayHeight: bottomObstruction,
             annotationVisibility: annotationVisibility,
             isScrollEnabled: true,
             allowSystemTextSelection: false,

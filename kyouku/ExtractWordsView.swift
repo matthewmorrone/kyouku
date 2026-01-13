@@ -230,19 +230,26 @@ struct TokenListPanel: View {
 
         var body: some View {
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.surface)
-                        .font(.body)
-                        .lineLimit(1)
-                    if let reading = readingText {
-                        Text(reading)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                Button(action: onSelect) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.surface)
+                                .font(.body)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            if let reading = readingText {
+                                Text(reading)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer(minLength: 12)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onSelect)
-                Spacer(minLength: 12)
+                .buttonStyle(.plain)
+
                 Button(action: onAdd) {
                     if item.isAlreadySaved {
                         Image(systemName: "checkmark.circle.fill")

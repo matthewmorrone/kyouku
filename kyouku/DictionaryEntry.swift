@@ -273,11 +273,17 @@ actor DictionarySQLiteStore {
         guard let db else { return [] }
         let sql = """
         SELECT e.id,
-               COALESCE((SELECT k.text
-                         FROM kanji k
-                         WHERE k.entry_id = e.id
-                         ORDER BY k.is_common DESC, k.id ASC
-                         LIMIT 1), '') AS kanji_text,
+                             COALESCE((SELECT k_match.text
+                                                 FROM kanji k_match
+                                                 WHERE k_match.entry_id = e.id
+                                                     AND k_match.text = ?1
+                                                 LIMIT 1),
+                                                (SELECT k.text
+                                                 FROM kanji k
+                                                 WHERE k.entry_id = e.id
+                                                 ORDER BY k.is_common DESC, k.id ASC
+                                                 LIMIT 1),
+                                                '') AS kanji_text,
                COALESCE((SELECT r.text
                          FROM kana_forms r
                          WHERE r.entry_id = e.id
@@ -313,10 +319,6 @@ actor DictionarySQLiteStore {
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
             rows.append(RawDictionaryRow(entryID: id, kanji: kanji, gloss: gloss, isCommon: isCommon))
-        }
-
-        if containsKanjiCharacters(term) {
-            rows = rows.filter { $0.kanji == term }
         }
 
         return try expandRows(rows)

@@ -141,7 +141,9 @@ struct TokenActionPanel: View {
     private var actionRow: some View {
         HStack(spacing: 12) {
             actionIconButton(label: "Merge with previous token", systemImage: "arrow.left.to.line.square", enabled: canMergePrevious, action: onMergePrevious)
+
             actionIconButton(label: "Merge with next token", systemImage: "arrow.right.to.line.square", enabled: canMergeNext, action: onMergeNext)
+
             if let onShowDefinitions {
                 actionIconButton(label: "Show all definitions", systemImage: "book", enabled: true, action: onShowDefinitions)
             }
@@ -152,6 +154,7 @@ struct TokenActionPanel: View {
                 isActive: isSplitMenuVisible,
                 action: toggleSplitMenu
             )
+
             if isSelectionCustomized {
                 actionIconButton(label: "Reset overrides", systemImage: "gobackward", enabled: true, action: onReset)
             }
@@ -476,20 +479,27 @@ private struct LookupResultsView: View {
                     .font(.subheadline)
                     .multilineTextAlignment(.leading)
             } else if let highlighted = highlightedEntry {
-                HStack(alignment: .center, spacing: 0) {
-                    pagerButton(systemImage: "chevron.left", isDisabled: highlighted.index == 0) {
-                        goToPreviousResult()
-                    }
+                if lookup.results.count > 1 {
+                    HStack(alignment: .center, spacing: 0) {
+                        pagerButton(systemImage: "chevron.left", isDisabled: highlighted.index == 0) {
+                            goToPreviousResult()
+                        }
 
+                        dictionaryCard(
+                            entry: highlighted.entry,
+                            positionText: "\(highlighted.index + 1)/\(lookup.results.count)"
+                        )
+                        .highPriorityGesture(horizontalSwipeGesture)
+
+                        pagerButton(systemImage: "chevron.right", isDisabled: highlighted.index >= lookup.results.count - 1) {
+                            goToNextResult()
+                        }
+                    }
+                } else {
                     dictionaryCard(
                         entry: highlighted.entry,
-                        positionText: "\(highlighted.index + 1)/\(lookup.results.count)"
+                        positionText: ""
                     )
-                    .highPriorityGesture(horizontalSwipeGesture)
-
-                    pagerButton(systemImage: "chevron.right", isDisabled: highlighted.index >= lookup.results.count - 1) {
-                        goToNextResult()
-                    }
                 }
             }
         }
@@ -607,17 +617,22 @@ private struct LookupResultsView: View {
 
         func trailingKanaRun(in surface: String) -> String {
             guard surface.isEmpty == false else { return "" }
-            var scalars: [UnicodeScalar] = []
-            for scalar in surface.unicodeScalars.reversed() {
+            let allScalars = Array(surface.unicodeScalars)
+            guard allScalars.isEmpty == false else { return "" }
+
+            var trailing: [UnicodeScalar] = []
+            for scalar in allScalars.reversed() {
                 let isKana = (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
                 if isKana {
-                    scalars.append(scalar)
+                    trailing.append(scalar)
                 } else {
                     break
                 }
             }
-            guard scalars.isEmpty == false else { return "" }
-            return String(String.UnicodeScalarView(scalars.reversed()))
+
+            // If the surface is entirely kana, there is no okurigana segment to append.
+            guard trailing.isEmpty == false, trailing.count < allScalars.count else { return "" }
+            return String(String.UnicodeScalarView(trailing.reversed()))
         }
 
         func readingIncludingOkurigana(surface: String, reading: String) -> String {
@@ -627,10 +642,18 @@ private struct LookupResultsView: View {
             return reading.hasSuffix(okurigana) ? reading : (reading + okurigana)
         }
 
-        // Surface reading should reflect the *currently highlighted dictionary entry* so
-        // paging shows alternate readings (e.g., 私: わたし / わたくし).
+        // Surface reading should reflect the actual surface form when the token is inflected,
+        // but still allow paging alternate dictionary readings when the surface is lemma-like.
         let dictionaryReading = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let surfaceReadingBase = dictionaryReading.isEmpty ? tokenReading : dictionaryReading
+        let surfaceReadingBase: String = {
+            if tokenReading.isEmpty == false {
+                // Prefer MeCab's surface reading when surface != lemma (e.g., ひいた -> ひいた),
+                // and for kana-only surfaces where okurigana logic doesn't apply.
+                if tokenSurface != lemmaSurface { return tokenReading }
+                if surfaceHasKanji == false { return tokenReading }
+            }
+            return dictionaryReading.isEmpty ? tokenReading : dictionaryReading
+        }()
         let surfaceReading = readingIncludingOkurigana(surface: tokenSurface, reading: surfaceReadingBase)
 
         let showSurfaceReading = surfaceReading.isEmpty == false && surfaceReading != tokenSurface
@@ -643,8 +666,8 @@ private struct LookupResultsView: View {
                 Text(tokenSurface.isEmpty ? "—" : tokenSurface)
                     .font(.headline)
                 if showSurfaceReading {
-                    Text("(\(surfaceReading))")
-                        .font(.subheadline)
+                     Text("(\(surfaceReading))")
+                         .font(.subheadline)
 
                     if onApplyCustomReading != nil {
                         inlineIconButton(
@@ -665,11 +688,11 @@ private struct LookupResultsView: View {
                     Text(lemmaSurface)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    if showLemmaReading {
-                        Text("(\(lemmaReading))")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
+                     if showLemmaReading {
+                         Text("(\(lemmaReading))")
+                             .font(.subheadline)
+                             .foregroundStyle(.secondary)
+                     }
                 }
             }
 
@@ -716,13 +739,15 @@ private struct LookupResultsView: View {
                 .fill(Color(uiColor: .secondarySystemBackground))
         )
         .overlay(alignment: .topTrailing) {
-            Text(positionText)
-                .font(.caption2)
-                .fontWeight(.semibold)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.ultraThinMaterial, in: Capsule())
-                .padding(6)
+            if (lookup.results.count > 1) && positionText.isEmpty == false {
+                Text(positionText)
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(6)
+            }
         }
     }
 
@@ -793,3 +818,4 @@ private struct DictionaryContentHeightPreferenceKey: PreferenceKey {
     .padding()
     .background(Color.black.opacity(0.05))
 }
+

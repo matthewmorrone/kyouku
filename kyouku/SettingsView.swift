@@ -18,6 +18,11 @@ struct SettingsView: View {
     @AppStorage(WordOfTheDayScheduler.hourKey) private var wotdHour: Int = 9
     @AppStorage(WordOfTheDayScheduler.minuteKey) private var wotdMinute: Int = 0
 
+#if DEBUG
+    @AppStorage("rubyDebugHUD") private var rubyDebugHUD: Bool = false
+    @AppStorage("rubyDebugRects") private var rubyDebugRects: Bool = false
+#endif
+
     @State private var wotdAuthStatus: UNAuthorizationStatus = .notDetermined
     @State private var wotdPendingCount: Int = 0
 
@@ -51,6 +56,9 @@ struct SettingsView: View {
                 tokenHighlightSection
                 extractFilterSection
                 wordOfTheDaySection
+#if DEBUG
+                debugSection
+#endif
                 Section("Backup & Restore") {
                     Button("Export…") {
                         exportAll()
@@ -231,6 +239,18 @@ struct SettingsView: View {
             .disabled(wotdEnabled == false)
         }
     }
+
+#if DEBUG
+    private var debugSection: some View {
+        Section("Debug") {
+            Toggle("Ruby HUD", isOn: $rubyDebugHUD)
+            Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
+            Text("Use this for screenshot-based debugging of furigana layout.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+#endif
 
     private var commonParticlesBinding: Binding<[String]> {
         Binding(

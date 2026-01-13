@@ -9,14 +9,16 @@ import Foundation
 
 /// A vocabulary item saved from a dictionary lookup.
 ///
-/// - Note: `kana` stores the dictionary-provided kana reading for the entry.
-///   It may be `nil` when the dictionary offers no kana, and it is never
-///   populated from pasted text or heuristic furigana. When a user confirms a
-///   correction, that override is stored separately via `ReadingOverride` and
-///   does not mutate this model.
+/// - Note: `kana` stores the reading the user saved alongside the surface.
+///   This is usually the dictionary-provided kana, but when the user has an
+///   explicit reading override active it may reflect that override.
+///   It is never populated from pasted text or heuristic furigana.
 struct Word: Identifiable, Codable, Hashable {
     let id: UUID
     var surface: String
+    /// Optional dictionary headword surface used for lookups (can differ from `surface`
+    /// when the note contains an inflected form). Kept optional for backward compatibility.
+    var dictionarySurface: String? = nil
     /// Authoritative dictionary kana reading (if provided), never inferred from user text.
     var kana: String?
     var meaning: String
@@ -27,6 +29,7 @@ struct Word: Identifiable, Codable, Hashable {
     init(
         id: UUID = UUID(),
         surface: String,
+        dictionarySurface: String? = nil,
         kana: String? = nil,
         meaning: String,
         note: String? = nil,
@@ -35,6 +38,7 @@ struct Word: Identifiable, Codable, Hashable {
     ) {
         self.id = id
         self.surface = surface
+        self.dictionarySurface = dictionarySurface
         self.kana = kana
         self.meaning = meaning
         self.note = note

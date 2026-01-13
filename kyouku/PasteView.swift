@@ -13,6 +13,15 @@ struct PasteView: View {
             }
         }
     }
+    private struct PasteAreaFramePreferenceKey: PreferenceKey {
+        static var defaultValue: CGRect? = nil
+
+        static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+            if let next = nextValue() {
+                value = next
+            }
+        }
+    }
     private struct SheetPanelHeightPreferenceKey: PreferenceKey {
         static var defaultValue: CGFloat = 0
 
@@ -47,6 +56,7 @@ struct PasteView: View {
     @State private var skipNextInitialFuriganaEnsure: Bool = false
     @State private var isDictionarySheetPresented: Bool = false
     @State private var measuredSheetHeight: CGFloat = 0
+    @State private var pasteAreaFrame: CGRect? = nil
 
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
     @State private var incrementalPopupHits: [IncrementalLookupHit] = []
@@ -187,6 +197,9 @@ struct PasteView: View {
         .coordinateSpace(name: Self.coordinateSpaceName)
         .onPreferenceChange(TokenActionPanelFramePreferenceKey.self) { newValue in
             tokenPanelFrame = newValue
+        }
+        .onPreferenceChange(PasteAreaFramePreferenceKey.self) { newValue in
+            pasteAreaFrame = newValue
         }
         .sheet(isPresented: $showWordDefinitionsSheet) {
             NavigationStack {
@@ -377,6 +390,17 @@ struct PasteView: View {
             }
         }
 
+        let tokenPanelOverlap: CGFloat = {
+            guard inlineDictionaryPanelEnabled else { return 0 }
+            guard tokenSelection != nil else { return 0 }
+            guard let paste = pasteAreaFrame else { return 0 }
+            guard let panel = tokenPanelFrame else { return 0 }
+            // Use the panel's height rather than overlap math.
+            // In some layouts the panel can ignore safe-area and overlap computations
+            // can undercount, making it feel like you "can't scroll to the end".
+            return min(max(0, panel.height), paste.height)
+        }()
+
         return VStack(spacing: 0) {
             FuriganaRenderingHost(
                 text: $inputText,
@@ -396,6 +420,7 @@ struct PasteView: View {
                 customizedRanges: customizedRanges,
                 extraTokenOverlays: extraOverlays,
                 enableTapInspection: true,
+                bottomObstructionHeight: tokenPanelOverlap,
                 onCharacterTap: { utf16Index in
                     if incrementalLookupEnabled {
                             // Existing incremental lookup behavior
@@ -447,6 +472,14 @@ struct PasteView: View {
                 },
                 contextMenuStateProvider: contextMenuStateProvider,
                 onContextMenuAction: contextMenuActionHandler
+            )
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: PasteAreaFramePreferenceKey.self,
+                        value: proxy.frame(in: .named(Self.coordinateSpaceName))
+                    )
+                }
             )
             .padding(.vertical, 16)
 
@@ -633,21 +666,21 @@ struct PasteView: View {
                 continue
             }
 
-            let reading = normalizedReading(semantic.readingKana)
-            let key = "\(surface)|\(reading ?? "")"
+            let preferred = normalizedReading(preferredReading(for: trimmed.range, fallback: semantic.readingKana))
+            let key = "\(surface)|\(preferred ?? "")"
             if hideDuplicateTokens, seenKeys.contains(key) {
                 continue
             }
             seenKeys.insert(key)
 
-            let displayReading = readingWithOkurigana(surface: surface, baseReading: reading)
-            let alreadySaved = hasSavedWord(surface: surface, reading: reading, noteID: noteID)
+            let displayReading = readingWithOkurigana(surface: surface, baseReading: preferred)
+            let alreadySaved = hasSavedWord(surface: surface, reading: preferred, noteID: noteID)
             items.append(
                 TokenListItem(
                     spanIndex: index,
                     range: trimmed.range,
                     surface: surface,
-                    reading: reading,
+                    reading: preferred,
                     displayReading: displayReading,
                     isAlreadySaved: alreadySaved
                 )
@@ -718,15 +751,17 @@ struct PasteView: View {
         VStack(spacing: 0) {
             Spacer(minLength: 0)
 
+            let preferred = normalizedReading(preferredReadingForSelection(selection))
+
             TokenActionPanel(
                 selection: selection,
                 lookup: inlineLookup,
-                preferredReading: preferredReadingForSelection(selection),
+                preferredReading: preferred,
                 canMergePrevious: canMergeSelection(.previous),
                 canMergeNext: canMergeSelection(.next),
                 onDismiss: { clearSelection(resetPersistent: false) },
                 onSaveWord: { entry in
-                    toggleSavedWord(surface: selection.surface, entry: entry)
+                    toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
                 },
                 onApplyReading: { entry in
                     applyDictionaryReading(entry)
@@ -735,7 +770,7 @@ struct PasteView: View {
                     applyCustomReading(kana)
                 },
                 isWordSaved: { entry in
-                    isSavedWord(for: selection.surface, entry: entry)
+                    isSavedWord(for: selection.surface, preferredReading: preferred, entry: entry)
                 },
                 onMergePrevious: { mergeSelection(.previous) },
                 onMergeNext: { mergeSelection(.next) },
@@ -747,7 +782,7 @@ struct PasteView: View {
                 focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
                 onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
             )
-            .id("\(selection.id)-\(overrideSignature)")
+            .id("token-action-panel-\(overrideSignature)")
             .padding(.horizontal, 0)
             .padding(.bottom, 0)
             .ignoresSafeArea(edges: .bottom)
@@ -1087,10 +1122,11 @@ struct PasteView: View {
     }
 
     private func dictionaryPanel(for selection: TokenSelectionContext, enableDragToDismiss: Bool, embedInMaterialBackground: Bool) -> TokenActionPanel {
-        TokenActionPanel(
+        let preferred = normalizedReading(preferredReadingForSelection(selection))
+        return TokenActionPanel(
             selection: selection,
             lookup: inlineLookup,
-            preferredReading: preferredReadingForSelection(selection),
+            preferredReading: preferred,
             canMergePrevious: canMergeSelection(.previous),
             canMergeNext: canMergeSelection(.next),
             onShowDefinitions: {
@@ -1098,7 +1134,7 @@ struct PasteView: View {
             },
             onDismiss: { clearSelection(resetPersistent: false) },
             onSaveWord: { entry in
-                toggleSavedWord(surface: selection.surface, entry: entry)
+                toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
             },
             onApplyReading: { entry in
                 applyDictionaryReading(entry)
@@ -1107,7 +1143,7 @@ struct PasteView: View {
                 applyCustomReading(kana)
             },
             isWordSaved: { entry in
-                isSavedWord(for: selection.surface, entry: entry)
+                isSavedWord(for: selection.surface, preferredReading: preferred, entry: entry)
             },
             onMergePrevious: { mergeSelection(.previous) },
             onMergeNext: { mergeSelection(.next) },
@@ -1121,47 +1157,70 @@ struct PasteView: View {
         )
     }
 
-    private func isSavedWord(for surface: String, entry: DictionaryEntry) -> Bool {
+    private func isSavedWord(for surface: String, preferredReading: String?, entry: DictionaryEntry) -> Bool {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let k = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let kana = (k?.isEmpty == false) ? k : nil
         guard s.isEmpty == false else { return false }
         let noteID = currentNote?.id
-        let targetSurface = kanaFoldToHiragana(resolvedSurface(from: entry, fallback: s))
+        let tokenSurface = kanaFoldToHiragana(s)
+        let dictionarySurface = kanaFoldToHiragana(resolvedSurface(from: entry, fallback: s))
         let targetKana = kanaFoldToHiragana(kana)
+        let preferredKana = kanaFoldToHiragana(preferredReading)
         return words.words.contains { word in
             guard word.sourceNoteID == noteID else { return false }
-            guard kanaFoldToHiragana(word.surface) == targetSurface else { return false }
-            return kanaFoldToHiragana(word.kana) == targetKana
+            let savedSurface = kanaFoldToHiragana(word.surface)
+            let savedDictionarySurface = kanaFoldToHiragana(word.dictionarySurface)
+            // New shape: surface matches note token; legacy shape: surface matches dictionary headword.
+            guard savedSurface == tokenSurface || savedSurface == dictionarySurface || savedDictionarySurface == dictionarySurface else { return false }
+            let savedKana = kanaFoldToHiragana(word.kana)
+            if let preferredKana {
+                // If the user has applied a custom reading override, treat that as the
+                // authoritative “saved” reading for the bookmark state.
+                if savedKana == preferredKana { return true }
+            }
+            return savedKana == targetKana
         }
     }
 
-    private func toggleSavedWord(surface: String, entry: DictionaryEntry) {
+    private func toggleSavedWord(surface: String, preferredReading: String?, entry: DictionaryEntry) {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let k = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let kana = (k?.isEmpty == false) ? k : nil
         guard s.isEmpty == false else { return }
         let noteID = currentNote?.id
 
-        let targetSurface = kanaFoldToHiragana(resolvedSurface(from: entry, fallback: s))
+        let tokenSurface = kanaFoldToHiragana(s)
+        let dictionarySurface = kanaFoldToHiragana(resolvedSurface(from: entry, fallback: s))
         let targetKana = kanaFoldToHiragana(kana)
+        let preferredKana = kanaFoldToHiragana(preferredReading)
+
+        func matchesSavedKey(_ word: Word) -> Bool {
+            guard word.sourceNoteID == noteID else { return false }
+            let savedSurface = kanaFoldToHiragana(word.surface)
+            let savedDictionarySurface = kanaFoldToHiragana(word.dictionarySurface)
+            guard savedSurface == tokenSurface || savedSurface == dictionarySurface || savedDictionarySurface == dictionarySurface else { return false }
+            let savedKana = kanaFoldToHiragana(word.kana)
+            if let preferredKana, savedKana == preferredKana { return true }
+            return savedKana == targetKana
+        }
 
         let matchingIDs = Set(
             words.words
-                .filter {
-                    guard $0.sourceNoteID == noteID else { return false }
-                    guard kanaFoldToHiragana($0.surface) == targetSurface else { return false }
-                    return kanaFoldToHiragana($0.kana) == targetKana
-                }
+                .filter(matchesSavedKey)
                 .map(\.id)
         )
 
         if matchingIDs.isEmpty {
             let meaning = normalizedMeaning(from: entry.gloss)
             guard meaning.isEmpty == false else { return }
-            let resolvedSurface = resolvedSurface(from: entry, fallback: s)
-            let resolvedKana = normalizedReading(entry.kana)
-            words.add(surface: resolvedSurface, kana: resolvedKana, meaning: meaning, note: nil, sourceNoteID: noteID)
+            let resolvedDictionarySurface = resolvedSurface(from: entry, fallback: s)
+            // If the user has a custom reading override active for this token, save that
+            // reading so the words list and bookmark state stay in sync.
+            let resolvedKana = normalizedReading(preferredReading) ?? normalizedReading(entry.kana)
+            // Store surface as it appears in the note so Extract Words and other token-based
+            // UIs can reliably recognize the saved state.
+            words.add(surface: s, dictionarySurface: resolvedDictionarySurface, kana: resolvedKana, meaning: meaning, note: nil, sourceNoteID: noteID)
         } else {
             words.delete(ids: matchingIDs)
         }
@@ -1174,10 +1233,14 @@ struct PasteView: View {
     }
 
     private func preferredReadingForSelection(_ selection: TokenSelectionContext) -> String? {
-        let overrides = readingOverrides.overrides(for: activeNoteID, overlapping: selection.range)
+        preferredReading(for: selection.range, fallback: selection.annotatedSpan.readingKana)
+    }
+
+    private func preferredReading(for range: NSRange, fallback: String?) -> String? {
+        let overrides = readingOverrides.overrides(for: activeNoteID, overlapping: range)
         if let exact = overrides.first(where: {
-            $0.rangeStart == selection.range.location &&
-            $0.rangeLength == selection.range.length &&
+            $0.rangeStart == range.location &&
+            $0.rangeLength == range.length &&
             $0.userKana != nil
         }) {
             return exact.userKana
@@ -1188,12 +1251,12 @@ struct PasteView: View {
             .max(by: { lhs, rhs in
                 let lhsRange = NSRange(location: lhs.rangeStart, length: lhs.rangeLength)
                 let rhsRange = NSRange(location: rhs.rangeStart, length: rhs.rangeLength)
-                return NSIntersectionRange(lhsRange, selection.range).length < NSIntersectionRange(rhsRange, selection.range).length
+                return NSIntersectionRange(lhsRange, range).length < NSIntersectionRange(rhsRange, range).length
             }) {
             return bestOverlap.userKana
         }
 
-        return selection.annotatedSpan.readingKana
+        return fallback
     }
 
     private func applyDictionarySheet<Content: View>(to view: Content) -> AnyView {
@@ -1407,12 +1470,19 @@ struct PasteView: View {
     private func bookmarkToken(at index: Int) {
         guard furiganaSemanticSpans.indices.contains(index) else { return }
         guard let context = selectionContext(forSpanAt: index) else { return }
-        let reading = normalizedReading(context.semanticSpan.readingKana)
+        let reading = normalizedReading(preferredReading(for: context.range, fallback: context.semanticSpan.readingKana))
         let surface = context.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let noteID = currentNote?.id
+
+        func matchesSavedKey(_ word: Word) -> Bool {
+            guard word.sourceNoteID == noteID else { return false }
+            guard kanaFoldToHiragana(word.surface) == kanaFoldToHiragana(surface) else { return false }
+            return kanaFoldToHiragana(word.kana) == kanaFoldToHiragana(reading)
+        }
 
         // Toggle behavior: if already saved, delete; otherwise add
-        if hasSavedWord(surface: surface, reading: reading, noteID: currentNote?.id) {
-            let matches = words.words.filter { $0.surface == surface && $0.kana == reading && $0.sourceNoteID == currentNote?.id }
+        if hasSavedWord(surface: surface, reading: reading, noteID: noteID) {
+            let matches = words.words.filter(matchesSavedKey)
             let ids = Set(matches.map { $0.id })
             if ids.isEmpty == false {
                 words.delete(ids: ids)
@@ -1433,9 +1503,10 @@ struct PasteView: View {
                     presentDictionaryForSpan(at: index, focusSplitMenu: false)
                     return
                 }
-                let kana = normalizedReading(entry.kana)
-                let resolvedSurface = resolvedSurface(from: entry, fallback: context.surface)
-                words.add(surface: resolvedSurface, kana: kana, meaning: meaning, note: nil, sourceNoteID: currentNote?.id)
+                // Save with the preferred reading (custom override) when present.
+                let kana = reading ?? normalizedReading(entry.kana)
+                let resolvedDictionarySurface = resolvedSurface(from: entry, fallback: context.surface)
+                words.add(surface: surface, dictionarySurface: resolvedDictionarySurface, kana: kana, meaning: meaning, note: nil, sourceNoteID: noteID)
             }
         }
     }
@@ -1579,11 +1650,11 @@ struct PasteView: View {
 
     private func mergeSpan(at index: Int, direction: MergeDirection) {
         let wasShowingTokensPopover = showTokensPopover
-        guard let pair = stage1MergePair(forSemanticIndex: index, direction: direction) else { return }
-        guard let union = applySpanMerge(primaryIndex: pair.primaryIndex, neighborIndex: pair.neighborIndex, actionName: "Merge Tokens") else { return }
+        guard let mergeRange = stage1MergeRange(forSemanticIndex: index, direction: direction) else { return }
+        guard let union = applySpanMerge(mergeRange: mergeRange, actionName: "Merge Tokens") else { return }
         persistentSelectionRange = union
         pendingSelectionRange = union
-        let mergedIndex = min(pair.primaryIndex, pair.neighborIndex)
+        let mergedIndex = mergeRange.lowerBound
         let textStorage = inputText as NSString
         guard NSMaxRange(union) <= textStorage.length else { return }
         let surface = textStorage.substring(with: union)
@@ -1610,7 +1681,7 @@ struct PasteView: View {
     }
 
     private func canMergeSpan(at index: Int, direction: MergeDirection) -> Bool {
-        stage1MergePair(forSemanticIndex: index, direction: direction) != nil
+        stage1MergeRange(forSemanticIndex: index, direction: direction) != nil
     }
 
     private func handleOverridesExternalChange() {
@@ -1698,13 +1769,13 @@ struct PasteView: View {
     private func mergeSelection(_ direction: MergeDirection) {
         let wasShowingTokensPopover = showTokensPopover
         guard let selection = tokenSelection else { return }
-        guard let pair = stage1MergePair(forSemanticIndex: selection.tokenIndex, direction: direction) else { return }
-        guard let union = applySpanMerge(primaryIndex: pair.primaryIndex, neighborIndex: pair.neighborIndex, actionName: "Merge Tokens") else { return }
+        guard let mergeRange = stage1MergeRange(forSemanticIndex: selection.tokenIndex, direction: direction) else { return }
+        guard let union = applySpanMerge(mergeRange: mergeRange, actionName: "Merge Tokens") else { return }
         persistentSelectionRange = union
         pendingSelectionRange = union
         pendingSplitFocusSelectionID = nil
 
-        let mergedIndex = min(pair.primaryIndex, pair.neighborIndex)
+        let mergedIndex = mergeRange.lowerBound
         let textStorage = inputText as NSString
         guard NSMaxRange(union) <= textStorage.length else { return }
         let surface = textStorage.substring(with: union)
@@ -1712,6 +1783,11 @@ struct PasteView: View {
         let ephemeral = AnnotatedSpan(span: TextSpan(range: union, surface: surface, isLexiconMatch: false), readingKana: nil, lemmaCandidates: [])
         let ctx = TokenSelectionContext(tokenIndex: mergedIndex, range: union, surface: surface, semanticSpan: semantic, sourceSpanIndices: semantic.sourceSpanIndices, annotatedSpan: ephemeral)
         tokenSelection = ctx
+
+        // Keep the Extract Words sheet's in-sheet dictionary panel in sync.
+        if wasShowingTokensPopover {
+            sheetSelection = ctx
+        }
         if sheetDictionaryPanelEnabled {
             sheetSelection = ctx
             // If the Extract Words sheet is open, do not present another sheet.
@@ -1728,6 +1804,45 @@ struct PasteView: View {
         guard offset > 0, offset < selection.range.length else { return }
 
         let splitUTF16Index = selection.range.location + offset
+
+        // Keep the dictionary panel updated after the split by restoring selection to one of the
+        // resulting token ranges (smallest side; tie-break to the right).
+        let baseRange = selection.range
+        if baseRange.location != NSNotFound, baseRange.length > 1 {
+            let baseStart = baseRange.location
+            let baseEnd = NSMaxRange(baseRange)
+            let leftLen = splitUTF16Index - baseStart
+            let rightLen = baseEnd - splitUTF16Index
+            if leftLen > 0, rightLen > 0 {
+                let leftRange = NSRange(location: baseStart, length: leftLen)
+                let rightRange = NSRange(location: splitUTF16Index, length: rightLen)
+                let target = (rightLen <= leftLen) ? rightRange : leftRange
+                pendingSelectionRange = target
+                persistentSelectionRange = target
+            }
+        }
+
+        // Clear the current selection now (it may no longer correspond to a single token), but
+        // keep `pendingSelectionRange` so we can restore after recompute.
+        tokenSelection = nil
+        if sheetDictionaryPanelEnabled || showTokensPopover {
+            sheetSelection = nil
+        }
+        pendingSplitFocusSelectionID = nil
+
+        // If the split creates a 1-character prefix/suffix, explicitly lock the *outer* edge too.
+        // Otherwise Stage-2.5 may legitimately regroup that 1-char token into its neighbor
+        // (e.g. splitting “…か” right before “ら” can immediately become “から”).
+        let selectionStart = selection.range.location
+        let selectionEnd = NSMaxRange(selection.range)
+        let leftLen = splitUTF16Index - selectionStart
+        let rightLen = selectionEnd - splitUTF16Index
+        if leftLen == 1 {
+            tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: selectionStart, text: inputText)
+        }
+        if rightLen == 1 {
+            tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: selectionEnd, text: inputText)
+        }
         guard let stage1 = furiganaSpans else { return }
 
         let indices = selection.sourceSpanIndices
@@ -1752,7 +1867,6 @@ struct PasteView: View {
             // (Should be rare because the search above typically finds a containing span.)
             tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
             triggerFuriganaRefreshIfNeeded(reason: "Split Token", recomputeSpans: true)
-            clearSelection(resetPersistent: false)
             return
         }
 
@@ -1763,12 +1877,10 @@ struct PasteView: View {
         if localOffset <= 0 || localOffset >= spanRange.length {
             tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
             triggerFuriganaRefreshIfNeeded(reason: "Split Token", recomputeSpans: true)
-            clearSelection(resetPersistent: false)
             return
         }
 
         applySpanSplit(spanIndex: spanIndex, range: spanRange, offset: localOffset, actionName: "Split Token")
-        clearSelection(resetPersistent: false)
     }
 
     private func resetSelectionOverrides() {
@@ -1793,21 +1905,24 @@ struct PasteView: View {
         registerResetAllUndo(previousAllOverrides: previousAllOverrides, previousSpanSnapshot: previousSpanSnapshot, noteID: noteID)
     }
 
-    private func applySpanMerge(primaryIndex: Int, neighborIndex: Int, actionName: String) -> NSRange? {
+    private func applySpanMerge(mergeRange: Range<Int>, actionName: String) -> NSRange? {
         guard let spans = furiganaSpans else { return nil }
-        let indices = [primaryIndex, neighborIndex].sorted()
-        guard spans.indices.contains(indices[0]), spans.indices.contains(indices[1]) else { return nil }
+        guard mergeRange.count >= 2 else { return nil }
+        guard mergeRange.lowerBound >= 0, mergeRange.upperBound <= spans.count else { return nil }
 
-        let union = NSUnionRange(spans[indices[0]].span.range, spans[indices[1]].span.range)
+        var union = spans[mergeRange.lowerBound].span.range
+        for i in mergeRange.dropFirst() {
+            union = NSUnionRange(union, spans[i].span.range)
+        }
+
         let nsText = inputText as NSString
         guard union.location != NSNotFound, union.length > 0 else { return nil }
         guard NSMaxRange(union) <= nsText.length else { return nil }
         let mergedSurface = nsText.substring(with: union)
 
         var newSpans = spans.map(\.span)
-        newSpans.remove(at: indices[1])
-        newSpans.remove(at: indices[0])
-        newSpans.insert(TextSpan(range: union, surface: mergedSurface, isLexiconMatch: false), at: indices[0])
+        newSpans.removeSubrange(mergeRange)
+        newSpans.insert(TextSpan(range: union, surface: mergedSurface, isLexiconMatch: false), at: mergeRange.lowerBound)
 
         replaceSpans(newSpans, actionName: actionName)
         return union
@@ -1939,13 +2054,14 @@ struct PasteView: View {
 
     private func canMergeSelection(_ direction: MergeDirection) -> Bool {
         guard let selection = tokenSelection else { return false }
-        return stage1MergePair(forSemanticIndex: selection.tokenIndex, direction: direction) != nil
+        return stage1MergeRange(forSemanticIndex: selection.tokenIndex, direction: direction) != nil
     }
 
-    private func stage1MergePair(forSemanticIndex index: Int, direction: MergeDirection) -> (primaryIndex: Int, neighborIndex: Int)? {
+    private func stage1MergeRange(forSemanticIndex index: Int, direction: MergeDirection) -> Range<Int>? {
         guard let stage1 = furiganaSpans else { return nil }
         guard furiganaSemanticSpans.indices.contains(index) else { return nil }
         let semantic = furiganaSemanticSpans[index]
+
         let lower = semantic.sourceSpanIndices.lowerBound
         let upper = semantic.sourceSpanIndices.upperBound
         guard lower >= 0, upper <= stage1.count else { return nil }
@@ -1953,14 +2069,12 @@ struct PasteView: View {
         switch direction {
         case .previous:
             let neighbor = lower - 1
-            let primary = lower
-            guard stage1.indices.contains(neighbor), stage1.indices.contains(primary) else { return nil }
-            return (primaryIndex: primary, neighborIndex: neighbor)
+            guard stage1.indices.contains(neighbor) else { return nil }
+            return neighbor..<upper
         case .next:
             let neighbor = upper
-            let primary = upper - 1
-            guard stage1.indices.contains(neighbor), stage1.indices.contains(primary) else { return nil }
-            return (primaryIndex: primary, neighborIndex: neighbor)
+            guard stage1.indices.contains(neighbor) else { return nil }
+            return lower..<(neighbor + 1)
         }
     }
 
@@ -2110,7 +2224,7 @@ struct PasteView: View {
             annotatedSpan: aggregatedAnnotatedSpan(for: semantic)
         )
         tokenSelection = context
-        if sheetDictionaryPanelEnabled {
+        if sheetDictionaryPanelEnabled || showTokensPopover {
             sheetSelection = context
         }
         pendingSelectionRange = nil
@@ -2358,14 +2472,14 @@ extension PasteView {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            let isAnySaved = page.entries.contains { isSavedWord(for: page.matchedSurface, entry: $0) }
+            let isAnySaved = page.entries.contains { isSavedWord(for: page.matchedSurface, preferredReading: nil, entry: $0) }
             Button {
                 if isAnySaved {
-                    for entry in page.entries where isSavedWord(for: page.matchedSurface, entry: entry) {
-                        toggleSavedWord(surface: page.matchedSurface, entry: entry)
+                    for entry in page.entries where isSavedWord(for: page.matchedSurface, preferredReading: nil, entry: entry) {
+                        toggleSavedWord(surface: page.matchedSurface, preferredReading: nil, entry: entry)
                     }
                 } else if let first = page.entries.first {
-                    toggleSavedWord(surface: page.matchedSurface, entry: first)
+                    toggleSavedWord(surface: page.matchedSurface, preferredReading: nil, entry: first)
                 }
                 recomputeSavedWordOverlays()
             } label: {
