@@ -16,7 +16,7 @@ final class DictionaryLookupViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
 
-    func load(term: String, fallbackTerms: [String] = []) async {
+    func load(term: String, fallbackTerms: [String] = [], englishFirst: Bool = false) async {
         await ivtimeAsync("DictionaryLookup.load") {
             let primary = term.trimmingCharacters(in: .whitespacesAndNewlines)
             query = primary
@@ -44,11 +44,13 @@ final class DictionaryLookupViewModel: ObservableObject {
             isLoading = true
             errorMessage = nil
 
+            let mode: DictionarySearchMode = englishFirst ? .englishFirst : .auto
+
             for (idx, candidate) in candidates.enumerated() {
                 ivlog("DictionaryLookup.attempt \(idx + 1)/\(candidates.count) termLen=\(candidate.count)")
                 do {
                     let rows: [DictionaryEntry] = try await ivtimeAsync("DictionaryLookup.sqliteLookup") {
-                        try await DictionarySQLiteStore.shared.lookup(term: candidate, limit: 50)
+                        try await DictionarySQLiteStore.shared.lookup(term: candidate, limit: 50, mode: mode)
                     }
                     if rows.isEmpty == false {
                         results = rows

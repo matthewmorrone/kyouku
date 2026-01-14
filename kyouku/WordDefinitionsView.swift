@@ -96,6 +96,9 @@ struct WordDefinitionsView: View {
 
         let isKanji = containsKanji(headword)
         let normalizedHeadword = kanaFoldToHiragana(headword)
+        let contextKanaKey: String? = kana
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : kanaFoldToHiragana($0) }
 
         // Filter to entries relevant to the headword.
         let relevant: [DictionaryEntry] = entries.filter { entry in
@@ -119,29 +122,44 @@ struct WordDefinitionsView: View {
         guard relevant.isEmpty == false else { return [] }
 
         if isKanji {
-            // Rows per distinct kana reading.
+            // Rows per distinct kana reading, folding hiragana/katakana variants
+            // of the same reading into a single bucket.
             struct Bucket {
                 var firstIndex: Int
-                var reading: String
+                var key: String
+                var readings: [String]
                 var entries: [DictionaryEntry]
             }
-            var byReading: [String: Bucket] = [:]
+            var byReadingKey: [String: Bucket] = [:]
             for (idx, entry) in relevant.enumerated() {
-                let reading = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard reading.isEmpty == false else { continue }
-                if var existing = byReading[reading] {
+                let raw = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard raw.isEmpty == false else { continue }
+                let key = kanaFoldToHiragana(raw)
+                if var existing = byReadingKey[key] {
                     existing.entries.append(entry)
-                    byReading[reading] = existing
+                    if existing.readings.contains(raw) == false {
+                        existing.readings.append(raw)
+                    }
+                    byReadingKey[key] = existing
                 } else {
-                    byReading[reading] = Bucket(firstIndex: idx, reading: reading, entries: [entry])
+                    byReadingKey[key] = Bucket(firstIndex: idx, key: key, readings: [raw], entries: [entry])
                 }
             }
 
-            let orderedReadings = byReading.values.sorted { $0.firstIndex < $1.firstIndex }
-            return orderedReadings.compactMap { bucket in
+            var orderedBuckets = Array(byReadingKey.values)
+            orderedBuckets.sort { lhs, rhs in
+                if let key = contextKanaKey {
+                    let lhsMatch = lhs.key == key
+                    let rhsMatch = rhs.key == key
+                    if lhsMatch != rhsMatch { return lhsMatch }
+                }
+                return lhs.firstIndex < rhs.firstIndex
+            }
+            return orderedBuckets.compactMap { bucket in
                 let pages = pagesForEntries(bucket.entries)
                 guard pages.isEmpty == false else { return nil }
-                return DefinitionRow(headword: headword, reading: bucket.reading, pages: pages)
+                let displayReading = preferredReading(from: bucket.readings) ?? bucket.readings.first ?? bucket.key
+                return DefinitionRow(headword: headword, reading: displayReading, pages: pages)
             }
         } else {
             // Single kana row with all meanings.

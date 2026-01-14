@@ -6,6 +6,7 @@ struct WordsView: View {
     @EnvironmentObject var notesStore: NotesStore
     @StateObject private var lookup = DictionaryLookupViewModel()
     @State private var searchText: String = ""
+    @State private var searchMode: DictionarySearchMode = .auto
     @State private var editModeState: EditMode = .inactive
     @State private var selectedWordIDs: Set<Word.ID> = []
     @State private var showCSVImportSheet = false
@@ -66,7 +67,7 @@ struct WordsView: View {
                 }
             }
         }
-        .task(id: searchText) {
+        .task(id: searchTaskID) {
             await performLookup()
         }
         .onChange(of: editModeState) { oldValue, newValue in
@@ -91,12 +92,21 @@ struct WordsView: View {
     }
 
     private var searchField: some View {
-        TextField("Search Japanese or English", text: $searchText)
-            .padding(.horizontal, 8)
-            .padding(.top, 8)
-            .textFieldStyle(.roundedBorder)
-            .textInputAutocapitalization(.never)
-            .disableAutocorrection(true)
+        HStack(spacing: 8) {
+            TextField("Search Japanese or English", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
+
+            Picker("Mode", selection: $searchMode) {
+                Text("JP").tag(DictionarySearchMode.auto)
+                Text("EN").tag(DictionarySearchMode.englishFirst)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 96)
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 8)
     }
 
     @ViewBuilder
@@ -114,30 +124,49 @@ struct WordsView: View {
             Text("No matches found for \(trimmedSearchText).")
                 .foregroundStyle(.secondary)
         } else {
-            ForEach(lookup.results) { entry in
-                VStack(alignment: .leading) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(displaySurface(for: entry))
-                            .font(.headline)
-                        if let kana = entry.kana, kana.isEmpty == false, kana != entry.kanji {
+            ForEach(mergedLookupResults) { row in
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(row.surface)
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        if let kana = row.kana, kana.isEmpty == false, kana != row.surface {
                             Text(kana)
-                                .font(.subheadline)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if row.gloss.isEmpty == false {
+                            Text(row.gloss)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    if entry.gloss.isEmpty == false {
-                        Text(firstGloss(for: entry))
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+
+                    Button(action: { toggleMergedRow(row) }) {
+                        if isMergedRowAlreadySaved(row) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                        } else {
+                            Image(systemName: "star.circle")
+                                .foregroundColor(.accentColor)
+                        }
                     }
-                    Button {
-                        add(entry: entry)
-                    } label: {
-                        Label("Save", systemImage: "plus.circle.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.accentColor)
+                    .padding(8)
+                    .font(.title3)
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel(isMergedRowAlreadySaved(row) ? "Remove from saved" : "Save")
                 }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(.secondarySystemBackground))
+                )
+                .contentShape(Rectangle())
             }
         }
     }
@@ -199,13 +228,67 @@ struct WordsView: View {
     }
 
     private func performLookup() async {
-        await lookup.load(term: searchText)
+        let term = trimmedSearchText
+
+        // If the user cleared the search, reset results immediately
+        // without waiting for the debounce delay.
+        if term.isEmpty {
+            await lookup.load(term: "", englishFirst: searchMode == .englishFirst)
+            return
+        }
+
+        // Debounce rapid typing so we don't hit SQLite on every keystroke.
+        // The surrounding `.task(id:)` cancels this work when the search
+        // text changes again, so only the final pause triggers a lookup.
+        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+        if Task.isCancelled { return }
+
+        await lookup.load(term: term, englishFirst: searchMode == .englishFirst)
     }
 
     private func add(entry: DictionaryEntry) {
         let surface = displaySurface(for: entry)
         let gloss = firstGloss(for: entry)
         store.add(surface: surface, kana: entry.kana, meaning: gloss)
+    }
+
+    private func addMergedRow(_ row: DictionaryResultRow) {
+        store.add(surface: row.surface, kana: row.kana, meaning: row.gloss)
+    }
+
+    private func isMergedRowAlreadySaved(_ row: DictionaryResultRow) -> Bool {
+        let surface = row.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reading = row.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return hasSavedWord(surface: surface, reading: reading)
+    }
+
+    private func toggleMergedRow(_ row: DictionaryResultRow) {
+        let surface = row.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reading = row.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func matchesSavedKey(_ word: Word) -> Bool {
+            guard kanaFoldToHiragana(word.surface) == kanaFoldToHiragana(surface) else { return false }
+            // If we don't know the reading for this result, treat reading as a wildcard
+            // so the star can still toggle.
+            if let reading {
+                let foldedReading = kanaFoldToHiragana(reading)
+                return kanaFoldToHiragana(word.kana ?? "") == foldedReading
+            }
+            return true
+        }
+
+        if isMergedRowAlreadySaved(row) {
+            let matches = store.words.filter(matchesSavedKey)
+            let ids = Set(matches.map { $0.id })
+            if ids.isEmpty == false {
+                store.delete(ids: ids)
+            }
+            return
+        }
+
+        let meaning = row.gloss.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard surface.isEmpty == false, meaning.isEmpty == false else { return }
+        store.add(surface: surface, kana: reading, meaning: meaning)
     }
 
     private func displaySurface(for entry: DictionaryEntry) -> String {
@@ -255,8 +338,53 @@ struct WordsView: View {
         entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
     }
 
+    private func hasSavedWord(surface: String, reading: String?) -> Bool {
+        let targetSurface = kanaFoldToHiragana(surface)
+        let targetKana = kanaFoldToHiragana(reading ?? "")
+        return store.words.contains { word in
+            guard kanaFoldToHiragana(word.surface) == targetSurface else { return false }
+            if reading != nil {
+                return kanaFoldToHiragana(word.kana ?? "") == targetKana
+            }
+            return true
+        }
+    }
+
     private var trimmedSearchText: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var searchTaskID: String {
+        "\(searchMode == .englishFirst ? "EN" : "JP")|\(trimmedSearchText)"
+    }
+
+    /// Merge dictionary lookup results that differ only by kana script (hiragana/katakana)
+    /// for the same headword, e.g. 僕 ぼく and 僕 ボク.
+    private var mergedLookupResults: [DictionaryResultRow] {
+        let entries = lookup.results
+        guard entries.isEmpty == false else { return [] }
+
+        var buckets: [String: DictionaryResultRow.Builder] = [:]
+        var orderedKeys: [String] = []
+
+        for entry in entries {
+            let surface = displaySurface(for: entry)
+            let rawKana = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let kanaKey = rawKana.isEmpty ? "" : kanaFoldToHiragana(rawKana)
+            let key = "\(surface)|\(kanaKey)"
+
+            if var builder = buckets[key] {
+                builder.entries.append(entry)
+                buckets[key] = builder
+            } else {
+                buckets[key] = DictionaryResultRow.Builder(surface: surface, kanaKey: kanaKey, entries: [entry])
+                orderedKeys.append(key)
+            }
+        }
+
+        return orderedKeys.compactMap { key in
+            buckets[key]?.build(firstGlossFor: firstGloss(for:))
+        }
     }
 
     private var hasActiveSearch: Bool {
@@ -287,7 +415,47 @@ struct WordsView: View {
 
     private func selectAllSavedWords() {
         guard canEditSavedWords else { return }
-        selectedWordIDs = Set(sortedWords.map { $0.id })
+        let allIDs = Set(sortedWords.map { $0.id })
+        if selectedWordIDs == allIDs {
+            selectedWordIDs.removeAll()
+        } else {
+            selectedWordIDs = allIDs
+        }
+    }
+}
+
+/// Lightweight view model for a merged dictionary result row.
+private struct DictionaryResultRow: Identifiable {
+    let surface: String
+    let kana: String?
+    let gloss: String
+
+    var id: String { "\(surface)#\(kana ?? "(no-kana)")" }
+
+    struct Builder {
+        let surface: String
+        let kanaKey: String
+        var entries: [DictionaryEntry]
+
+        func build(firstGlossFor: (DictionaryEntry) -> String) -> DictionaryResultRow? {
+            guard let first = entries.first else { return nil }
+            let allKana: [String] = entries.compactMap { $0.kana?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            let displayKana: String? = {
+                let cleaned = allKana.filter { $0.isEmpty == false }
+                guard cleaned.isEmpty == false else { return nil }
+
+                func isAllHiragana(_ text: String) -> Bool {
+                    guard text.isEmpty == false else { return false }
+                    return text.unicodeScalars.allSatisfy { (0x3040...0x309F).contains($0.value) }
+                }
+
+                if let hira = cleaned.first(where: isAllHiragana) { return hira }
+                return cleaned.first
+            }()
+
+            let gloss = firstGlossFor(first)
+            return DictionaryResultRow(surface: surface, kana: displayKana, gloss: gloss)
+        }
     }
 }
 

@@ -157,6 +157,7 @@ struct SpanReadingAttacher {
             let attachment = attachmentForSpan(span, annotations: annotations, tokenizer: tokenizer)
             let override = await ReadingOverridePolicy.shared.overrideReading(for: span.surface, mecabReading: attachment.reading)
             let finalReading = override ?? attachment.reading
+
             annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas, partOfSpeech: attachment.partOfSpeech))
         }
 

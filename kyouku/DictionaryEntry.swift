@@ -50,8 +50,19 @@ struct SurfaceReadingOverride: Hashable, Sendable {
 
 
 
+enum DictionarySearchMode {
+    case auto
+    case englishFirst
+}
+
+
 actor DictionarySQLiteStore {
     static let shared = DictionarySQLiteStore()
+
+    // Swift doesn't import SQLite's `SQLITE_TRANSIENT` macro. Define an equivalent
+    // destructor so SQLite copies bound text. Marked nonisolated so it can be used
+    // freely from async actor methods without crossing actor isolation.
+    nonisolated(unsafe) let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     private var db: OpaquePointer?
     private let surfaceTokenMaxLength = 10
@@ -64,8 +75,8 @@ actor DictionarySQLiteStore {
     }
 
     // Keep the core implementation synchronous inside the actor.
-    // We'll expose an async wrapper for call sites.
-    private func lookupSync(term: String, limit: Int = 30) throws -> [DictionaryEntry] {
+    // We'll expose async wrappers for call sites.
+    private func lookupSync(term: String, limit: Int = 30, mode: DictionarySearchMode) throws -> [DictionaryEntry] {
         try ensureOpen()
 
         guard db != nil else {
@@ -79,6 +90,15 @@ actor DictionarySQLiteStore {
 
         let normalized = normalizeFullWidthASCII(trimmed)
 
+        // When English is explicitly requested, prioritize gloss search.
+        if case .englishFirst = mode {
+            let results = try selectEntriesByGloss(matching: normalized, limit: limit)
+            if !results.isEmpty { return results }
+            // Fall back to the default lookup path.
+            return try lookupSync(term: term, limit: limit, mode: .auto)
+        }
+
+        // Default behavior: prefer Japanese surface/readings, then gloss.
         // 1) Exact match on kanji/kana_forms + simple conjugation fallbacks
         var results = try queryExactMatches(for: normalized, limit: limit)
         if !results.isEmpty { return results }
@@ -163,7 +183,13 @@ actor DictionarySQLiteStore {
         // Actor isolation ensures safe access to `db`, but the SQL work can still be heavy.
         // We keep the work inside the actor; since callers are often on @MainActor,
         // the `await` prevents blocking UI.
-        try lookupSync(term: term, limit: limit)
+        try lookupSync(term: term, limit: limit, mode: .auto)
+    }
+
+    /// Variant that allows callers to influence how the query is interpreted
+    /// (e.g., prefer English gloss matches for Latin input).
+    func lookup(term: String, limit: Int = 30, mode: DictionarySearchMode) async throws -> [DictionaryEntry] {
+        try lookupSync(term: term, limit: limit, mode: mode)
     }
 
     private func queryExactMatches(for term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -245,6 +271,55 @@ actor DictionarySQLiteStore {
         }
 
         return overrides
+    }
+
+    /// Returns distinct kana readings for a given surface form.
+    ///
+    /// This is used to offer alternative readings in the token action UI for
+    /// surfaces that legitimately have multiple readings (e.g. "二人": ふたり / ににん).
+    func listKanaReadings(forSurface surface: String, limit: Int = 12) async throws -> [String] {
+        try ensureOpen()
+        guard let db else { return [] }
+
+        let trimmed = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return [] }
+
+        let sql = """
+        WITH entry_ids AS (
+            SELECT entry_id FROM kanji WHERE text = ?1
+            UNION
+            SELECT entry_id FROM kana_forms WHERE text = ?1
+        )
+        SELECT DISTINCT r.text
+        FROM kana_forms r
+        JOIN entry_ids e ON e.entry_id = r.entry_id
+        WHERE r.text IS NOT NULL
+          AND r.text <> ''
+        ORDER BY r.is_common DESC, r.id ASC
+        LIMIT ?2;
+        """
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_text(stmt, 1, trimmed, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+
+        var out: [String] = []
+        out.reserveCapacity(min(limit, 12))
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let ptr = sqlite3_column_text(stmt, 0) else { continue }
+            let raw = String(cString: ptr).trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = raw.precomposedStringWithCanonicalMapping
+            guard normalized.isEmpty == false else { continue }
+            if out.contains(normalized) == false {
+                out.append(normalized)
+            }
+        }
+        return out
     }
 
     private func ensureOpen() throws {
@@ -764,6 +839,41 @@ actor DictionarySQLiteStore {
         guard containsOnlyKana(hiragana) else { return [] }
 
         var bases = Set<String>()
+
+        // Potential/passive (common learner pain points):
+        // - Ichidan potential/passive: たべられる → たべる
+        // - Godan potential ("e-row" + る): かける → かく, よめる → よむ, ぬぐえる → ぬぐう
+        if hiragana.hasSuffix("られる"), hiragana.count > "られる".count {
+            let base = String(hiragana.dropLast("られる".count)) + "る"
+            bases.insert(base)
+        }
+        if hiragana.hasSuffix("る"), hiragana.count > 1 {
+            let map: [Character: Character] = [
+                "え": "う",
+                "け": "く",
+                "げ": "ぐ",
+                "せ": "す",
+                "ぜ": "ず",
+                "て": "つ",
+                "で": "づ",
+                "ね": "ぬ",
+                "へ": "ふ",
+                "べ": "ぶ",
+                "ぺ": "ぷ",
+                "め": "む",
+                "れ": "る"
+            ]
+            let chars = Array(hiragana)
+            let penultimate = chars[chars.count - 2]
+            if let replacement = map[penultimate] {
+                let prefix = String(chars.dropLast(2))
+                let base = prefix + String(replacement)
+                if base.isEmpty == false {
+                    bases.insert(base)
+                }
+            }
+        }
+
         let adjectiveSuffixes: [(String, String)] = [
             ("くなかったです", "い"),
             ("くなかった", "い"),

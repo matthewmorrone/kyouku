@@ -376,7 +376,12 @@ private struct EditingTextView: UIViewRepresentable {
 
     func updateUIView(_ uiView: UITextView, context: Context) {
         context.coordinator.attach(textView: uiView, scrollSyncGroupID: scrollSyncGroupID)
-        do {
+        // When an IME (e.g. Japanese QWERTY keyboard) is composing text, `markedTextRange`
+        // is non-nil and UIKit expects to own the text storage. Re-applying `attributedText`
+        // during this phase can corrupt the composition (e.g. "keshin" → "kえしn").
+        let isComposing = (uiView.markedTextRange != nil && uiView.isFirstResponder)
+
+        if isComposing == false {
             let baseAttributed = NSAttributedString(string: text)
             let processed = Self.removingRuby(from: baseAttributed)
             let fullRange = NSRange(location: 0, length: processed.length)

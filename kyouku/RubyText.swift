@@ -643,10 +643,18 @@ struct RubyText: UIViewRepresentable {
     }
 
     private func selectionHighlightInsets(for font: UIFont) -> UIEdgeInsets {
-        // let rubyAllowance = -max(0, font.pointSize * 0.9)
+        // Nudge the highlight in from the glyph bounds so it falls cleanly on
+        // the visible headword without bleeding into adjacent spacing.
+        let pointSize = max(1, font.pointSize)
+        let horizontalInset = max(0.5, pointSize * 0.08)
+        let verticalInset = max(0.5, pointSize * 0.06)
+
+        // Preserve a tiny bit of extra space below the glyphs so highlights
+        // don't feel cramped when additional line spacing is configured.
         let spacing = max(0, extraGap)
-        let bottomInset = max(0, spacing * 0.15)
-        return UIEdgeInsets(top: 0, left: 0, bottom: bottomInset, right: 0)
+        let bottomInset = max(verticalInset, spacing * 0.15)
+
+        return UIEdgeInsets(top: verticalInset, left: horizontalInset, bottom: bottomInset, right: horizontalInset)
     }
 
     private static let coreTextRubyAttribute = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
@@ -2213,16 +2221,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
         let point = recognizer.location(in: self)
 
-        func composedRange(atUTF16Index index: Int) -> NSRange? {
-            guard length > 0 else { return nil }
-            let clamped = max(0, min(index, length - 1))
-            return backing.rangeOfComposedCharacterSequence(at: clamped)
-        }
-
         func utf16Index(at point: CGPoint) -> Int? {
             guard let pos = closestPosition(to: point) else { return nil }
             let offset = self.offset(from: beginningOfDocument, to: pos)
             return max(0, min(offset, length))
+        }
+
+        func composedRange(atUTF16Index index: Int) -> NSRange? {
+            guard length > 0 else { return nil }
+            let clamped = max(0, min(index, length - 1))
+            return backing.rangeOfComposedCharacterSequence(at: clamped)
         }
 
         switch recognizer.state {
@@ -2251,8 +2259,38 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 return backing.rangeOfComposedCharacterSequence(at: max(0, current))
             }()
 
-            let start = min(anchorChar.location, currentChar.location)
-            let end = max(NSMaxRange(anchorChar), NSMaxRange(currentChar))
+            var start = min(anchorChar.location, currentChar.location)
+            var end = max(NSMaxRange(anchorChar), NSMaxRange(currentChar))
+
+            // Clamp drag-selection so it never crosses line breaks; words
+            // are constrained to a single line.
+            let lineBreaks = CharacterSet.newlines
+            let anchorLineStart: Int = {
+                var idx = anchorChar.location
+                while idx > 0 {
+                    let scalar = backing.character(at: idx - 1)
+                    if let u = UnicodeScalar(scalar), lineBreaks.contains(u) {
+                        break
+                    }
+                    idx -= 1
+                }
+                return idx
+            }()
+            let anchorLineEnd: Int = {
+                var idx = NSMaxRange(anchorChar)
+                while idx < length {
+                    let scalar = backing.character(at: idx)
+                    if let u = UnicodeScalar(scalar), lineBreaks.contains(u) {
+                        break
+                    }
+                    idx += 1
+                }
+                return idx
+            }()
+
+            start = max(start, anchorLineStart)
+            end = min(end, anchorLineEnd)
+
             let selected = NSRange(location: start, length: max(0, end - start))
             applyInspectionHighlight(range: selected.length > 0 ? selected : nil)
 

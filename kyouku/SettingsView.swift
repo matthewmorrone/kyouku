@@ -14,14 +14,16 @@ struct SettingsView: View {
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
 
+    @AppStorage("notesPreviewLineCount") private var notesPreviewLineCount: Int = 3
+
     @AppStorage(WordOfTheDayScheduler.enabledKey) private var wotdEnabled: Bool = false
     @AppStorage(WordOfTheDayScheduler.hourKey) private var wotdHour: Int = 9
     @AppStorage(WordOfTheDayScheduler.minuteKey) private var wotdMinute: Int = 0
 
-#if DEBUG
     @AppStorage("rubyDebugHUD") private var rubyDebugHUD: Bool = false
     @AppStorage("rubyDebugRects") private var rubyDebugRects: Bool = false
-#endif
+    @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
+    @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
 
     @State private var wotdAuthStatus: UNAuthorizationStatus = .notDetermined
     @State private var wotdPendingCount: Int = 0
@@ -54,11 +56,10 @@ struct SettingsView: View {
             Form {
                 textAppearanceSection
                 tokenHighlightSection
+                notesSection
                 extractFilterSection
                 wordOfTheDaySection
-#if DEBUG
                 debugSection
-#endif
                 Section("Backup & Restore") {
                     Button("Export…") {
                         exportAll()
@@ -182,6 +183,16 @@ struct SettingsView: View {
         }
     }
 
+    private var notesSection: some View {
+        Section("Notes") {
+            Picker("Preview lines", selection: $notesPreviewLineCount) {
+                ForEach(0...4, id: \.self) { count in
+                    Text("\(count)").tag(count)
+                }
+            }
+        }
+    }
+
     private var extractFilterSection: some View {
         Section("Extract Filters") {
             ParticleTagEditor(tags: commonParticlesBinding)
@@ -240,17 +251,17 @@ struct SettingsView: View {
         }
     }
 
-#if DEBUG
     private var debugSection: some View {
         Section("Debug") {
             Toggle("Ruby HUD", isOn: $rubyDebugHUD)
             Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
+            Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
+            Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
             Text("Use this for screenshot-based debugging of furigana layout.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
-#endif
 
     private var commonParticlesBinding: Binding<[String]> {
         Binding(

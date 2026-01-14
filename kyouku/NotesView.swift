@@ -14,6 +14,9 @@ struct NotesView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var readingOverrides: ReadingOverridesStore
     @EnvironmentObject var tokenBoundaries: TokenBoundariesStore
+
+    @AppStorage("notesPreviewLineCount") private var notesPreviewLineCount: Int = 3
+
     @State private var pendingDeleteOffsets: IndexSet? = nil
     @State private var showDeleteAlert: Bool = false
     @State private var pendingDeleteHasAssociatedWords: Bool = false
@@ -48,10 +51,12 @@ struct NotesView: View {
                                 Text((note.title?.isEmpty == false ? note.title! : "Untitled") as String)
                                     .font(.headline)
 
-                                Text(note.text)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(3)
+                                if notesPreviewLineCount > 0 {
+                                    Text(note.text)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(notesPreviewLineCount)
+                                }
                             }
                             .padding(.vertical, 4)
                         }
@@ -59,7 +64,7 @@ struct NotesView: View {
                             Button {
                                 UIPasteboard.general.string = note.text
                             } label: {
-                                Label("Copy Text", systemImage: "doc.on.doc")
+                                Label("Copy", systemImage: "doc.on.doc")
                             }
                             Button {
                                 // Duplicate note: insert a copy at the top and save
@@ -72,7 +77,7 @@ struct NotesView: View {
                             Button {
                                 resetCustomSpans(noteID: note.id)
                             } label: {
-                                Label("Reset Custom Spans", systemImage: "arrow.counterclockwise")
+                                Label("Reset", systemImage: "arrow.counterclockwise")
                             }
                             // Divider()
 
