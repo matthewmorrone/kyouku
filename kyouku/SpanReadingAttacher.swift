@@ -163,7 +163,6 @@ struct SpanReadingAttacher {
 
         let semantic: [SemanticSpan] = await ivtimeAsync("Stage2.5.taskWait") {
             await Task(priority: .userInitiated) { [self] in
-                await ivlog("Stage2.5.task start")
                 let out = await ivtimeAsync("Stage2.5.semanticRegrouping") {
                     await self.semanticRegrouping(
                         text: text,
@@ -175,7 +174,6 @@ struct SpanReadingAttacher {
                         hardCuts: hardCuts
                     )
                 }
-                await ivlog("Stage2.5.task end out=\(out.count)")
                 return out
             }.value
         }

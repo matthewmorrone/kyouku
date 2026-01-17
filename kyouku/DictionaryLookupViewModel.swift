@@ -8,6 +8,7 @@
 
 import SwiftUI
 import Combine
+import Darwin
 
 @MainActor
 final class DictionaryLookupViewModel: ObservableObject {
@@ -53,7 +54,7 @@ final class DictionaryLookupViewModel: ObservableObject {
                     // (highlight/ruby overlay layout) can render immediately.
                     let (rows, ranOnMainThread): ([DictionaryEntry], Bool) = try await ivtimeAsync("DictionaryLookup.sqliteLookup") {
                         try await Task.detached(priority: .userInitiated) {
-                            let ranOnMain = Thread.isMainThread
+                            let ranOnMain = pthread_main_np() != 0
                             let rows = try await DictionarySQLiteStore.shared.lookup(term: candidate, limit: 50, mode: mode)
                             return (rows, ranOnMain)
                         }.value
