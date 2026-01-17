@@ -69,6 +69,7 @@ actor DictionarySQLiteStore {
     private var hasGlossesFTS = false
     private var hasSurfaceIndex = false
     private var surfaceIndexUsesHash = false
+    private var lastQueryDescription: String = ""
 
     private init() {
         self.db = nil
@@ -378,6 +379,8 @@ actor DictionarySQLiteStore {
         LIMIT ?2;
         """
 
+        lastQueryDescription = "selectEntries term='\(term)' limit=\(limit)\n" + sql
+
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
             throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
@@ -434,6 +437,8 @@ actor DictionarySQLiteStore {
         JOIN matched m ON m.entry_id = e.id
         LIMIT ?2;
         """
+
+        lastQueryDescription = "selectEntriesByGloss term='\(term)' fts='\(ftsQuery)' limit=\(limit)\n" + sql
 
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
@@ -528,6 +533,12 @@ actor DictionarySQLiteStore {
         """
         }
 
+        if surfaceIndexUsesHash {
+            lastQueryDescription = "selectEntriesBySurfaceToken term='\(term)' sanitized='\(sanitized)' limit=\(limit) using token_hash\n" + sql
+        } else {
+            lastQueryDescription = "selectEntriesBySurfaceToken term='\(term)' sanitized='\(sanitized)' limit=\(limit) using token\n" + sql
+        }
+
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
             throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
@@ -551,6 +562,11 @@ actor DictionarySQLiteStore {
             rows.append(RawDictionaryRow(entryID: id, kanji: kanji, gloss: gloss, isCommon: isCommon))
         }
         return try expandRows(rows)
+    }
+
+    /// Debug helper for surfacing the most recent SQL used in lookups.
+    func debugLastQueryDescription() async -> String {
+        lastQueryDescription
     }
 
     private func expandRows(_ rows: [RawDictionaryRow]) throws -> [DictionaryEntry] {

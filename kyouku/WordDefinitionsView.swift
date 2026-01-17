@@ -12,6 +12,7 @@ struct WordDefinitionsView: View {
     @State private var entries: [DictionaryEntry] = []
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
+    @State private var debugSQL: String = ""
 
     private struct DefinitionRow: Identifiable, Hashable {
         let headword: String
@@ -77,6 +78,19 @@ struct WordDefinitionsView: View {
                     }
                 }
             }
+
+            if debugSQL.isEmpty == false {
+                Section("SQL Debug") {
+                    ScrollView(.vertical) {
+                        Text(formattedDebugSQL)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding(.vertical, 4)
+                    }
+                    .frame(minHeight: 80, maxHeight: 260)
+                }
+            }
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Details")
@@ -88,6 +102,11 @@ struct WordDefinitionsView: View {
         let primary = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         if primary.isEmpty == false { return primary }
         return kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var formattedDebugSQL: String {
+        guard debugSQL.isEmpty == false else { return "" }
+        return formatSQLDebug(debugSQL)
     }
 
     private var definitionRows: [DefinitionRow] {
@@ -241,6 +260,43 @@ struct WordDefinitionsView: View {
         .padding(.vertical, 6)
     }
 
+    private func formatSQLDebug(_ value: String) -> String {
+        let rawLines = value.split(whereSeparator: { $0.isNewline }).map(String.init)
+        let nonEmpty = rawLines.filter { $0.trimmingCharacters(in: CharacterSet.whitespaces).isEmpty == false }
+        guard nonEmpty.isEmpty == false else { return value }
+
+        let leadingSpaceCounts: [Int] = nonEmpty.map { line in
+            var count = 0
+            for ch in line {
+                if ch == " " || ch == "\t" {
+                    count += 1
+                } else {
+                    break
+                }
+            }
+            return count
+        }
+
+        guard let minIndent = leadingSpaceCounts.min(), minIndent > 0 else { return value }
+
+        let trimmedLines: [String] = rawLines.map { line in
+            var remainingIndent = minIndent
+            var result = ""
+            var dropped = true
+            for ch in line {
+                if dropped, remainingIndent > 0, (ch == " " || ch == "\t") {
+                    remainingIndent -= 1
+                    continue
+                }
+                dropped = false
+                result.append(ch)
+            }
+            return result
+        }
+
+        return trimmedLines.joined(separator: "\n")
+    }
+
     private func load() async {
         let primary = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let secondary = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -263,7 +319,9 @@ struct WordDefinitionsView: View {
 
         do {
             for term in terms {
-                let rows = try await DictionarySQLiteStore.shared.lookup(term: term, limit: 100)
+                let rows = try await Task.detached(priority: .userInitiated) {
+                    try await DictionarySQLiteStore.shared.lookup(term: term, limit: 100)
+                }.value
                 for row in rows {
                     if seen.insert(row.id).inserted {
                         merged.append(row)
@@ -272,6 +330,9 @@ struct WordDefinitionsView: View {
             }
             entries = merged
             isLoading = false
+            debugSQL = await Task.detached(priority: .utility) {
+                await DictionarySQLiteStore.shared.debugLastQueryDescription()
+            }.value
         } catch {
             entries = []
             isLoading = false

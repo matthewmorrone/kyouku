@@ -13,22 +13,12 @@ struct WordsView: View {
 
     var body: some View {
         NavigationStack {
-            VStack {
-                searchField
-                List(selection: $selectedWordIDs) {
-                    if hasActiveSearch {
-                        Section("") {
-                            dictionarySection
-                        }
-                    } else {
-                        Section() {
-                            savedSection
-                        }
-                    }
-                }
-                .environment(\.editMode, $editModeState)
-                .listStyle(.insetGrouped)
-            }
+            mainList
+            .environment(\.editMode, $editModeState)
+            .listStyle(.plain)
+            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Japanese or English")
+            .textInputAutocapitalization(.never)
+            .disableAutocorrection(true)
             .navigationTitle("Words")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -40,6 +30,14 @@ struct WordsView: View {
                     .accessibilityLabel("Import CSV")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    Picker("Mode", selection: $searchMode) {
+                        Text("JP").tag(DictionarySearchMode.auto)
+                        Text("EN").tag(DictionarySearchMode.englishFirst)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 96)
+                    .disabled(hasActiveSearch == false)
+
                     if isEditing {
                         if canEditSavedWords {
                             Button {
@@ -91,22 +89,17 @@ struct WordsView: View {
         }
     }
 
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            TextField("Search Japanese or English", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .textInputAutocapitalization(.never)
-                .disableAutocorrection(true)
-
-            Picker("Mode", selection: $searchMode) {
-                Text("JP").tag(DictionarySearchMode.auto)
-                Text("EN").tag(DictionarySearchMode.englishFirst)
+    @ViewBuilder
+    private var mainList: some View {
+        if hasActiveSearch {
+            List {
+                dictionarySection
             }
-            .pickerStyle(.segmented)
-            .frame(width: 96)
+        } else {
+            List(selection: $selectedWordIDs) {
+                savedSection
+            }
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 8)
     }
 
     @ViewBuilder
@@ -125,48 +118,15 @@ struct WordsView: View {
                 .foregroundStyle(.secondary)
         } else {
             ForEach(mergedLookupResults) { row in
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.surface)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        if let kana = row.kana, kana.isEmpty == false, kana != row.surface {
-                            Text(kana)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        if row.gloss.isEmpty == false {
-                            Text(row.gloss)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer(minLength: 12)
-
-                    Button(action: { toggleMergedRow(row) }) {
-                        if isMergedRowAlreadySaved(row) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                        } else {
-                            Image(systemName: "star.circle")
-                                .foregroundColor(.accentColor)
-                        }
-                    }
-                    .padding(8)
-                    .font(.title3)
-                    .buttonStyle(.plain)
-                    .contentShape(Rectangle())
-                    .accessibilityLabel(isMergedRowAlreadySaved(row) ? "Remove from saved" : "Save")
+                NavigationLink {
+                    WordDefinitionsView(
+                        surface: row.surface,
+                        kana: row.kana,
+                        sourceNoteID: nil
+                    )
+                } label: {
+                    dictionaryRow(row)
                 }
-                .padding(.vertical, 10)
-                .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color(.secondarySystemBackground))
-                )
-                .contentShape(Rectangle())
             }
         }
     }
@@ -198,22 +158,33 @@ struct WordsView: View {
 
     private func savedRow(_ word: Word) -> some View {
         let headword = displayHeadword(for: word)
-        return HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading) {
+        return HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(headword)
-                    .font(.headline)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
                 if let kana = word.kana, kana.isEmpty == false, kana != headword {
                     Text(kana)
-                        .font(.subheadline)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
                 if word.meaning.isEmpty == false {
                     Text(word.meaning)
-                        .font(.subheadline)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
+            Spacer(minLength: 0)
+            if word.sourceNoteID != nil {
+                Image(systemName: "note.text")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("From note")
+            }
         }
+        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) {
                 store.delete(id: word.id)
@@ -221,6 +192,45 @@ struct WordsView: View {
                 Label("Delete", systemImage: "trash")
             }
         }
+    }
+
+    private func dictionaryRow(_ row: DictionaryResultRow) -> some View {
+        let isSaved = isMergedRowAlreadySaved(row)
+        return HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.surface)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if let kana = row.kana, kana.isEmpty == false, kana != row.surface {
+                    Text(kana)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if row.gloss.isEmpty == false {
+                    Text(row.gloss)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                toggleMergedRow(row)
+            } label: {
+                Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
+                    .font(.headline)
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.borderless)
+            .tint(isSaved ? .accentColor : .secondary)
+            .accessibilityLabel(isSaved ? "Remove from saved" : "Save")
+        }
+        .contentShape(Rectangle())
+        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
     }
 
     private var sortedWords: [Word] {
@@ -801,7 +811,16 @@ private enum WordsCSVImport {
 
                     var hit: DictionaryEntry? = nil
                     for cand in candidates {
-                        if let res = try? await DictionarySQLiteStore.shared.lookup(term: cand, limit: 1), let first = res.first {
+                        let rows: [DictionaryEntry]
+                        do {
+                            rows = try await Task.detached(priority: .userInitiated, operation: { () async throws -> [DictionaryEntry] in
+                                try await DictionarySQLiteStore.shared.lookup(term: cand, limit: 1)
+                            }).value
+                        } catch {
+                            continue
+                        }
+
+                        if let first = rows.first {
                             hit = first
                             break
                         }

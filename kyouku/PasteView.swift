@@ -199,7 +199,6 @@ struct PasteView: View {
         NavigationStack {
             applyDictionarySheet(to: coreContent)
         }
-        .coordinateSpace(name: Self.coordinateSpaceName)
         .onPreferenceChange(TokenActionPanelFramePreferenceKey.self) { newValue in
             tokenPanelFrame = newValue
         }
@@ -276,7 +275,10 @@ struct PasteView: View {
             }
             .onChange(of: showFurigana) { _, enabled in
                 if enabled {
-                    triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: true)
+                    // Toggling furigana on should reuse existing segmentation when possible.
+                    // Only rebuild the attributed text layer; segmentation is recomputed
+                    // inside the pipeline if spans are missing or invalid.
+                    triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: false)
                 } else {
                     furiganaTaskHandle?.cancel()
                 }
@@ -386,14 +388,36 @@ struct PasteView: View {
                 tokenGeometryDebugOverlay
             }
         }
+        .coordinateSpace(name: Self.coordinateSpaceName)
     }
 
     @ViewBuilder
     private var tokenGeometryDebugOverlay: some View {
-        ZStack {
+        GeometryReader { proxy in
+            ZStack {
+                // Outline the coordinate-space container itself.
+                Rectangle()
+                    .stroke(Color.yellow.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [10, 6]))
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .position(x: proxy.size.width / 2.0, y: proxy.size.height / 2.0)
+
+                // Mark the coordinate-space origin.
+                Circle()
+                    .fill(Color.yellow.opacity(0.9))
+                    .frame(width: 6, height: 6)
+                    .position(x: 0, y: 0)
+
             if let paste = pasteAreaFrame {
                 Rectangle()
-                    .stroke(Color.green.opacity(0.8), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                    .fill(Color.cyan.opacity(0.06))
+                    .frame(width: paste.width, height: paste.height)
+                    .position(x: paste.midX, y: paste.midY)
+
+                Rectangle()
+                    .stroke(
+                        Color.cyan.opacity(0.95),
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [14, 10])
+                    )
                     .frame(width: paste.width, height: paste.height)
                     .position(x: paste.midX, y: paste.midY)
             }
@@ -405,17 +429,19 @@ struct PasteView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Token Geometry Debug")
-                    .font(.caption2.bold())
+                // Text("Token Geometry Debug")
+                //     .font(.caption2.bold())
+                Text(String(format: "Container (yellow dashed) x=0.0 y=0.0 w=%.1f h=%.1f", proxy.size.width, proxy.size.height))
+                    .font(.caption2)
                 if let paste = pasteAreaFrame {
-                    Text(String(format: "Paste y=%.1f h=%.1f", paste.minY, paste.height))
+                    Text(String(format: "Paste (cyan dashed) x=%.1f y=%.1f w=%.1f h=%.1f", paste.minX, paste.minY, paste.width, paste.height))
                         .font(.caption2)
                 } else {
                     Text("Paste: <none>")
                         .font(.caption2)
                 }
                 if let panel = tokenPanelFrame {
-                    Text(String(format: "Panel y=%.1f h=%.1f", panel.minY, panel.height))
+                    Text(String(format: "Panel (red) x=%.1f y=%.1f w=%.1f h=%.1f", panel.minX, panel.minY, panel.width, panel.height))
                         .font(.caption2)
                 } else {
                     Text("Panel: <none>")
@@ -427,8 +453,9 @@ struct PasteView: View {
             .foregroundColor(.white)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(8)
+            }
+            .allowsHitTesting(false)
         }
-        .allowsHitTesting(false)
     }
 
     private var editorColumn: some View {
@@ -601,7 +628,9 @@ struct PasteView: View {
                     guard isEditing == false else { return }
                     showFurigana.toggle()
                     if showFurigana {
-                        triggerFuriganaRefreshIfNeeded(reason: "manual toggle button")
+                        // Manual toggle should not force a fresh segmentation pass; reuse
+                        // existing spans and just rebuild the ruby text.
+                        triggerFuriganaRefreshIfNeeded(reason: "manual toggle button", recomputeSpans: false)
                     }
                     showToast(showFurigana ? "Furigana enabled" : "Furigana disabled")
                 } label: {

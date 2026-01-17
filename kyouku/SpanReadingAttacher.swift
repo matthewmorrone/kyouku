@@ -833,9 +833,9 @@ struct SpanReadingAttacher {
             }
 
             let afterCount = segments.count
-#if DEBUG
+//#if DEBUG
             assert(afterCount <= beforeCount, "Stage2.5 invariant failed: span count increased \(beforeCount) -> \(afterCount)")
-#endif
+//#endif
             if didMerge == false {
                 break
             }

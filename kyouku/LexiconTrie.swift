@@ -15,7 +15,7 @@ final class LexiconTrie {
 
     var maxLexiconWordLength: Int { maxWordLength }
 
-#if DEBUG
+//#if DEBUG
     var debugMaxWordLength: Int { maxWordLength }
 
     func debugContainsWord(_ word: String) -> Bool {
@@ -23,7 +23,7 @@ final class LexiconTrie {
         guard ns.length > 0 else { return false }
         return containsWord(in: ns, from: 0, through: ns.length, requireKanji: false)
     }
-#endif
+//#endif
 
     init(words: [String]) {
         let root = Node()

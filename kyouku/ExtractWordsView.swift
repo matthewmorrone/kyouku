@@ -244,9 +244,15 @@ struct TokenListPanel: View {
                                 mergeRightEnabled: canMergeRight(item.spanIndex)
                             )
                         }
+
+                        // Add explicit bottom space so the pinned dictionary panel doesn't
+                        // cover the last rows.
+                        if bottomOverscrollHeight > 0 {
+                            Color.clear
+                                .frame(height: bottomOverscrollHeight)
+                        }
                     }
                     .padding(.vertical, 4)
-                    .padding(.bottom, max(0, bottomOverscrollHeight))
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
             }

@@ -48,7 +48,10 @@ struct FuriganaRenderingHost: View {
                     if text.isEmpty {
                         EmptyView()
                     } else {
-                        rubyBlock(annotationVisibility: showFurigana ? .visible : .removed, bottomObstruction: obstruction)
+                            rubyBlock(
+                               annotationVisibility: showFurigana ? .visible : .hiddenKeepMetrics,
+                               bottomObstruction: obstruction
+                            )
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

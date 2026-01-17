@@ -22,6 +22,7 @@ struct SettingsView: View {
 
     @AppStorage("rubyDebugHUD") private var rubyDebugHUD: Bool = false
     @AppStorage("rubyDebugRects") private var rubyDebugRects: Bool = false
+    @AppStorage("rubyDebugLineBands") private var rubyDebugLineBands: Bool = false
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
 
@@ -54,6 +55,9 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                NavigationLink("SQL Playground") {
+                    SQLPlaygroundView()
+                }
                 textAppearanceSection
                 tokenHighlightSection
                 notesSection
@@ -114,9 +118,11 @@ struct SettingsView: View {
                 fontSize: CGFloat(pendingReadingTextSize),
                 lineHeightMultiple: 1.0,
                 extraGap: CGFloat(pendingReadingLineSpacing),
+                isScrollEnabled: true,
                 enableTapInspection: false
             )
-            .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 140, alignment: .leading)
             .padding(.vertical, 8)
 
             HStack {
@@ -136,7 +142,6 @@ struct SettingsView: View {
                     if editing == false { readingTextSize = pendingReadingTextSize }
                 }
             )
-
             HStack {
                 Text("Furigana Size")
                 Spacer()
@@ -253,13 +258,11 @@ struct SettingsView: View {
 
     private var debugSection: some View {
         Section("Debug") {
+            Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
             Toggle("Ruby HUD", isOn: $rubyDebugHUD)
             Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
-            Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
+            Toggle("Ruby line/furigana bands", isOn: $rubyDebugLineBands)
             Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
-            Text("Use this for screenshot-based debugging of furigana layout.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 

@@ -155,8 +155,10 @@ struct TokenActionPanel: View {
         guard surface.isEmpty == false else { return }
 
         surfaceReadingSuggestionTask = Task {
-            // Querying the DB is async; keep UI updates on the main actor.
-            let readings: [String] = (try? await DictionarySQLiteStore.shared.listKanaReadings(forSurface: surface, limit: 8)) ?? []
+            // Querying the DB can be slow; keep it off the main actor.
+            let readings: [String] = (try? await Task.detached(priority: .userInitiated) {
+                try await DictionarySQLiteStore.shared.listKanaReadings(forSurface: surface, limit: 8)
+            }.value) ?? []
             if Task.isCancelled { return }
 
             func foldToHiragana(_ value: String) -> String {
