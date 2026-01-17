@@ -161,9 +161,8 @@ struct SpanReadingAttacher {
             annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas, partOfSpeech: attachment.partOfSpeech))
         }
 
-        let semantic: [SemanticSpan] = await ivtimeAsync("Stage2.5.detachedWait") {
-            await Task.detached(priority: .userInitiated) { [self] in
-                await ivlog("Stage2.5.detached start")
+        let semantic: [SemanticSpan] = await ivtimeAsync("Stage2.5.taskWait") {
+            await Task(priority: .userInitiated) { [self] in
                 let out = await ivtimeAsync("Stage2.5.semanticRegrouping") {
                     await self.semanticRegrouping(
                         text: text,
@@ -175,13 +174,14 @@ struct SpanReadingAttacher {
                         hardCuts: hardCuts
                     )
                 }
-                await ivlog("Stage2.5.detached end out=\(out.count)")
                 return out
             }.value
         }
 
+        #if DEBUG
         CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
         CustomLogger.shared.print(SemanticSpan.describe(spans: semantic))
+        #endif
         CustomLogger.shared.debug("Stage2: stage1Count=\(spans.count) stage2Count=\(semantic.count)")
 
         let result = Result(annotatedSpans: annotated, semanticSpans: semantic)
@@ -220,6 +220,10 @@ struct SpanReadingAttacher {
             return annotatedSpans.enumerated().map { idx, span in
                 SemanticSpan(range: span.span.range, surface: span.span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: span.readingKana)
             }
+        }
+
+        if Task.isCancelled {
+            return passthroughSemanticSpans(reason: "cancelled")
         }
 
         ivlog("Stage2.5.mergeOnly start spans=\(spans.count)")
@@ -1325,4 +1329,3 @@ private actor ReadingAttachmentCache {
         }
     }
 }
-

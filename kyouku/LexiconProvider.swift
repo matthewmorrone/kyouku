@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import Dispatch
 
 /// Builds and caches the in-memory trie from JMdict surfaces. SQLite is only
 /// touched here during the one-time bootstrap so the segmentation hot path
@@ -50,9 +51,8 @@ actor LexiconProvider {
             let buildInterval = signposter.beginInterval("Trie() Build LexiconTrie")
             // Build the trie off the main thread to avoid UI hitching
             let trie: LexiconTrie = await withCheckedContinuation { continuation in
-                Task { @MainActor in
-                    let built = LexiconTrie(words: forms)
-                    continuation.resume(returning: built)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(returning: LexiconTrie(words: forms))
                 }
             }
 
@@ -80,4 +80,3 @@ actor LexiconProvider {
         }
     }
 }
-
