@@ -12,6 +12,7 @@ struct WordDefinitionsView: View {
     @State private var entries: [DictionaryEntry] = []
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
+    @State private var debugSQL: String = ""
 
     private struct DefinitionRow: Identifiable, Hashable {
         let headword: String
@@ -77,6 +78,19 @@ struct WordDefinitionsView: View {
                     }
                 }
             }
+
+            if debugSQL.isEmpty == false {
+                Section("SQL Debug") {
+                    ScrollView(.vertical) {
+                        Text(formattedDebugSQL)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding(.vertical, 4)
+                    }
+                    .frame(minHeight: 80, maxHeight: 260)
+                }
+            }
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Details")
@@ -90,12 +104,20 @@ struct WordDefinitionsView: View {
         return kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    private var formattedDebugSQL: String {
+        guard debugSQL.isEmpty == false else { return "" }
+        return formatSQLDebug(debugSQL)
+    }
+
     private var definitionRows: [DefinitionRow] {
         let headword = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard headword.isEmpty == false else { return [] }
 
         let isKanji = containsKanji(headword)
         let normalizedHeadword = kanaFoldToHiragana(headword)
+        let contextKanaKey: String? = kana
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : kanaFoldToHiragana($0) }
 
         // Filter to entries relevant to the headword.
         let relevant: [DictionaryEntry] = entries.filter { entry in
@@ -119,29 +141,44 @@ struct WordDefinitionsView: View {
         guard relevant.isEmpty == false else { return [] }
 
         if isKanji {
-            // Rows per distinct kana reading.
+            // Rows per distinct kana reading, folding hiragana/katakana variants
+            // of the same reading into a single bucket.
             struct Bucket {
                 var firstIndex: Int
-                var reading: String
+                var key: String
+                var readings: [String]
                 var entries: [DictionaryEntry]
             }
-            var byReading: [String: Bucket] = [:]
+            var byReadingKey: [String: Bucket] = [:]
             for (idx, entry) in relevant.enumerated() {
-                let reading = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard reading.isEmpty == false else { continue }
-                if var existing = byReading[reading] {
+                let raw = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard raw.isEmpty == false else { continue }
+                let key = kanaFoldToHiragana(raw)
+                if var existing = byReadingKey[key] {
                     existing.entries.append(entry)
-                    byReading[reading] = existing
+                    if existing.readings.contains(raw) == false {
+                        existing.readings.append(raw)
+                    }
+                    byReadingKey[key] = existing
                 } else {
-                    byReading[reading] = Bucket(firstIndex: idx, reading: reading, entries: [entry])
+                    byReadingKey[key] = Bucket(firstIndex: idx, key: key, readings: [raw], entries: [entry])
                 }
             }
 
-            let orderedReadings = byReading.values.sorted { $0.firstIndex < $1.firstIndex }
-            return orderedReadings.compactMap { bucket in
+            var orderedBuckets = Array(byReadingKey.values)
+            orderedBuckets.sort { lhs, rhs in
+                if let key = contextKanaKey {
+                    let lhsMatch = lhs.key == key
+                    let rhsMatch = rhs.key == key
+                    if lhsMatch != rhsMatch { return lhsMatch }
+                }
+                return lhs.firstIndex < rhs.firstIndex
+            }
+            return orderedBuckets.compactMap { bucket in
                 let pages = pagesForEntries(bucket.entries)
                 guard pages.isEmpty == false else { return nil }
-                return DefinitionRow(headword: headword, reading: bucket.reading, pages: pages)
+                let displayReading = preferredReading(from: bucket.readings) ?? bucket.readings.first ?? bucket.key
+                return DefinitionRow(headword: headword, reading: displayReading, pages: pages)
             }
         } else {
             // Single kana row with all meanings.
@@ -223,6 +260,43 @@ struct WordDefinitionsView: View {
         .padding(.vertical, 6)
     }
 
+    private func formatSQLDebug(_ value: String) -> String {
+        let rawLines = value.split(whereSeparator: { $0.isNewline }).map(String.init)
+        let nonEmpty = rawLines.filter { $0.trimmingCharacters(in: CharacterSet.whitespaces).isEmpty == false }
+        guard nonEmpty.isEmpty == false else { return value }
+
+        let leadingSpaceCounts: [Int] = nonEmpty.map { line in
+            var count = 0
+            for ch in line {
+                if ch == " " || ch == "\t" {
+                    count += 1
+                } else {
+                    break
+                }
+            }
+            return count
+        }
+
+        guard let minIndent = leadingSpaceCounts.min(), minIndent > 0 else { return value }
+
+        let trimmedLines: [String] = rawLines.map { line in
+            var remainingIndent = minIndent
+            var result = ""
+            var dropped = true
+            for ch in line {
+                if dropped, remainingIndent > 0, (ch == " " || ch == "\t") {
+                    remainingIndent -= 1
+                    continue
+                }
+                dropped = false
+                result.append(ch)
+            }
+            return result
+        }
+
+        return trimmedLines.joined(separator: "\n")
+    }
+
     private func load() async {
         let primary = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let secondary = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -245,7 +319,9 @@ struct WordDefinitionsView: View {
 
         do {
             for term in terms {
-                let rows = try await DictionarySQLiteStore.shared.lookup(term: term, limit: 100)
+                let rows = try await Task.detached(priority: .userInitiated) {
+                    try await DictionarySQLiteStore.shared.lookup(term: term, limit: 100)
+                }.value
                 for row in rows {
                     if seen.insert(row.id).inserted {
                         merged.append(row)
@@ -254,6 +330,9 @@ struct WordDefinitionsView: View {
             }
             entries = merged
             isLoading = false
+            debugSQL = await Task.detached(priority: .utility) {
+                await DictionarySQLiteStore.shared.debugLastQueryDescription()
+            }.value
         } catch {
             entries = []
             isLoading = false

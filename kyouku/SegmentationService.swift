@@ -441,6 +441,19 @@ actor SegmentationService {
     ) async {
         guard ranges.isEmpty == false else { return }
 
+        let nsSwift = swiftText as NSString
+        func snippet(_ r: NSRange) -> String {
+            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= nsSwift.length else { return "<out-of-bounds>" }
+            let s = nsSwift.substring(with: r)
+            if s.count <= 40 { return s.debugDescription }
+            let head = String(s.prefix(40))
+            return (head + "…").debugDescription
+        }
+        func charSnippet(at index: Int) -> String {
+            guard index >= 0, index < nsSwift.length else { return "<oob>" }
+            return snippet(NSRange(location: index, length: 1))
+        }
+
         // A) Coverage: ranges must be contiguous and cover the full string.
         var expectedCursor = 0
         for range in ranges {
@@ -477,6 +490,11 @@ actor SegmentationService {
             let end = NSMaxRange(r)
             guard start >= 0, end <= text.length else { continue }
 
+            // A non-lexicon run may legally border a lexicon match of the same script kind.
+            // We cannot extend across that boundary without overlapping a lexicon range.
+            let prevIsLexicon = (i > 0) ? ranges[i - 1].isLexiconMatch : false
+            let nextIsLexicon = (i + 1 < ranges.count) ? ranges[i + 1].isLexiconMatch : false
+
             let firstUnit = text.character(at: start)
             guard let firstScalar = UnicodeScalar(firstUnit) else { continue }
 
@@ -501,13 +519,25 @@ actor SegmentationService {
             if start > 0 {
                 let prevUnit = text.character(at: start - 1)
                 if let prevScalar = UnicodeScalar(prevUnit), Self.isKanji(prevUnit) == false, Self.isWhitespaceOrNewline(prevScalar) == false, Self.isPunctuation(prevScalar) == false {
-                    assert(Self.scriptKind(for: prevScalar) != kind, "Stage1 invariant failed: non-lexicon run is not maximal on the left")
+                    if prevIsLexicon == false, Self.scriptKind(for: prevScalar) == kind {
+                        await CustomLogger.shared.error(
+                            "Stage1 invariant failed: non-lexicon run is not maximal on the left " +
+                            "range=[\(start)..<\(end)] kind=\(kind) surface=\(snippet(r)) prevChar=\(charSnippet(at: start - 1))"
+                        )
+                    }
+                    assert(prevIsLexicon || Self.scriptKind(for: prevScalar) != kind, "Stage1 invariant failed: non-lexicon run is not maximal on the left")
                 }
             }
             if end < text.length {
                 let nextUnit = text.character(at: end)
                 if let nextScalar = UnicodeScalar(nextUnit), Self.isKanji(nextUnit) == false, Self.isWhitespaceOrNewline(nextScalar) == false, Self.isPunctuation(nextScalar) == false {
-                    assert(Self.scriptKind(for: nextScalar) != kind, "Stage1 invariant failed: non-lexicon run is not maximal on the right")
+                    if nextIsLexicon == false, Self.scriptKind(for: nextScalar) == kind {
+                        await CustomLogger.shared.error(
+                            "Stage1 invariant failed: non-lexicon run is not maximal on the right " +
+                            "range=[\(start)..<\(end)] kind=\(kind) surface=\(snippet(r)) nextChar=\(charSnippet(at: end))"
+                        )
+                    }
+                    assert(nextIsLexicon || Self.scriptKind(for: nextScalar) != kind, "Stage1 invariant failed: non-lexicon run is not maximal on the right")
                 }
             }
 

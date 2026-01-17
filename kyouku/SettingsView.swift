@@ -14,14 +14,17 @@ struct SettingsView: View {
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
 
+    @AppStorage("notesPreviewLineCount") private var notesPreviewLineCount: Int = 3
+
     @AppStorage(WordOfTheDayScheduler.enabledKey) private var wotdEnabled: Bool = false
     @AppStorage(WordOfTheDayScheduler.hourKey) private var wotdHour: Int = 9
     @AppStorage(WordOfTheDayScheduler.minuteKey) private var wotdMinute: Int = 0
 
-#if DEBUG
     @AppStorage("rubyDebugHUD") private var rubyDebugHUD: Bool = false
     @AppStorage("rubyDebugRects") private var rubyDebugRects: Bool = false
-#endif
+    @AppStorage("rubyDebugLineBands") private var rubyDebugLineBands: Bool = false
+    @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
+    @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
 
     @State private var wotdAuthStatus: UNAuthorizationStatus = .notDetermined
     @State private var wotdPendingCount: Int = 0
@@ -52,13 +55,15 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                NavigationLink("SQL Playground") {
+                    SQLPlaygroundView()
+                }
                 textAppearanceSection
                 tokenHighlightSection
+                notesSection
                 extractFilterSection
                 wordOfTheDaySection
-#if DEBUG
                 debugSection
-#endif
                 Section("Backup & Restore") {
                     Button("Export…") {
                         exportAll()
@@ -113,9 +118,11 @@ struct SettingsView: View {
                 fontSize: CGFloat(pendingReadingTextSize),
                 lineHeightMultiple: 1.0,
                 extraGap: CGFloat(pendingReadingLineSpacing),
+                isScrollEnabled: true,
                 enableTapInspection: false
             )
-            .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 140, alignment: .leading)
             .padding(.vertical, 8)
 
             HStack {
@@ -135,7 +142,6 @@ struct SettingsView: View {
                     if editing == false { readingTextSize = pendingReadingTextSize }
                 }
             )
-
             HStack {
                 Text("Furigana Size")
                 Spacer()
@@ -179,6 +185,16 @@ struct SettingsView: View {
         Section("Token Highlighting") {
             ColorPicker("Primary Token Color", selection: alternateTokenColorABinding, supportsOpacity: false)
             ColorPicker("Secondary Token Color", selection: alternateTokenColorBBinding, supportsOpacity: false)
+        }
+    }
+
+    private var notesSection: some View {
+        Section("Notes") {
+            Picker("Preview lines", selection: $notesPreviewLineCount) {
+                ForEach(0...4, id: \.self) { count in
+                    Text("\(count)").tag(count)
+                }
+            }
         }
     }
 
@@ -240,17 +256,15 @@ struct SettingsView: View {
         }
     }
 
-#if DEBUG
     private var debugSection: some View {
         Section("Debug") {
+            Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
             Toggle("Ruby HUD", isOn: $rubyDebugHUD)
             Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
-            Text("Use this for screenshot-based debugging of furigana layout.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Toggle("Ruby line/furigana bands", isOn: $rubyDebugLineBands)
+            Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
         }
     }
-#endif
 
     private var commonParticlesBinding: Binding<[String]> {
         Binding(

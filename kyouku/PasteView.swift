@@ -58,6 +58,9 @@ struct PasteView: View {
     @State private var measuredSheetHeight: CGFloat = 0
     @State private var pasteAreaFrame: CGRect? = nil
 
+    @State private var toastText: String? = nil
+    @State private var toastDismissWorkItem: DispatchWorkItem? = nil
+
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
     @State private var incrementalPopupHits: [IncrementalLookupHit] = []
     @State private var isIncrementalPopupVisible: Bool = false
@@ -128,6 +131,8 @@ struct PasteView: View {
     @AppStorage("extractHideDuplicateTokens") private var hideDuplicateTokens: Bool = false
     @AppStorage("extractHideCommonParticles") private var hideCommonParticles: Bool = false
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
+    @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
+    @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
 
     private var scratchNoteID: UUID {
         if let cached = UUID(uuidString: scratchNoteIDRaw) {
@@ -152,7 +157,7 @@ struct PasteView: View {
     private static let sheetExtraPadding: CGFloat = 36
     private let furiganaPipeline = FuriganaPipelineService()
     private var incrementalLookupEnabled: Bool { Self.incrementalLookupEnabledFlag }
-    private var dictionaryPopupEnabled: Bool { Self.dictionaryPopupEnabledFlag && incrementalLookupEnabled == false }
+    private var dictionaryPopupEnabled: Bool { Self.dictionaryPopupEnabledFlag && incrementalLookupEnabled == false && debugDisableDictionaryPopup == false }
     private var inlineDictionaryPanelEnabled: Bool { Self.inlineDictionaryPanelEnabledFlag && dictionaryPopupEnabled }
     private var sheetDictionaryPanelEnabled: Bool { dictionaryPopupEnabled && inlineDictionaryPanelEnabled == false }
     private var pasteAreaDictionaryEnabled: Bool { false }
@@ -194,14 +199,17 @@ struct PasteView: View {
         NavigationStack {
             applyDictionarySheet(to: coreContent)
         }
-        .coordinateSpace(name: Self.coordinateSpaceName)
         .onPreferenceChange(TokenActionPanelFramePreferenceKey.self) { newValue in
             tokenPanelFrame = newValue
         }
         .onPreferenceChange(PasteAreaFramePreferenceKey.self) { newValue in
             pasteAreaFrame = newValue
         }
-        .sheet(isPresented: $showWordDefinitionsSheet) {
+        .sheet(isPresented: $showWordDefinitionsSheet, onDismiss: {
+            // When the dictionary details sheet is dismissed, also clear the
+            // token selection in the paste area so the highlight goes away.
+            clearSelection(resetPersistent: true)
+        }) {
             NavigationStack {
                 WordDefinitionsView(
                     surface: wordDefinitionsSurface,
@@ -258,6 +266,7 @@ struct PasteView: View {
                 if editing {
                     clearSelection()
                 }
+                showToast(editing ? "Edit mode enabled" : "Edit mode disabled")
             }
 
             .onChange(of: words.words.count) {
@@ -266,22 +275,30 @@ struct PasteView: View {
             }
             .onChange(of: showFurigana) { _, enabled in
                 if enabled {
-                    triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: true)
+                    // Toggling furigana on should reuse existing segmentation when possible.
+                    // Only rebuild the attributed text layer; segmentation is recomputed
+                    // inside the pipeline if spans are missing or invalid.
+                    triggerFuriganaRefreshIfNeeded(reason: "show furigana toggled on", recomputeSpans: false)
                 } else {
                     furiganaTaskHandle?.cancel()
                 }
+            }
+            .onChange(of: wrapLines) { _, enabled in
+                showToast(enabled ? "Wrapped lines" : "Single-line layout")
             }
             .onChange(of: alternateTokenColors) { _, enabled in
                 triggerFuriganaRefreshIfNeeded(
                     reason: enabled ? "alternate token colors toggled on" : "alternate token colors toggled off",
                     recomputeSpans: false
                 )
+                showToast(enabled ? "Alternate token colors enabled" : "Alternate token colors disabled")
             }
             .onChange(of: highlightUnknownTokens) { _, enabled in
                 triggerFuriganaRefreshIfNeeded(
                     reason: enabled ? "unknown highlight toggled on" : "unknown highlight toggled off",
                     recomputeSpans: false
                 )
+                showToast(enabled ? "Highlight unknown words enabled" : "Highlight unknown words disabled")
             }
             .onChange(of: readingFuriganaSize) {
                 triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
@@ -350,12 +367,94 @@ struct PasteView: View {
                     clearSelection(resetPersistent: true)
                 }
             }
+            .overlay(alignment: .bottom) {
+                if let toastText {
+                    Text(toastText)
+                        .font(.subheadline)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.bottom, 24)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
     }
 
     private var coreStack: some View {
         ZStack(alignment: .bottom) {
             editorColumn
             inlineDictionaryOverlay
+            if debugTokenGeometryOverlay {
+                tokenGeometryDebugOverlay
+            }
+        }
+        .coordinateSpace(name: Self.coordinateSpaceName)
+    }
+
+    @ViewBuilder
+    private var tokenGeometryDebugOverlay: some View {
+        GeometryReader { proxy in
+            ZStack {
+                // Outline the coordinate-space container itself.
+                Rectangle()
+                    .stroke(Color.yellow.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [10, 6]))
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .position(x: proxy.size.width / 2.0, y: proxy.size.height / 2.0)
+
+                // Mark the coordinate-space origin.
+                Circle()
+                    .fill(Color.yellow.opacity(0.9))
+                    .frame(width: 6, height: 6)
+                    .position(x: 0, y: 0)
+
+            if let paste = pasteAreaFrame {
+                Rectangle()
+                    .fill(Color.cyan.opacity(0.06))
+                    .frame(width: paste.width, height: paste.height)
+                    .position(x: paste.midX, y: paste.midY)
+
+                Rectangle()
+                    .stroke(
+                        Color.cyan.opacity(0.95),
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [14, 10])
+                    )
+                    .frame(width: paste.width, height: paste.height)
+                    .position(x: paste.midX, y: paste.midY)
+            }
+            if let panel = tokenPanelFrame {
+                Rectangle()
+                    .stroke(Color.red.opacity(0.9), lineWidth: 2)
+                    .frame(width: panel.width, height: panel.height)
+                    .position(x: panel.midX, y: panel.midY)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                // Text("Token Geometry Debug")
+                //     .font(.caption2.bold())
+                Text(String(format: "Container (yellow dashed) x=0.0 y=0.0 w=%.1f h=%.1f", proxy.size.width, proxy.size.height))
+                    .font(.caption2)
+                if let paste = pasteAreaFrame {
+                    Text(String(format: "Paste (cyan dashed) x=%.1f y=%.1f w=%.1f h=%.1f", paste.minX, paste.minY, paste.width, paste.height))
+                        .font(.caption2)
+                } else {
+                    Text("Paste: <none>")
+                        .font(.caption2)
+                }
+                if let panel = tokenPanelFrame {
+                    Text(String(format: "Panel (red) x=%.1f y=%.1f w=%.1f h=%.1f", panel.minX, panel.minY, panel.width, panel.height))
+                        .font(.caption2)
+                } else {
+                    Text("Panel: <none>")
+                        .font(.caption2)
+                }
+            }
+            .padding(8)
+            .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(8)
+            }
+            .allowsHitTesting(false)
         }
     }
 
@@ -423,7 +522,7 @@ struct PasteView: View {
                 bottomObstructionHeight: tokenPanelOverlap,
                 onCharacterTap: { utf16Index in
                     if incrementalLookupEnabled {
-                            // Existing incremental lookup behavior
+                        // Existing incremental lookup behavior
                         let ns = inputText as NSString
                         if ns.length == 0 {
                             incrementalSelectedCharacterRange = nil
@@ -442,7 +541,7 @@ struct PasteView: View {
                         }
                         startIncrementalLookup(atUTF16Index: utf16Index)
                     } else {
-                            // Fallback: map tap position to the semantic span containing the tapped UTF-16 index
+                        // Fallback: map tap position to the semantic span containing the tapped UTF-16 index
                         let ns = inputText as NSString
                         guard ns.length > 0 else { return }
                         let clamped = min(max(0, utf16Index), max(0, ns.length - 1))
@@ -452,10 +551,20 @@ struct PasteView: View {
                             clearSelection()
                             return
                         }
+
                         if let match = furiganaSemanticSpans.enumerated().first(where: { NSLocationInRange(clamped, $0.element.range) }) {
-                            presentDictionaryForSpan(at: match.offset, focusSplitMenu: false)
+                            // In drag-selection mode with token highlighting disabled,
+                            // keep taps opening the dictionary but avoid snapping
+                            // to full token boundaries. Instead, treat the tapped
+                            // character range as an arbitrary selection.
+                            let dragSelectionMode = (incrementalLookupEnabled == false && alternateTokenColors == false)
+                            if dragSelectionMode && tokenHighlightsEnabled == false {
+                                presentDictionaryForArbitraryRange(r)
+                            } else {
+                                presentDictionaryForSpan(at: match.offset, focusSplitMenu: false)
+                            }
                         } else {
-                                // No token at this location; clear selection
+                            // No token at this location; clear selection
                             clearSelection()
                         }
                     }
@@ -489,7 +598,10 @@ struct PasteView: View {
 
             HStack(alignment: .center, spacing: 0) {
                 ControlCell {
-                    Button { hideKeyboard() } label: {
+                    Button {
+                        hideKeyboard()
+                        showToast("Keyboard hidden")
+                    } label: {
                         Image(systemName: "keyboard.chevron.compact.down").font(.title2)
                     }
                     .accessibilityLabel("Hide Keyboard")
@@ -516,8 +628,11 @@ struct PasteView: View {
                     guard isEditing == false else { return }
                     showFurigana.toggle()
                     if showFurigana {
-                        triggerFuriganaRefreshIfNeeded(reason: "manual toggle button")
+                        // Manual toggle should not force a fresh segmentation pass; reuse
+                        // existing spans and just rebuild the ruby text.
+                        triggerFuriganaRefreshIfNeeded(reason: "manual toggle button", recomputeSpans: false)
                     }
+                    showToast(showFurigana ? "Furigana enabled" : "Furigana disabled")
                 } label: {
                     ZStack {
                         Color.clear.frame(width: 28, height: 28)
@@ -561,6 +676,21 @@ struct PasteView: View {
             }
             .controlSize(.small)
         }
+    }
+
+    private func showToast(_ message: String) {
+        toastDismissWorkItem?.cancel()
+        withAnimation {
+            toastText = message
+        }
+
+        let workItem = DispatchWorkItem {
+            withAnimation {
+                toastText = nil
+            }
+        }
+        toastDismissWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
     }
 
     private var transformPasteTextButton: some View {
@@ -635,6 +765,7 @@ struct PasteView: View {
                 onSelect: { presentDictionaryForSpan(at: $0, focusSplitMenu: false) },
                 onGoTo: { goToSpanInNote(at: $0) },
                 onAdd: { bookmarkToken(at: $0) },
+                onAddAll: { addAllTokensToWordList() },
                 onMergeLeft: { mergeSpan(at: $0, direction: .previous) },
                 onMergeRight: { mergeSpan(at: $0, direction: .next) },
                 onSplit: { startSplitFlow(for: $0) },
@@ -697,7 +828,7 @@ struct PasteView: View {
         }
         ToolbarItem(placement: .topBarTrailing) {
             HStack(spacing: 12) {
-                transformPasteTextButton
+                // transformPasteTextButton
                 resetSpansButton
                 tokenListButton
             }
@@ -759,7 +890,7 @@ struct PasteView: View {
                 preferredReading: preferred,
                 canMergePrevious: canMergeSelection(.previous),
                 canMergeNext: canMergeSelection(.next),
-                onDismiss: { clearSelection(resetPersistent: false) },
+                onDismiss: { clearSelection(resetPersistent: true) },
                 onSaveWord: { entry in
                     toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
                 },
@@ -1071,6 +1202,14 @@ struct PasteView: View {
             return
         }
         let surface = trimmed.surface
+        // Guardrail: the dictionary popup is intended for single token-like selections.
+        // If the trimmed surface still contains internal whitespace/newlines, treat this
+        // as an invalid selection and do not open the popup (multi-span selections like
+        // "虹色 もっともっと" should never reach the dictionary).
+        if surface.rangeOfCharacter(from: Self.highlightWhitespace) != nil {
+            clearSelection()
+            return
+        }
         guard surface.isEmpty == false else {
             clearSelection()
             return
@@ -1114,10 +1253,16 @@ struct PasteView: View {
             return
         }
         let lemmaFallbacks = tokenSelection?.annotatedSpan.lemmaCandidates ?? []
+        let readingFallback = (tokenSelection?.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        ivlog("Tap.handleSelectionLookup term='\(term)' fallbacks=\(lemmaFallbacks.count)")
-        Task { [lemmaFallbacks] in
-            await inlineLookup.load(term: term, fallbackTerms: lemmaFallbacks)
+        var fallbacks: [String] = lemmaFallbacks
+        if readingFallback.isEmpty == false {
+            fallbacks.append(readingFallback)
+        }
+
+        ivlog("Tap.handleSelectionLookup term='\(term)' fallbacks=\(fallbacks.count)")
+        Task { [fallbacks] in
+            await inlineLookup.load(term: term, fallbackTerms: fallbacks)
         }
     }
 
@@ -1132,7 +1277,7 @@ struct PasteView: View {
             onShowDefinitions: {
                 presentWordDefinitions(for: selection)
             },
-            onDismiss: { clearSelection(resetPersistent: false) },
+            onDismiss: { clearSelection(resetPersistent: true) },
             onSaveWord: { entry in
                 toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
             },
@@ -1512,6 +1657,47 @@ struct PasteView: View {
                 let kana = reading ?? normalizedReading(entry.kana)
                 let resolvedDictionarySurface = resolvedSurface(from: entry, fallback: context.surface)
                 words.add(surface: surface, dictionarySurface: resolvedDictionarySurface, kana: kana, meaning: meaning, note: nil, sourceNoteID: noteID)
+            }
+        }
+    }
+
+    private func addAllTokensToWordList() {
+        let items = tokenListItems
+        guard items.isEmpty == false else { return }
+        let noteID = currentNote?.id
+
+        Task {
+            var batch: [WordsStore.WordToAdd] = []
+            batch.reserveCapacity(items.count)
+
+            for item in items where item.isAlreadySaved == false {
+                let surface = item.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard surface.isEmpty == false else { continue }
+
+                let reading = normalizedReading(item.reading)
+                let entry = await lookupPreferredDictionaryEntry(surface: surface, reading: reading)
+                guard let entry else { continue }
+
+                let meaning = normalizedMeaning(from: entry.gloss)
+                guard meaning.isEmpty == false else { continue }
+
+                let kana = reading ?? normalizedReading(entry.kana)
+                let dictionarySurface = resolvedSurface(from: entry, fallback: surface)
+                let payload = WordsStore.WordToAdd(
+                    surface: surface,
+                    dictionarySurface: dictionarySurface,
+                    kana: kana,
+                    meaning: meaning,
+                    note: nil
+                )
+                batch.append(payload)
+            }
+
+            guard batch.isEmpty == false else { return }
+
+            await MainActor.run {
+                words.addMany(batch, sourceNoteID: noteID)
+                showToast("Saved \(batch.count) words")
             }
         }
     }

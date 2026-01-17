@@ -20,6 +20,7 @@ struct ExtractWordsView: View {
     let onSelect: (Int) -> Void
     let onGoTo: (Int) -> Void
     let onAdd: (Int) -> Void
+    let onAddAll: () -> Void
     let onMergeLeft: (Int) -> Void
     let onMergeRight: (Int) -> Void
     let onSplit: (Int) -> Void
@@ -42,6 +43,7 @@ struct ExtractWordsView: View {
         onSelect: @escaping (Int) -> Void,
         onGoTo: @escaping (Int) -> Void,
         onAdd: @escaping (Int) -> Void,
+        onAddAll: @escaping () -> Void,
         onMergeLeft: @escaping (Int) -> Void,
         onMergeRight: @escaping (Int) -> Void,
         onSplit: @escaping (Int) -> Void,
@@ -60,6 +62,7 @@ struct ExtractWordsView: View {
         self.onSelect = onSelect
         self.onGoTo = onGoTo
         self.onAdd = onAdd
+        self.onAddAll = onAddAll
         self.onMergeLeft = onMergeLeft
         self.onMergeRight = onMergeRight
         self.onSplit = onSplit
@@ -74,6 +77,17 @@ struct ExtractWordsView: View {
         NavigationStack {
             ZStack(alignment: .bottom) {
                 VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Button {
+                            onAddAll()
+                        } label: {
+                            Label("Add All", systemImage: "star.circle.fill")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .font(.subheadline)
+                        Spacer()
+                    }
+
                     Divider()
 
                     HStack(spacing: 10) {
@@ -230,9 +244,15 @@ struct TokenListPanel: View {
                                 mergeRightEnabled: canMergeRight(item.spanIndex)
                             )
                         }
+
+                        // Add explicit bottom space so the pinned dictionary panel doesn't
+                        // cover the last rows.
+                        if bottomOverscrollHeight > 0 {
+                            Color.clear
+                                .frame(height: bottomOverscrollHeight)
+                        }
                     }
                     .padding(.vertical, 4)
-                    .padding(.bottom, max(0, bottomOverscrollHeight))
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
             }

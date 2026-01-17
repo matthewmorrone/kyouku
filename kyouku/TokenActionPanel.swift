@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Foundation
 
 struct TokenActionPanel: View {
     let selection: TokenSelectionContext
@@ -27,6 +28,9 @@ struct TokenActionPanel: View {
     @State private var isSplitMenuVisible = false
     @State private var leftBucketCount = 0
     @State private var dictionaryContentHeight: CGFloat = 0
+
+    @State private var surfaceReadingSuggestions: [String] = []
+    @State private var surfaceReadingSuggestionTask: Task<Void, Never>? = nil
 
     private let dismissTranslationThreshold: CGFloat = 80
     private let outerPanelCornerRadius: CGFloat = 34
@@ -122,10 +126,12 @@ struct TokenActionPanel: View {
             resetSplitControls()
             resetHighlightedResult()
             focusSplitMenuIfNeeded(focusSplitMenu)
+            refreshSurfaceReadingSuggestions()
         }
         .onChange(of: selection) { _, _ in
             resetSplitControls()
             resetHighlightedResult()
+            refreshSurfaceReadingSuggestions()
         }
         .onChange(of: lookup.results) { _, _ in
             resetHighlightedResult()
@@ -136,6 +142,59 @@ struct TokenActionPanel: View {
         .contentShape(Rectangle())
         .offset(y: max(0, dragOffset))
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: dragOffset)
+    }
+
+    private func refreshSurfaceReadingSuggestions() {
+        surfaceReadingSuggestionTask?.cancel()
+        surfaceReadingSuggestions = []
+
+        // Only useful when the caller supports applying custom readings.
+        guard onApplyCustomReading != nil else { return }
+
+        let surface = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard surface.isEmpty == false else { return }
+
+        surfaceReadingSuggestionTask = Task {
+            // Querying the DB can be slow; keep it off the main actor.
+            let readings: [String] = (try? await Task.detached(priority: .userInitiated) {
+                try await DictionarySQLiteStore.shared.listKanaReadings(forSurface: surface, limit: 8)
+            }.value) ?? []
+            if Task.isCancelled { return }
+
+            func foldToHiragana(_ value: String) -> String {
+                value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
+            }
+
+            let deduped: [String] = {
+                var seen: Set<String> = []
+                var out: [String] = []
+                for r in readings {
+                    let trimmed = r.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed.isEmpty == false else { continue }
+                    let key = foldToHiragana(trimmed)
+                    if seen.contains(key) { continue }
+                    seen.insert(key)
+                    out.append(trimmed)
+                }
+                return out
+            }()
+
+            await MainActor.run {
+                // Prefer the token's current reading (if any) by moving it to the front.
+                if let rawPreferred = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines), rawPreferred.isEmpty == false {
+                    let preferredKey = foldToHiragana(rawPreferred)
+                    if let idx = deduped.firstIndex(where: { foldToHiragana($0) == preferredKey }) {
+                        var reordered = deduped
+                        let value = reordered.remove(at: idx)
+                        reordered.insert(value, at: 0)
+                        surfaceReadingSuggestions = reordered
+                        return
+                    }
+                }
+
+                surfaceReadingSuggestions = deduped
+            }
+        }
     }
 
     private var actionRow: some View {
@@ -274,6 +333,7 @@ struct TokenActionPanel: View {
             lookup: lookup,
             selection: selection,
             preferredReading: preferredReading,
+            surfaceReadingSuggestions: surfaceReadingSuggestions,
             highlightedResultIndex: $highlightedResultIndex,
             onApplyReading: onApplyReading,
             onApplyCustomReading: onApplyCustomReading,
@@ -453,6 +513,7 @@ private struct LookupResultsView: View {
     @ObservedObject var lookup: DictionaryLookupViewModel
     let selection: TokenSelectionContext
     let preferredReading: String?
+    let surfaceReadingSuggestions: [String]
     @Binding var highlightedResultIndex: Int
     let onApplyReading: (DictionaryEntry) -> Void
     let onApplyCustomReading: ((String) -> Void)?
@@ -663,6 +724,12 @@ private struct LookupResultsView: View {
         let showLemmaLine = lemmaSurface.isEmpty == false && lemmaSurface != tokenSurface
         let showLemmaReading = lemmaReading.isEmpty == false && lemmaReading != lemmaSurface
 
+        let foldedSurfaceReading = surfaceReading.applyingTransform(StringTransform.hiraganaToKatakana, reverse: true) ?? surfaceReading
+        let suggestedReadings: [String] = surfaceReadingSuggestions.filter { cand in
+            let folded = cand.applyingTransform(StringTransform.hiraganaToKatakana, reverse: true) ?? cand
+            return folded.isEmpty == false && folded != foldedSurfaceReading
+        }
+
         return VStack(alignment: .leading, spacing: 6) {
             // Surface (reading in parentheses)
             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -682,6 +749,21 @@ private struct LookupResultsView: View {
                             isCustomReadingPromptPresented = true
                         }
                     }
+                }
+            }
+
+            if onApplyCustomReading != nil, suggestedReadings.isEmpty == false {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(suggestedReadings, id: \.self) { reading in
+                            Button(reading) {
+                                onApplyCustomReading?(reading)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 2)
                 }
             }
 

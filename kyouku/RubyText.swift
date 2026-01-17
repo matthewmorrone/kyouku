@@ -1,8 +1,5 @@
 import SwiftUI
 import UIKit
-#if DEBUG
-import ObjectiveC
-#endif
 
 extension Notification.Name {
     static let kyoukuSplitPaneScrollSync = Notification.Name("kyouku.splitPane.scrollSync")
@@ -157,6 +154,7 @@ struct RubyText: UIViewRepresentable {
         let priorWrapLines = uiView.wrapLines
         let priorHorizontalScrollEnabled = uiView.horizontalScrollEnabled
         let priorTextContainerInset = uiView.textContainerInset
+        let wasSelectable = uiView.isSelectable
 
         uiView.font = UIFont.systemFont(ofSize: fontSize)
         uiView.tintColor = .systemBlue
@@ -174,8 +172,13 @@ struct RubyText: UIViewRepresentable {
         }
 
         if allowSystemTextSelection == false {
-            uiView.selectedRange = NSRange(location: 0, length: 0)
-            uiView.resignFirstResponder()
+            // Avoid touching `selectedRange` on every update.
+            // Setting `selectedRange` can snap the scroll position to the top, which
+            // looks like a "jump" when other unrelated state changes trigger an update.
+            if wasSelectable {
+                uiView.selectedRange = NSRange(location: 0, length: 0)
+                uiView.resignFirstResponder()
+            }
             if #available(iOS 11.0, *) {
                 uiView.textDragInteraction?.isEnabled = false
             }
@@ -224,11 +227,11 @@ struct RubyText: UIViewRepresentable {
         renderHasher.combine(Int((fontSize * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((lineHeightMultiple * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((extraGap * 1000).rounded(.toNearestOrEven)))
-        switch annotationVisibility {
-        case .visible: renderHasher.combine(1)
-        case .hiddenKeepMetrics: renderHasher.combine(2)
-        case .removed: renderHasher.combine(3)
-        }
+        // Only treat `.removed` as a layout-affecting change; `.visible` vs
+        // `.hiddenKeepMetrics` share identical metrics, so toggling furigana
+        // visibility does not force a reapplication or resync.
+        let removeAnnotationsFlag = (annotationVisibility == .removed) ? 1 : 0
+        renderHasher.combine(removeAnnotationsFlag)
         renderHasher.combine(tokenOverlays.count)
         for o in tokenOverlays {
             renderHasher.combine(o.range.location)
@@ -643,10 +646,18 @@ struct RubyText: UIViewRepresentable {
     }
 
     private func selectionHighlightInsets(for font: UIFont) -> UIEdgeInsets {
-        // let rubyAllowance = -max(0, font.pointSize * 0.9)
+        // Nudge the highlight in from the glyph bounds so it falls cleanly on
+        // the visible headword without bleeding into adjacent spacing.
+        let pointSize = max(1, font.pointSize)
+        let horizontalInset = max(0.5, pointSize * 0.08)
+        let verticalInset = max(0.5, pointSize * 0.06)
+
+        // Preserve a tiny bit of extra space below the glyphs so highlights
+        // don't feel cramped when additional line spacing is configured.
         let spacing = max(0, extraGap)
-        let bottomInset = max(0, spacing * 0.15)
-        return UIEdgeInsets(top: 0, left: 0, bottom: bottomInset, right: 0)
+        let bottomInset = max(verticalInset, spacing * 0.15)
+
+        return UIEdgeInsets(top: verticalInset, left: horizontalInset, bottom: bottomInset, right: horizontalInset)
     }
 
     private static let coreTextRubyAttribute = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
@@ -970,9 +981,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         ProcessInfo.processInfo.environment["RUBY_TRACE"] == "1"
     }()
 
-#if DEBUG
     private static let rubyDebugHUDDefaultsKey = "rubyDebugHUD"
     private static let rubyDebugRectsDefaultsKey = "rubyDebugRects"
+    private static let rubyDebugLineBandsDefaultsKey = "rubyDebugLineBands"
 
     private var rubyDebugHUDEnabled: Bool {
         UserDefaults.standard.bool(forKey: Self.rubyDebugHUDDefaultsKey)
@@ -982,12 +993,14 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         UserDefaults.standard.bool(forKey: Self.rubyDebugRectsDefaultsKey)
     }
 
+    private var rubyDebugLineBandsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.rubyDebugLineBandsDefaultsKey)
+    }
+
     private var userDefaultsObserver: NSObjectProtocol? = nil
-#endif
 
     private var lastTextContainerIdentity: ObjectIdentifier? = nil
 
-#if DEBUG
     private let rubyDebugHUDLabel: UILabel = {
         let label = UILabel()
         label.numberOfLines = 0
@@ -1017,12 +1030,163 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         layer.isHidden = true
         return layer
     }()
-#endif
+
+    private let rubyDebugLineBandsContainerLayer: CALayer = {
+        let layer = CALayer()
+        layer.masksToBounds = false
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull(),
+            "sublayers": NSNull()
+        ]
+        layer.isHidden = true
+        return layer
+    }()
+
+    private let rubyDebugGlyphBoundsLayerEven: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemCyan.withAlphaComponent(0.95).cgColor
+        layer.lineWidth = 1.0
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        return layer
+    }()
+
+    private let rubyDebugGlyphBoundsLayerOdd: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemPink.withAlphaComponent(0.95).cgColor
+        layer.lineWidth = 1.0
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        return layer
+    }()
+
+    private let baseLineEvenLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        // Even/odd parity is the primary grouping; keep base+ruby the same hue per parity.
+        layer.fillColor = UIColor.systemCyan.withAlphaComponent(0.12).cgColor
+        layer.strokeColor = UIColor.systemCyan.withAlphaComponent(0.40).cgColor
+        layer.lineWidth = 1.0
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+
+    private let baseLineOddLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.systemPink.withAlphaComponent(0.12).cgColor
+        layer.strokeColor = UIColor.systemPink.withAlphaComponent(0.40).cgColor
+        layer.lineWidth = 1.0
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+
+    private let rubyBandEvenLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.systemCyan.withAlphaComponent(0.06).cgColor
+        layer.strokeColor = UIColor.systemCyan.withAlphaComponent(0.60).cgColor
+        layer.lineWidth = 1.0
+        layer.lineDashPattern = [4, 3]
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+
+    private let rubyBandOddLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.systemPink.withAlphaComponent(0.06).cgColor
+        layer.strokeColor = UIColor.systemPink.withAlphaComponent(0.60).cgColor
+        layer.lineWidth = 1.0
+        layer.lineDashPattern = [4, 3]
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+
+    private let rubyDebugLineBandsLabelsLayer: CALayer = {
+        let layer = CALayer()
+        layer.masksToBounds = false
+        layer.actions = [
+            "sublayers": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
 
     override var contentOffset: CGPoint {
         didSet {
-            // Highlights are content-space overlays; UIKit scrolls them automatically.
+            // Highlights/ruby overlays are content-space overlays; UIKit scrolls them automatically.
             // Do not update highlight geometry during scroll.
+
+            // Debug overlays:
+            // - HUD is a UIView inside a UIScrollView; keep it pinned to the viewport by
+            //   positioning it relative to `contentOffset`.
+            // - Line bands are viewport-derived (TextKit 2 is often viewport-lazy), so update
+            //   them on scroll, but coalesce to the next runloop.
+            if rubyDebugHUDEnabled {
+                updateRubyDebugHUD()
+            }
+            if rubyDebugLineBandsEnabled || rubyDebugRectsEnabled {
+                scheduleDebugOverlaysUpdate()
+            }
+        }
+    }
+
+    private func scheduleDebugOverlaysUpdate() {
+        guard scrollRedrawScheduled == false else { return }
+        scrollRedrawScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scrollRedrawScheduled = false
+
+            if self.rubyDebugLineBandsEnabled {
+                self.updateRubyDebugLineBands()
+            }
+            if self.rubyDebugRectsEnabled {
+                self.updateRubyDebugRects()
+                self.updateRubyDebugGlyphBounds()
+            }
         }
     }
 
@@ -1082,9 +1246,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     }
 
     private func sharedInit() {
-#if DEBUG
-        Self.installTextKit1AccessGuardsIfNeeded()
-#endif
         isEditable = false
         isSelectable = true
         isScrollEnabled = false
@@ -1128,7 +1289,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         highlightOverlayContainerLayer.addSublayer(baseHighlightLayer)
         layer.addSublayer(highlightOverlayContainerLayer)
 
-#if DEBUG
         if rubyDebugHUDEnabled {
             addSubview(rubyDebugHUDLabel)
             rubyDebugHUDLabel.isHidden = false
@@ -1138,6 +1298,17 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             rubyDebugRectsLayer.zPosition = 50
             layer.addSublayer(rubyDebugRectsLayer)
             rubyDebugRectsLayer.isHidden = false
+        }
+
+        if rubyDebugLineBandsEnabled {
+            rubyDebugLineBandsContainerLayer.contentsScale = traitCollection.displayScale
+            rubyDebugLineBandsContainerLayer.zPosition = 2
+            rubyDebugLineBandsContainerLayer.addSublayer(rubyBandEvenLayer)
+            rubyDebugLineBandsContainerLayer.addSublayer(rubyBandOddLayer)
+            rubyDebugLineBandsContainerLayer.addSublayer(baseLineEvenLayer)
+            rubyDebugLineBandsContainerLayer.addSublayer(baseLineOddLayer)
+            layer.addSublayer(rubyDebugLineBandsContainerLayer)
+            rubyDebugLineBandsContainerLayer.isHidden = false
         }
 
         // SettingsView toggles write via @AppStorage -> UserDefaults.
@@ -1153,7 +1324,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 self.layoutIfNeeded()
             }
         }
-#endif
 
         showsVerticalScrollIndicator = false
         showsHorizontalScrollIndicator = false
@@ -1166,13 +1336,11 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         needsHighlightUpdate = true
     }
 
-#if DEBUG
     deinit {
         if let userDefaultsObserver {
             NotificationCenter.default.removeObserver(userDefaultsObserver)
         }
     }
-#endif
 
     override var canBecomeFirstResponder: Bool { true }
 
@@ -1196,8 +1364,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             applyStableTextContainerConfig()
         }
 
-#if DEBUG
-        do {
+        if Self.verboseRubyLoggingEnabled {
             let b = bounds
             let tcSize = textContainer.size
             let csH = contentSize.height
@@ -1211,12 +1378,21 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 case .removed: return "removed"
                 }
             }()
-
-            if Self.verboseRubyLoggingEnabled {
-                CustomLogger.shared.debug( String( format: "PASS layoutSubviews bounds=%.2fx%.2f textContainer=%.2fx%.2f contentSizeH=%.2f scroll=%@ tracksWidth=%@ tcID=%d ruby=%@", b.width, b.height, tcSize.width, tcSize.height, csH, scroll ? "true" : "false", tracks ? "true" : "false", tcID, vis ) )
-            }
+            CustomLogger.shared.debug(
+                String(
+                    format: "PASS layoutSubviews bounds=%.2fx%.2f textContainer=%.2fx%.2f contentSizeH=%.2f scroll=%@ tracksWidth=%@ tcID=%d ruby=%@",
+                    b.width,
+                    b.height,
+                    tcSize.width,
+                    tcSize.height,
+                    csH,
+                    scroll ? "true" : "false",
+                    tracks ? "true" : "false",
+                    tcID,
+                    vis
+                )
+            )
         }
-#endif
 
         // A) Measurement correctness: do not mutate `textContainer.size.width` here.
         // If our final width differs from the measured width, ask SwiftUI to re-measure;
@@ -1251,7 +1427,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             }
         }
 
-#if DEBUG
         if rubyDebugHUDEnabled {
             if rubyDebugHUDLabel.superview == nil {
                 addSubview(rubyDebugHUDLabel)
@@ -1267,16 +1442,53 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 rubyDebugRectsLayer.zPosition = 50
                 layer.addSublayer(rubyDebugRectsLayer)
             }
+            if rubyDebugGlyphBoundsLayerEven.superlayer == nil {
+                rubyDebugGlyphBoundsLayerEven.contentsScale = traitCollection.displayScale
+                rubyDebugGlyphBoundsLayerOdd.contentsScale = traitCollection.displayScale
+                rubyDebugGlyphBoundsLayerEven.zPosition = 60
+                rubyDebugGlyphBoundsLayerOdd.zPosition = 60
+                layer.addSublayer(rubyDebugGlyphBoundsLayerEven)
+                layer.addSublayer(rubyDebugGlyphBoundsLayerOdd)
+            }
             updateRubyDebugRects()
+            updateRubyDebugGlyphBounds()
             rubyDebugRectsLayer.isHidden = false
+            rubyDebugGlyphBoundsLayerEven.isHidden = false
+            rubyDebugGlyphBoundsLayerOdd.isHidden = false
         } else {
             rubyDebugRectsLayer.path = nil
             rubyDebugRectsLayer.isHidden = true
+            rubyDebugGlyphBoundsLayerEven.path = nil
+            rubyDebugGlyphBoundsLayerOdd.path = nil
+            rubyDebugGlyphBoundsLayerEven.isHidden = true
+            rubyDebugGlyphBoundsLayerOdd.isHidden = true
         }
-#endif
+
+        if rubyDebugLineBandsEnabled {
+            if rubyDebugLineBandsContainerLayer.superlayer == nil {
+                rubyDebugLineBandsContainerLayer.contentsScale = traitCollection.displayScale
+                rubyDebugLineBandsContainerLayer.zPosition = 2
+                rubyDebugLineBandsLabelsLayer.contentsScale = traitCollection.displayScale
+                rubyDebugLineBandsContainerLayer.addSublayer(rubyBandEvenLayer)
+                rubyDebugLineBandsContainerLayer.addSublayer(rubyBandOddLayer)
+                rubyDebugLineBandsContainerLayer.addSublayer(baseLineEvenLayer)
+                rubyDebugLineBandsContainerLayer.addSublayer(baseLineOddLayer)
+                rubyDebugLineBandsContainerLayer.addSublayer(rubyDebugLineBandsLabelsLayer)
+                layer.addSublayer(rubyDebugLineBandsContainerLayer)
+            }
+            updateRubyDebugLineBands()
+            rubyDebugLineBandsContainerLayer.isHidden = false
+        } else {
+            baseLineEvenLayer.path = nil
+            baseLineOddLayer.path = nil
+            rubyBandEvenLayer.path = nil
+            rubyBandOddLayer.path = nil
+            rubyDebugLineBandsLabelsLayer.sublayers = nil
+            rubyDebugLineBandsContainerLayer.isHidden = true
+        }
+
     }
 
-#if DEBUG
     private func updateRubyDebugHUD() {
         guard rubyDebugHUDLabel.superview != nil else { return }
 
@@ -1311,31 +1523,24 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             "headroom=\(f(rubyHighlightHeadroom)) gap=\(f(rubyBaselineGap)) \(sel)"
         ].joined(separator: "\n")
 
-        // Pin to top-left in view coordinates.
+        // Pin to top-left in *viewport* coordinates.
+        // Note: UITextView is a UIScrollView; subviews live in content coordinates, so we must
+        // offset by `contentOffset` to keep the HUD visually fixed while scrolling.
         let padding: CGFloat = 8
         let maxWidth = max(120, bounds.width - (padding * 2))
         let size = rubyDebugHUDLabel.sizeThatFits(CGSize(width: maxWidth, height: 200))
         rubyDebugHUDLabel.frame = CGRect(
-            x: padding,
-            y: padding,
+            x: contentOffset.x + padding,
+            y: contentOffset.y + padding,
             width: min(maxWidth, size.width + 12),
             height: min(200, size.height + 10)
         )
     }
 
     private func updateRubyDebugRects() {
-        // Draw a few ruby layer frames (content-space) and the selection base highlight rects.
-        // This is intentionally limited to keep layout cheap.
+        // Draw selection base highlight rects.
+        // Furigana glyph bounds are drawn separately via `updateRubyDebugGlyphBounds()`.
         let path = CGMutablePath()
-
-        if let layers = rubyOverlayContainerLayer.sublayers {
-            for (idx, layer) in layers.prefix(48).enumerated() {
-                guard let textLayer = layer as? CATextLayer else { continue }
-                // Alternate stroke intensity by index by drawing slightly inset rects.
-                let inset: CGFloat = (idx % 2 == 0) ? 0 : 0.5
-                path.addRect(textLayer.frame.insetBy(dx: inset, dy: inset))
-            }
-        }
 
         if let range = selectionHighlightRange, range.location != NSNotFound, range.length > 0 {
             let rects = baseHighlightRectsInContentCoordinates(in: range)
@@ -1347,7 +1552,152 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         rubyDebugRectsLayer.frame = CGRect(origin: .zero, size: contentSize)
         rubyDebugRectsLayer.path = path.isEmpty ? nil : path
     }
-#endif
+
+    private func updateRubyDebugLineBands() {
+        // Draw alternating content-space bands for base text lines and the ruby headroom above them.
+        // TextKit 2 layout is frequently viewport-lazy; compute VISIBLE lines in view coords and
+        // translate to content coords so the bands keep up with scrolling.
+        let offset = contentOffset
+        let linesInView = textKit2LineTypographicRectsInViewCoordinates(visibleOnly: true)
+        let lines = linesInView.map { $0.offsetBy(dx: offset.x, dy: offset.y) }
+
+        rubyDebugLineBandsContainerLayer.frame = CGRect(origin: .zero, size: contentSize)
+        baseLineEvenLayer.frame = rubyDebugLineBandsContainerLayer.bounds
+        baseLineOddLayer.frame = rubyDebugLineBandsContainerLayer.bounds
+        rubyBandEvenLayer.frame = rubyDebugLineBandsContainerLayer.bounds
+        rubyBandOddLayer.frame = rubyDebugLineBandsContainerLayer.bounds
+        rubyDebugLineBandsLabelsLayer.frame = rubyDebugLineBandsContainerLayer.bounds
+
+        guard lines.isEmpty == false else {
+            baseLineEvenLayer.path = nil
+            baseLineOddLayer.path = nil
+            rubyBandEvenLayer.path = nil
+            rubyBandOddLayer.path = nil
+            rubyDebugLineBandsLabelsLayer.sublayers = nil
+            return
+        }
+
+        let baseEven = CGMutablePath()
+        let baseOdd = CGMutablePath()
+        let rubyEven = CGMutablePath()
+        let rubyOdd = CGMutablePath()
+        let headroom = max(0, rubyHighlightHeadroom)
+
+        // Replace labels each update (visible lines only, so this is cheap).
+        rubyDebugLineBandsLabelsLayer.sublayers = nil
+        var labelLayers: [CALayer] = []
+        labelLayers.reserveCapacity(min(lines.count, 64))
+
+        for (idx, line) in lines.enumerated() {
+            let isEven = (idx % 2 == 0)
+
+            let baseRect = line.insetBy(dx: -1, dy: -0.5)
+            if isEven {
+                baseEven.addRect(baseRect)
+            } else {
+                baseOdd.addRect(baseRect)
+            }
+
+            if headroom > 0 {
+                let rubyRect = CGRect(
+                    x: line.minX,
+                    y: line.minY - headroom,
+                    width: line.width,
+                    height: headroom
+                ).insetBy(dx: -1, dy: -0.5)
+                if isEven {
+                    rubyEven.addRect(rubyRect)
+                } else {
+                    rubyOdd.addRect(rubyRect)
+                }
+            }
+
+            // Label each band with a small line index to make correspondence obvious.
+            let label = CATextLayer()
+            label.contentsScale = traitCollection.displayScale
+            label.string = "L\(idx)"
+            label.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .semibold)
+            label.fontSize = 9
+            label.alignmentMode = .left
+            label.foregroundColor = UIColor.white.withAlphaComponent(0.92).cgColor
+            label.backgroundColor = UIColor.black.withAlphaComponent(0.55).cgColor
+            label.cornerRadius = 4
+            label.masksToBounds = true
+            let labelX = max(2, line.minX + 2)
+            // Place label at the top of the BASE band.
+            let labelY = max(2, line.minY + 2)
+            label.frame = CGRect(x: labelX, y: labelY, width: 26, height: 14)
+            label.actions = [
+                "position": NSNull(),
+                "bounds": NSNull(),
+                "contents": NSNull(),
+                "opacity": NSNull(),
+                "hidden": NSNull()
+            ]
+            labelLayers.append(label)
+        }
+
+        baseLineEvenLayer.path = baseEven.isEmpty ? nil : baseEven
+        baseLineOddLayer.path = baseOdd.isEmpty ? nil : baseOdd
+        rubyBandEvenLayer.path = rubyEven.isEmpty ? nil : rubyEven
+        rubyBandOddLayer.path = rubyOdd.isEmpty ? nil : rubyOdd
+        rubyDebugLineBandsLabelsLayer.sublayers = labelLayers
+    }
+
+    private func updateRubyDebugGlyphBounds() {
+        rubyDebugGlyphBoundsLayerEven.frame = CGRect(origin: .zero, size: contentSize)
+        rubyDebugGlyphBoundsLayerOdd.frame = CGRect(origin: .zero, size: contentSize)
+
+        guard let rubyLayers = rubyOverlayContainerLayer.sublayers, rubyLayers.isEmpty == false else {
+            rubyDebugGlyphBoundsLayerEven.path = nil
+            rubyDebugGlyphBoundsLayerOdd.path = nil
+            return
+        }
+
+        // Use visible line rects as the index source so parity matches the on-screen labels.
+        let offset = contentOffset
+        let linesInView = textKit2LineTypographicRectsInViewCoordinates(visibleOnly: true)
+        let lines = linesInView.map { $0.offsetBy(dx: offset.x, dy: offset.y) }
+
+        let even = CGMutablePath()
+        let odd = CGMutablePath()
+
+        func bestLineIndex(for rubyRect: CGRect) -> Int? {
+            guard lines.isEmpty == false else { return nil }
+            // Approximate where the base line is relative to the ruby layer.
+            let expectedBaseY = rubyRect.maxY + max(1, rubyBaselineGap)
+            var bestIdx: Int? = nil
+            var bestScore: CGFloat = .greatestFiniteMagnitude
+
+            for (idx, line) in lines.enumerated() {
+                // Prefer lines that overlap horizontally; fallback to vertical proximity.
+                let xOverlap = max(0, min(rubyRect.maxX, line.maxX) - max(rubyRect.minX, line.minX))
+                let xPenalty: CGFloat = (xOverlap > 0) ? 0 : 50
+                let dy = abs(line.minY - expectedBaseY)
+                let score = dy + xPenalty
+                if score < bestScore {
+                    bestScore = score
+                    bestIdx = idx
+                }
+            }
+            return bestIdx
+        }
+
+        for layer in rubyLayers {
+            guard let ruby = layer as? CATextLayer else { continue }
+            let rect = ruby.frame
+            guard rect.isNull == false, rect.isEmpty == false else { continue }
+            let idx = bestLineIndex(for: rect) ?? 0
+            if idx % 2 == 0 {
+                even.addRect(rect.insetBy(dx: -0.5, dy: -0.5))
+            } else {
+                odd.addRect(rect.insetBy(dx: -0.5, dy: -0.5))
+            }
+        }
+
+        rubyDebugGlyphBoundsLayerEven.path = even.isEmpty ? nil : even
+        rubyDebugGlyphBoundsLayerOdd.path = odd.isEmpty ? nil : odd
+    }
 
     override func draw(_ rect: CGRect) {
         super.draw(rect)
@@ -1513,7 +1863,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                     rects.append(contentRect)
                 }
             }
-            return false
+            return true
         }
         return rects
     }
@@ -1621,7 +1971,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             return []
         }
 
-        tlm.ensureLayout(for: tlm.documentRange)
+        // Ensure layout only for this range; full-document layout can settle fragments and
+        // make ruby appear to move on highlight-only updates.
+        tlm.ensureLayout(for: textRange)
 
         let inset = textContainerInset
         let offset = contentOffset
@@ -1630,15 +1982,86 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         rects.reserveCapacity(8)
 
         // Enumerate standard (glyph) segments for this range.
-        tlm.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, r, _, _ in
-            let viewRect = CGRect(
+        // IMPORTANT: The segment rect `r` can be fragment-local on some OS/TextKit combinations.
+        // Choose between fragment-local vs already-global rects by comparing overlap with
+        // the owning fragment's typographic line rects (local, stable).
+        tlm.enumerateTextSegments(in: textRange, type: .standard, options: []) { segment, r, _, _ in
+            // TextKit 2 can provide an `NSTextRange?` for this segment; use its location to
+            // find the owning layout fragment so we can normalize rect coordinates.
+            let frag: NSTextLayoutFragment? = {
+                guard let loc = segment?.location else { return nil }
+                return tlm.textLayoutFragment(for: loc)
+            }()
+            let fragOrigin = frag?.layoutFragmentFrame.origin ?? .zero
+
+            let candidateWithFrag = CGRect(
+                x: r.origin.x + fragOrigin.x + inset.left - offset.x,
+                y: r.origin.y + fragOrigin.y + inset.top - offset.y,
+                width: r.size.width,
+                height: r.size.height
+            )
+            let candidateNoFrag = CGRect(
                 x: r.origin.x + inset.left - offset.x,
                 y: r.origin.y + inset.top - offset.y,
                 width: r.size.width,
                 height: r.size.height
             )
-            if viewRect.isNull == false, viewRect.isEmpty == false {
-                rects.append(viewRect)
+
+            func bestLineRectInView(for rect: CGRect) -> CGRect? {
+                guard let frag else { return nil }
+                var best: CGRect? = nil
+                var bestScore: CGFloat = 0
+                for line in frag.textLineFragments {
+                    let lb = line.typographicBounds
+                    let lineRect = CGRect(
+                        x: lb.origin.x + fragOrigin.x + inset.left - offset.x,
+                        y: lb.origin.y + fragOrigin.y + inset.top - offset.y,
+                        width: lb.size.width,
+                        height: lb.size.height
+                    )
+                    let inter = rect.intersection(lineRect)
+                    guard inter.isNull == false, inter.isEmpty == false else { continue }
+                    let score = inter.width * inter.height
+                    if score > bestScore {
+                        bestScore = score
+                        best = lineRect
+                    }
+                }
+                return best
+            }
+
+            func clampToBestLine(_ rect: CGRect) -> CGRect {
+                guard let bestLine = bestLineRectInView(for: rect) else { return rect }
+                var out = rect
+                out.origin.y = bestLine.minY
+                out.size.height = bestLine.height
+                return out
+            }
+
+            let picked: CGRect = {
+                // If we can't find a fragment, fall back to the "withFrag" candidate.
+                guard frag != nil else { return candidateWithFrag }
+
+                // Prefer the candidate that actually overlaps a line in this fragment.
+                let aLine = bestLineRectInView(for: candidateWithFrag)
+                let bLine = bestLineRectInView(for: candidateNoFrag)
+                let aScore: CGFloat = {
+                    guard let aLine else { return 0 }
+                    let inter = candidateWithFrag.intersection(aLine)
+                    return (inter.isNull || inter.isEmpty) ? 0 : (inter.width * inter.height)
+                }()
+                let bScore: CGFloat = {
+                    guard let bLine else { return 0 }
+                    let inter = candidateNoFrag.intersection(bLine)
+                    return (inter.isNull || inter.isEmpty) ? 0 : (inter.width * inter.height)
+                }()
+
+                let chosen = (bScore > aScore) ? candidateNoFrag : candidateWithFrag
+                return clampToBestLine(chosen)
+            }()
+
+            if picked.isNull == false, picked.isEmpty == false {
+                rects.append(picked)
             }
             return true
         }
@@ -1665,7 +2088,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             return []
         }
 
-        tlm.ensureLayout(for: tlm.documentRange)
+        // Ensure layout only for this range; full-document layout can settle fragments and
+        // make ruby appear to move on highlight-only updates.
+        tlm.ensureLayout(for: textRange)
 
         let inset = textContainerInset
 
@@ -1673,15 +2098,82 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         rects.reserveCapacity(8)
 
         // Enumerate standard (glyph) segments for this range.
-        tlm.enumerateTextSegments(in: textRange, type: .standard, options: []) { _, r, _, _ in
-            let contentRect = CGRect(
+        // IMPORTANT: The segment rect `r` can be fragment-local on some OS/TextKit combinations.
+        // Choose between fragment-local vs already-global rects by comparing overlap with
+        // typographic line rects.
+        tlm.enumerateTextSegments(in: textRange, type: .standard, options: []) { segment, r, _, _ in
+            let frag: NSTextLayoutFragment? = {
+                guard let loc = segment?.location else { return nil }
+                return tlm.textLayoutFragment(for: loc)
+            }()
+            let fragOrigin = frag?.layoutFragmentFrame.origin ?? .zero
+
+            let candidateWithFrag = CGRect(
+                x: r.origin.x + fragOrigin.x + inset.left,
+                y: r.origin.y + fragOrigin.y + inset.top,
+                width: r.size.width,
+                height: r.size.height
+            )
+            let candidateNoFrag = CGRect(
                 x: r.origin.x + inset.left,
                 y: r.origin.y + inset.top,
                 width: r.size.width,
                 height: r.size.height
             )
-            if contentRect.isNull == false, contentRect.isEmpty == false {
-                rects.append(contentRect)
+
+            func bestLineRectInContent(for rect: CGRect) -> CGRect? {
+                guard let frag else { return nil }
+                var best: CGRect? = nil
+                var bestScore: CGFloat = 0
+                for line in frag.textLineFragments {
+                    let lb = line.typographicBounds
+                    let lineRect = CGRect(
+                        x: lb.origin.x + fragOrigin.x + inset.left,
+                        y: lb.origin.y + fragOrigin.y + inset.top,
+                        width: lb.size.width,
+                        height: lb.size.height
+                    )
+                    let inter = rect.intersection(lineRect)
+                    guard inter.isNull == false, inter.isEmpty == false else { continue }
+                    let score = inter.width * inter.height
+                    if score > bestScore {
+                        bestScore = score
+                        best = lineRect
+                    }
+                }
+                return best
+            }
+
+            func clampToBestLine(_ rect: CGRect) -> CGRect {
+                guard let bestLine = bestLineRectInContent(for: rect) else { return rect }
+                var out = rect
+                out.origin.y = bestLine.minY
+                out.size.height = bestLine.height
+                return out
+            }
+
+            let picked: CGRect = {
+                guard frag != nil else { return candidateWithFrag }
+
+                let aLine = bestLineRectInContent(for: candidateWithFrag)
+                let bLine = bestLineRectInContent(for: candidateNoFrag)
+                let aScore: CGFloat = {
+                    guard let aLine else { return 0 }
+                    let inter = candidateWithFrag.intersection(aLine)
+                    return (inter.isNull || inter.isEmpty) ? 0 : (inter.width * inter.height)
+                }()
+                let bScore: CGFloat = {
+                    guard let bLine else { return 0 }
+                    let inter = candidateNoFrag.intersection(bLine)
+                    return (inter.isNull || inter.isEmpty) ? 0 : (inter.width * inter.height)
+                }()
+
+                let chosen = (bScore > aScore) ? candidateNoFrag : candidateWithFrag
+                return clampToBestLine(chosen)
+            }()
+
+            if picked.isNull == false, picked.isEmpty == false {
+                rects.append(picked)
             }
             return true
         }
@@ -1890,10 +2382,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // IMPORTANT: Do not rely solely on `selectionRects(for:)` here; it can be stale
         // during the first layout pass (notably when SwiftUI/UITextView scroll state is settling),
         // which produces a vertically offset highlight until the user scrolls.
-        layoutIfNeeded()
-        if let tlm = textLayoutManager {
-            tlm.ensureLayout(for: tlm.documentRange)
-        }
+        // IMPORTANT: Highlighting must not perturb ruby positioning.
+        // Avoid forcing a full-document TextKit 2 layout here; geometry helpers ensure layout
+        // only for the relevant selection range.
 
         // Content-space highlight geometry so UIKit scrolls it automatically.
         let rects = baseHighlightRectsInContentCoordinates(in: range)
@@ -1967,19 +2458,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         guard #available(iOS 15.0, *) else { return [] }
 
         // Segment rects are in TextKit 2 coordinates; convert to content coordinates.
-        let segments = textKit2SegmentRectsInContentCoordinates(for: characterRange)
-        guard segments.isEmpty == false else { return [] }
-
-        let lineRects = textKit2LineTypographicRectsInContentCoordinates()
-        guard lineRects.isEmpty == false else { return segments }
-
-        return segments.map { seg in
-            guard let bestLine = bestMatchingLineRect(for: seg, candidates: lineRects) else { return seg }
-            var r = seg
-            r.origin.y = bestLine.minY
-            r.size.height = bestLine.height
-            return r
-        }
+        // NOTE: Segment rects are locally clamped to their owning fragment's typographic line.
+        return textKit2SegmentRectsInContentCoordinates(for: characterRange)
     }
 
     private func rubyHighlightRectsInContentCoordinates(in selectionRange: NSRange) -> [CGRect] {
@@ -2126,7 +2606,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                     rects.append(viewRect)
                 }
             }
-            return false
+            return true
         }
         return rects
     }
@@ -2213,16 +2693,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
         let point = recognizer.location(in: self)
 
-        func composedRange(atUTF16Index index: Int) -> NSRange? {
-            guard length > 0 else { return nil }
-            let clamped = max(0, min(index, length - 1))
-            return backing.rangeOfComposedCharacterSequence(at: clamped)
-        }
-
         func utf16Index(at point: CGPoint) -> Int? {
             guard let pos = closestPosition(to: point) else { return nil }
             let offset = self.offset(from: beginningOfDocument, to: pos)
             return max(0, min(offset, length))
+        }
+
+        func composedRange(atUTF16Index index: Int) -> NSRange? {
+            guard length > 0 else { return nil }
+            let clamped = max(0, min(index, length - 1))
+            return backing.rangeOfComposedCharacterSequence(at: clamped)
         }
 
         switch recognizer.state {
@@ -2251,8 +2731,38 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 return backing.rangeOfComposedCharacterSequence(at: max(0, current))
             }()
 
-            let start = min(anchorChar.location, currentChar.location)
-            let end = max(NSMaxRange(anchorChar), NSMaxRange(currentChar))
+            var start = min(anchorChar.location, currentChar.location)
+            var end = max(NSMaxRange(anchorChar), NSMaxRange(currentChar))
+
+            // Clamp drag-selection so it never crosses line breaks; words
+            // are constrained to a single line.
+            let lineBreaks = CharacterSet.newlines
+            let anchorLineStart: Int = {
+                var idx = anchorChar.location
+                while idx > 0 {
+                    let scalar = backing.character(at: idx - 1)
+                    if let u = UnicodeScalar(scalar), lineBreaks.contains(u) {
+                        break
+                    }
+                    idx -= 1
+                }
+                return idx
+            }()
+            let anchorLineEnd: Int = {
+                var idx = NSMaxRange(anchorChar)
+                while idx < length {
+                    let scalar = backing.character(at: idx)
+                    if let u = UnicodeScalar(scalar), lineBreaks.contains(u) {
+                        break
+                    }
+                    idx += 1
+                }
+                return idx
+            }()
+
+            start = max(start, anchorLineStart)
+            end = min(end, anchorLineEnd)
+
             let selected = NSRange(location: start, length: max(0, end - start))
             applyInspectionHighlight(range: selected.length > 0 ? selected : nil)
 
@@ -2398,8 +2908,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             return offset
         }
 
-        guard pointHitsRenderedText(point, attributedLength: attributedLength) else { return nil }
-        guard let textRange = textRangeNearPoint(point),
+          // IMPORTANT: do not require the tap to be inside a base-glyph selection rect.
+          // Users often tap on furigana (above the headword). Base selection rects don't cover
+          // that headroom, and they can also be temporarily stale during layout settles.
+          // Instead, accept taps within the visible line "band" expanded upward by ruby headroom.
+          guard pointHitsVisibleLineBand(point) else { return nil }
+          guard let textRange = textRangeNearPoint(point),
               let closestPosition = textRange.start as UITextPosition? else { return nil }
 
         // `closestPosition(to:)` can snap to the previous line when tapping on an empty/blank line.
@@ -2499,6 +3013,30 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         return rects.contains(where: { $0.contains(point) })
     }
 
+    private func pointHitsVisibleLineBand(_ point: CGPoint) -> Bool {
+        // Use TextKit 2 typographic line rects (view coordinates) and expand upward
+        // by the ruby headroom so taps on furigana still resolve to the correct token.
+        let lines = textKit2LineTypographicRectsInViewCoordinates(visibleOnly: true)
+        guard lines.isEmpty == false else { return false }
+
+        let headroom = max(0, rubyHighlightHeadroom)
+        let extraX: CGFloat = 8
+        let extraY: CGFloat = 10
+
+        for line in lines {
+            let band = CGRect(
+                x: line.minX - extraX,
+                y: line.minY - headroom - extraY,
+                width: line.width + (extraX * 2),
+                height: line.height + headroom + (extraY * 2)
+            )
+            if band.contains(point) {
+                return true
+            }
+        }
+        return false
+    }
+
     private func spanSelectionContext(forUTF16Index index: Int) -> RubySpanSelection? {
         guard let (tokenIndex, span) = semanticSpans.spanContext(containingUTF16Index: index) else { return nil }
         let spanRange = span.range
@@ -2541,86 +3079,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         CustomLogger.shared.debug("Inspect tap span surface=\(spanSurfaceDescription) range=\(rangeDescription)")
     }
 
-#if DEBUG
-    private static var textKit1GuardsInstalled = false
-
-    private static func installTextKit1AccessGuardsIfNeeded() {
-        guard textKit1GuardsInstalled == false else { return }
-        textKit1GuardsInstalled = true
-        installTextViewGuard(
-            original: #selector(getter: UITextView.layoutManager),
-            swizzled: #selector(TokenOverlayTextView.tk1_guarded_layoutManager),
-            name: "layoutManager"
-        )
-        installTextViewGuard(
-            original: #selector(getter: UITextView.textStorage),
-            swizzled: #selector(TokenOverlayTextView.tk1_guarded_textStorage),
-            name: "textStorage"
-        )
-        installGlyphRangeGuard()
-    }
-
-    private static func installTextViewGuard(original: Selector, swizzled: Selector, name: String) {
-        guard let method = class_getInstanceMethod(TokenOverlayTextView.self, original),
-              let swizzledMethod = class_getInstanceMethod(TokenOverlayTextView.self, swizzled) else {
-            CustomLogger.shared.error("Unable to install TextKit 1 guard for \(name)")
-            return
-        }
-        method_exchangeImplementations(method, swizzledMethod)
-    }
-
-    private static func installGlyphRangeGuard() {
-        guard let original = class_getInstanceMethod(NSLayoutManager.self, #selector(NSLayoutManager.glyphRange(for:))),
-              let swizzled = class_getInstanceMethod(NSLayoutManager.self, #selector(NSLayoutManager.tk1_guardedGlyphRange(for:))) else {
-            CustomLogger.shared.error("Unable to install TextKit 1 guard for glyphRange(for:)")
-            return
-        }
-        method_exchangeImplementations(original, swizzled)
-    }
-
-    static func debugReportTextKit1Access(_ symbol: String) {
-        let message = "⚠️ TextKit 1 API accessed: \(symbol). Use TextKit 2 layout primitives instead."
-        CustomLogger.shared.warn(message)
-        if ProcessInfo.processInfo.environment["KYOUKU_STRICT_TEXTKIT2"] == "1" {
-            assertionFailure(message)
-        }
-    }
-
-    @objc private func tk1_guarded_layoutManager() -> NSLayoutManager {
-        Self.debugReportTextKit1Access("layoutManager")
-        // After swizzling, the *original* implementation is reachable via this selector.
-        let sel = #selector(TokenOverlayTextView.tk1_guarded_layoutManager)
-        typealias Fn = @convention(c) (AnyObject, Selector) -> NSLayoutManager
-        let imp = self.method(for: sel)
-        let fn = unsafeBitCast(imp, to: Fn.self)
-        return fn(self, sel)
-    }
-
-    @objc private func tk1_guarded_textStorage() -> NSTextStorage {
-        Self.debugReportTextKit1Access("textStorage")
-        // After swizzling, the *original* implementation is reachable via this selector.
-        let sel = #selector(TokenOverlayTextView.tk1_guarded_textStorage)
-        typealias Fn = @convention(c) (AnyObject, Selector) -> NSTextStorage
-        let imp = self.method(for: sel)
-        let fn = unsafeBitCast(imp, to: Fn.self)
-        return fn(self, sel)
-    }
-#endif
 }
-
-#if DEBUG
-extension NSLayoutManager {
-    @objc fileprivate func tk1_guardedGlyphRange(for textContainer: NSTextContainer) -> NSRange {
-        TokenOverlayTextView.debugReportTextKit1Access("glyphRange(for:)")
-        // After swizzling, the *original* implementation is reachable via this selector.
-        let sel = #selector(NSLayoutManager.tk1_guardedGlyphRange(for:))
-        typealias Fn = @convention(c) (AnyObject, Selector, NSTextContainer) -> NSRange
-        let imp = self.method(for: sel)
-        let fn = unsafeBitCast(imp, to: Fn.self)
-        return fn(self, sel, textContainer)
-    }
-}
-#endif
 
 extension AnnotatedSpan {
     var range: NSRange { span.range }
