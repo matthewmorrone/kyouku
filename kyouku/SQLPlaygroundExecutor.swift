@@ -35,14 +35,133 @@ actor SQLPlaygroundExecutor {
         }
     }
 
+    /// Split SQL into statements, ignoring semicolons that occur inside
+    /// string literals or comments. This is still a lightweight helper and
+    /// not a full SQL parser, but it handles the common cases needed for
+    /// the playground (e.g. `SELECT 'foo;bar';`).
+    private func splitSQLStatements(_ sql: String) -> [String] {
+        var results: [String] = []
+        var current = ""
+
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        var inLineComment = false   // --
+        var inBlockComment = false  // /* ... */
+
+        let chars = Array(sql)
+        var i = 0
+
+        while i < chars.count {
+            let ch = chars[i]
+
+            if inLineComment {
+                current.append(ch)
+                if ch == "\n" {
+                    inLineComment = false
+                }
+                i += 1
+                continue
+            }
+
+            if inBlockComment {
+                current.append(ch)
+                if ch == "*" && i + 1 < chars.count && chars[i + 1] == "/" {
+                    current.append(chars[i + 1])
+                    inBlockComment = false
+                    i += 2
+                    continue
+                }
+                i += 1
+                continue
+            }
+
+            if inSingleQuote {
+                current.append(ch)
+                if ch == "'" {
+                    // Handle escaped single quote: ''
+                    if i + 1 < chars.count && chars[i + 1] == "'" {
+                        current.append(chars[i + 1])
+                        i += 2
+                        continue
+                    }
+                    inSingleQuote = false
+                }
+                i += 1
+                continue
+            }
+
+            if inDoubleQuote {
+                current.append(ch)
+                if ch == "\"" {
+                    inDoubleQuote = false
+                }
+                i += 1
+                continue
+            }
+
+            // Not currently in string or comment: check for comment starts.
+            if ch == "-" && i + 1 < chars.count && chars[i + 1] == "-" {
+                current.append(ch)
+                current.append(chars[i + 1])
+                inLineComment = true
+                i += 2
+                continue
+            }
+
+            if ch == "/" && i + 1 < chars.count && chars[i + 1] == "*" {
+                current.append(ch)
+                current.append(chars[i + 1])
+                inBlockComment = true
+                i += 2
+                continue
+            }
+
+            // Start of string literals.
+            if ch == "'" {
+                inSingleQuote = true
+                current.append(ch)
+                i += 1
+                continue
+            }
+
+            if ch == "\"" {
+                inDoubleQuote = true
+                current.append(ch)
+                i += 1
+                continue
+            }
+
+            // Semicolon terminates a statement only when not in string/comment.
+            if ch == ";" {
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty == false {
+                    results.append(trimmed)
+                }
+                current.removeAll(keepingCapacity: true)
+                i += 1
+                continue
+            }
+
+            current.append(ch)
+            i += 1
+        }
+
+        let final = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if final.isEmpty == false {
+            results.append(final)
+        }
+
+        return results
+    }
+
     func execute(_ input: String) throws -> String {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else { return "(empty input)" }
 
-        // Support multiple statements separated by semicolons. This is
-        // intentionally simple and does not attempt to handle semicolons
-        // inside string literals; it's meant for quick diagnostics.
-        let rawStatements = trimmed.split(separator: ";")
+        // Support multiple statements separated by semicolons. This uses a
+        // lightweight splitter that ignores semicolons inside string literals
+        // and comments; it is still not a full SQL parser.
+        let rawStatements = splitSQLStatements(trimmed)
         var outputs: [String] = []
 
         for (index, raw) in rawStatements.enumerated() {
