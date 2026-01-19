@@ -276,6 +276,7 @@ final class LexiconTrie {
     }
 }
 private final class TrieInstrumentation {
+    private static let loggingEnabled = ProcessInfo.processInfo.environment["TRIE_TRACE"] == "1"
     private var isActive = false
     private var cursorCount = 0
     private var traversalCount = 0
@@ -297,7 +298,9 @@ private final class TrieInstrumentation {
     func end(totalDuration: CFTimeInterval) {
         guard isActive else { return }
         isActive = false
-        CustomLogger.shared.info("Trie spans: cursors=\(self.cursorCount) traversals=\(self.traversalCount) steps=\(self.stepCount) childrenLookups=\(self.lookupCount) charAtCalls=\(self.charAccessCount) trieTime=\(self.trieTime * 1000)ms totalTime=\(totalDuration * 1000)ms")
+        if Self.loggingEnabled {
+            CustomLogger.shared.info("Trie spans: cursors=\(self.cursorCount) traversals=\(self.traversalCount) steps=\(self.stepCount) childrenLookups=\(self.lookupCount) charAtCalls=\(self.charAccessCount) trieTime=\(self.trieTime * 1000)ms totalTime=\(totalDuration * 1000)ms")
+        }
     }
 
     func recordCursor() {

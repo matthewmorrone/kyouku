@@ -49,7 +49,6 @@ final class TokenBoundariesStore: ObservableObject {
 		guard inserted else { return }
 		hardCutsByNote[noteID] = existing.sorted()
 		save()
-		CustomLogger.shared.debug("Saved hard cut note=\(noteID) at=\(utf16Index)")
 	}
 
 	func removeHardCut(noteID: UUID, utf16Index: Int) {
@@ -59,7 +58,6 @@ final class TokenBoundariesStore: ObservableObject {
 		guard cuts.count != before else { return }
 		hardCutsByNote[noteID] = cuts.isEmpty ? nil : cuts
 		save()
-		CustomLogger.shared.debug("Removed hard cut note=\(noteID) at=\(utf16Index)")
 	}
 
 	func storedRanges(for noteID: UUID) -> [NSRange] {
@@ -129,7 +127,6 @@ final class TokenBoundariesStore: ObservableObject {
 			spansByNote[noteID] = cleaned
 		}
 		save()
-		CustomLogger.shared.debug("Saved amended spans note=\(noteID) count=\(cleaned.count)")
 	}
 
 	func removeAll(for noteID: UUID) {
@@ -137,7 +134,6 @@ final class TokenBoundariesStore: ObservableObject {
 		let removedCuts = hardCutsByNote.removeValue(forKey: noteID) != nil
 		guard removedSpans || removedCuts else { return }
 		save()
-		CustomLogger.shared.debug("Removed amended spans note=\(noteID)")
 	}
 
 	// MARK: - Persistence
@@ -157,20 +153,17 @@ final class TokenBoundariesStore: ObservableObject {
 			if let decoded = try? JSONDecoder().decode(PersistedPayload.self, from: data) {
 				spansByNote = decoded.spansByNote
 				hardCutsByNote = decoded.hardCutsByNote
-				CustomLogger.shared.debug("Loaded token spans notes=\(self.spansByNote.count) hardCutsNotes=\(self.hardCutsByNote.count)")
 				return
 			}
 			if let decoded = try? JSONDecoder().decode([UUID: [StoredSpan]].self, from: data) {
 				spansByNote = decoded
 				hardCutsByNote = [:]
-				CustomLogger.shared.debug("Loaded legacy token spans notes=\(self.spansByNote.count)")
 				return
 			}
 			// Backward-compat: older boundary index format existed briefly; ignore it.
 			_ = try? JSONDecoder().decode([UUID: [Int]].self, from: data)
 			spansByNote = [:]
 			hardCutsByNote = [:]
-			CustomLogger.shared.debug("Loaded legacy token boundaries format; ignored")
 		} catch {
 			CustomLogger.shared.error("Failed to load token boundaries: \(error)")
 			spansByNote = [:]
@@ -184,7 +177,6 @@ final class TokenBoundariesStore: ObservableObject {
 			let payload = PersistedPayload(spansByNote: spansByNote, hardCutsByNote: hardCutsByNote)
 			let data = try JSONEncoder().encode(payload)
 			try data.write(to: url, options: .atomic)
-			CustomLogger.shared.debug("Saved token spans notes=\(self.spansByNote.count)")
 		} catch {
 			CustomLogger.shared.error("Failed to save token boundaries: \(error)")
 		}

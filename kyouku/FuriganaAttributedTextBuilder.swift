@@ -9,14 +9,13 @@ enum FuriganaAttributedTextBuilder {
         furiganaSize: Double,
         context: String = "general",
         tokenBoundaries: [Int] = [],
-        readingOverrides: [ReadingOverride] = []
+        readingOverrides: [ReadingOverride] = [],
+        padHeadwordSpacing: Bool = false
     ) async throws -> NSAttributedString {
         guard text.isEmpty == false else {
-            CustomLogger.shared.info("[\(context)] Skipping build because the input text is empty.")
             return NSAttributedString(string: text)
         }
 
-        let buildStart = CFAbsoluteTimeGetCurrent()
         let stage2 = try await computeStage2(
             text: text,
             context: context,
@@ -29,10 +28,9 @@ enum FuriganaAttributedTextBuilder {
             semanticSpans: stage2.semanticSpans,
             textSize: textSize,
             furiganaSize: furiganaSize,
-            context: context
+            context: context,
+            padHeadwordSpacing: padHeadwordSpacing
         )
-        let totalDuration = elapsedMilliseconds(since: buildStart)
-        CustomLogger.shared.info("[\(context)] Finished furigana build in \(totalDuration) ms.")
         return attributed
     }
 
@@ -49,11 +47,8 @@ enum FuriganaAttributedTextBuilder {
         baseSpans: [TextSpan]? = nil
     ) async throws -> Stage2Result {
         guard text.isEmpty == false else {
-            CustomLogger.shared.info("[\(context)] Skipping span computation because the input text is empty.")
             return Stage2Result(annotatedSpans: [], semanticSpans: [])
         }
-
-        CustomLogger.shared.info("[\(context)] Starting furigana span computation for \(text.count) characters.")
         let start = CFAbsoluteTimeGetCurrent()
 
         let segmentationStart = CFAbsoluteTimeGetCurrent()
@@ -66,12 +61,7 @@ enum FuriganaAttributedTextBuilder {
         let nsText = text as NSString
         let adjustedSpans = normalizeCoverage(spans: segmented, text: nsText)
 
-        let gaps = coverageGaps(spans: adjustedSpans, text: text)
-        if gaps.isEmpty == false {
-            CustomLogger.shared.info("[\(context)] Coverage gaps detected after normalization: \(gaps)")
-        }
-        let segmentationDuration = elapsedMilliseconds(since: segmentationStart)
-        CustomLogger.shared.info("[\(context)] Segmentation spans ready: \(adjustedSpans.count) in \(segmentationDuration) ms.")
+        _ = elapsedMilliseconds(since: segmentationStart)
 
         let attachmentStart = CFAbsoluteTimeGetCurrent()
         let stage2 = await SpanReadingAttacher().attachReadings(
@@ -86,11 +76,9 @@ enum FuriganaAttributedTextBuilder {
         let resolvedAnnotated = applyReadingOverrides(stage2.annotatedSpans, overrides: readingOverrides)
         let resolvedSemantic = applyReadingOverrides(stage2.semanticSpans, overrides: readingOverrides)
 
-        let attachmentDuration = elapsedMilliseconds(since: attachmentStart)
-        CustomLogger.shared.info("[\(context)] Annotated spans ready for projection: \(resolvedAnnotated.count) in \(attachmentDuration) ms.")
+        _ = elapsedMilliseconds(since: attachmentStart)
 
-        let totalDuration = elapsedMilliseconds(since: start)
-        CustomLogger.shared.info("[\(context)] Completed span computation in \(totalDuration) ms.")
+        _ = elapsedMilliseconds(since: start)
         return Stage2Result(annotatedSpans: resolvedAnnotated, semanticSpans: resolvedSemantic)
     }
 
@@ -178,7 +166,8 @@ enum FuriganaAttributedTextBuilder {
         annotatedSpans: [AnnotatedSpan],
         textSize: Double,
         furiganaSize: Double,
-        context: String = "general"
+        context: String = "general",
+        padHeadwordSpacing: Bool = false
     ) -> NSAttributedString {
         guard text.isEmpty == false else { return NSAttributedString(string: text) }
 
@@ -186,6 +175,9 @@ enum FuriganaAttributedTextBuilder {
         let rubyReadingKey = NSAttributedString.Key("RubyReadingText")
         let rubySizeKey = NSAttributedString.Key("RubyReadingFontSize")
         let nsText = text as NSString
+        let baseFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, textSize)))
+        let rubyFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, furiganaSize)))
+        var kerningTargets: [Int: HeadwordSpacingAdjustment] = [:]
         var appliedCount = 0
         let projectionStart = CFAbsoluteTimeGetCurrent()
 
@@ -225,13 +217,25 @@ enum FuriganaAttributedTextBuilder {
                 mutable.addAttribute(rubyReadingKey, value: segment.reading, range: segment.range)
                 mutable.addAttribute(rubySizeKey, value: furiganaSize, range: segment.range)
 
-                let headword = nsText.substring(with: segment.range)
-                CustomLogger.shared.info("ruby headword='\(headword)' reading='\(segment.reading)' commonKanaRemoved='\(segment.commonKanaRemoved)'")
                 appliedCount += 1
+
+                if padHeadwordSpacing {
+                    let adjustments = spacingAdjustments(
+                        for: segment.range,
+                        reading: segment.reading,
+                        text: nsText,
+                        baseFont: baseFont,
+                        rubyFont: rubyFont
+                    )
+                    mergeHeadwordSpacingAdjustments(adjustments, into: &kerningTargets)
+                }
             }
         }
 
         _ = elapsedMilliseconds(since: projectionStart)
+        if padHeadwordSpacing {
+            applyHeadwordSpacingAdjustments(Array(kerningTargets.values), to: mutable)
+        }
         // CustomLogger.shared.info("[\(context)] Projected ruby for \(appliedCount) segments in (projectionDuration) ms.")
         return mutable.copy() as? NSAttributedString ?? NSAttributedString(string: text)
     }
@@ -246,7 +250,8 @@ enum FuriganaAttributedTextBuilder {
         semanticSpans: [SemanticSpan],
         textSize: Double,
         furiganaSize: Double,
-        context: String = "general"
+        context: String = "general",
+        padHeadwordSpacing: Bool = false
     ) -> NSAttributedString {
         guard text.isEmpty == false else { return NSAttributedString(string: text) }
 
@@ -254,6 +259,9 @@ enum FuriganaAttributedTextBuilder {
         let rubyReadingKey = NSAttributedString.Key("RubyReadingText")
         let rubySizeKey = NSAttributedString.Key("RubyReadingFontSize")
         let nsText = text as NSString
+        let baseFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, textSize)))
+        let rubyFont = UIFont.systemFont(ofSize: CGFloat(max(1.0, furiganaSize)))
+        var kerningTargets: [Int: HeadwordSpacingAdjustment] = [:]
         var appliedCount = 0
         let projectionStart = CFAbsoluteTimeGetCurrent()
 
@@ -277,10 +285,24 @@ enum FuriganaAttributedTextBuilder {
                 // let headword = nsText.substring(with: segment.range)
                 // CustomLogger.shared.info("ruby headword='\(headword)' reading='\(segment.reading)' commonKanaRemoved='\(segment.commonKanaRemoved)'")
                 appliedCount += 1
+
+                if padHeadwordSpacing {
+                    let adjustments = spacingAdjustments(
+                        for: segment.range,
+                        reading: segment.reading,
+                        text: nsText,
+                        baseFont: baseFont,
+                        rubyFont: rubyFont
+                    )
+                    mergeHeadwordSpacingAdjustments(adjustments, into: &kerningTargets)
+                }
             }
         }
 
         _ = elapsedMilliseconds(since: projectionStart)
+        if padHeadwordSpacing {
+            applyHeadwordSpacingAdjustments(Array(kerningTargets.values), to: mutable)
+        }
         // CustomLogger.shared.info("[\(context)] Projected ruby for \(appliedCount) segments in (projectionDuration) ms.")
         return mutable.copy() as? NSAttributedString ?? NSAttributedString(string: text)
     }
@@ -362,6 +384,13 @@ enum FuriganaAttributedTextBuilder {
 }
 
 private extension FuriganaAttributedTextBuilder {
+    private struct HeadwordSpacingAdjustment {
+        let range: NSRange
+        let kern: CGFloat
+    }
+
+    private static let whitespaceAndNewlineSet = CharacterSet.whitespacesAndNewlines
+
     private static func normalizeCoverage(spans: [TextSpan], text: NSString) -> [TextSpan] {
         let length = text.length
         guard length > 0 else { return [] }
@@ -514,5 +543,96 @@ private extension FuriganaAttributedTextBuilder {
     private struct OverrideKey: Hashable {
         let location: Int
         let length: Int
+    }
+
+    private static func spacingAdjustments(
+        for headwordRange: NSRange,
+        reading: String,
+        text: NSString,
+        baseFont: UIFont,
+        rubyFont: UIFont
+    ) -> [HeadwordSpacingAdjustment] {
+        guard headwordRange.location != NSNotFound, headwordRange.length > 0 else { return [] }
+        guard NSMaxRange(headwordRange) <= text.length else { return [] }
+        guard reading.isEmpty == false else { return [] }
+
+        let headword = text.substring(with: headwordRange)
+        let baseWidth = (headword as NSString).size(withAttributes: [.font: baseFont]).width
+        let rubyWidth = (reading as NSString).size(withAttributes: [.font: rubyFont]).width
+        guard baseWidth.isFinite, rubyWidth.isFinite else { return [] }
+
+        let overhang = rubyWidth - baseWidth
+        let trigger = max(0.5, rubyFont.pointSize * 0.1)
+        guard overhang > trigger else { return [] }
+
+        let maxPad = max(1.0, baseFont.pointSize * 0.85)
+        let totalPad = min(overhang, maxPad)
+        let perSide = max(0.5, totalPad / 2.0)
+        guard perSide > 0 else { return [] }
+
+        var adjustments: [HeadwordSpacingAdjustment] = []
+
+        if headwordRange.location > 0 {
+            let beforeIndex = headwordRange.location - 1
+            let beforeRange = text.rangeOfComposedCharacterSequence(at: beforeIndex)
+            if beforeRange.location != NSNotFound,
+               NSMaxRange(beforeRange) <= text.length {
+                let preceding = text.substring(with: beforeRange)
+                if preceding.trimmingCharacters(in: whitespaceAndNewlineSet).isEmpty == false {
+                    adjustments.append(HeadwordSpacingAdjustment(range: beforeRange, kern: perSide))
+                }
+            }
+        }
+
+        let afterBoundary = NSMaxRange(headwordRange)
+        if afterBoundary < text.length {
+            let followingRange = text.rangeOfComposedCharacterSequence(at: afterBoundary)
+            if followingRange.location != NSNotFound,
+               NSMaxRange(followingRange) <= text.length {
+                let following = text.substring(with: followingRange)
+                if following.trimmingCharacters(in: whitespaceAndNewlineSet).isEmpty == false {
+                    let lastIndex = max(headwordRange.location, afterBoundary - 1)
+                    let lastRange = text.rangeOfComposedCharacterSequence(at: lastIndex)
+                    if lastRange.location != NSNotFound,
+                       NSMaxRange(lastRange) <= text.length {
+                        adjustments.append(HeadwordSpacingAdjustment(range: lastRange, kern: perSide))
+                    }
+                }
+            }
+        }
+
+        return adjustments
+    }
+
+    private static func mergeHeadwordSpacingAdjustments(
+        _ adjustments: [HeadwordSpacingAdjustment],
+        into targets: inout [Int: HeadwordSpacingAdjustment]
+    ) {
+        guard adjustments.isEmpty == false else { return }
+        for adjustment in adjustments {
+            let key = adjustment.range.location
+            if let existing = targets[key] {
+                if adjustment.kern > existing.kern {
+                    targets[key] = adjustment
+                }
+            } else {
+                targets[key] = adjustment
+            }
+        }
+    }
+
+    private static func applyHeadwordSpacingAdjustments(
+        _ adjustments: [HeadwordSpacingAdjustment],
+        to attributed: NSMutableAttributedString
+    ) {
+        guard adjustments.isEmpty == false else { return }
+        let length = attributed.length
+        for adjustment in adjustments {
+            guard adjustment.kern > 0 else { continue }
+            let range = adjustment.range
+            guard range.location != NSNotFound, range.length > 0 else { continue }
+            guard NSMaxRange(range) <= length else { continue }
+            attributed.addAttribute(.kern, value: adjustment.kern, range: range)
+        }
     }
 }

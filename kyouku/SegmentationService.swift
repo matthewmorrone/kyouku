@@ -43,37 +43,24 @@ actor SegmentationService {
 
     func segment(text: String) async throws -> [TextSpan] {
         guard text.isEmpty == false else { return [] }
-        await CustomLogger.shared.debug("[Segmentation] enter len=\(text.count)")
-        let overallStart = CFAbsoluteTimeGetCurrent()
         let segInterval = signposter.beginInterval("Segment", id: .exclusive, "len=\(text.count)")
         let key = SegmentationCacheKey(textHash: Self.hash(text), length: text.utf16.count)
         if let cached = cache[key] {
-            await CustomLogger.shared.debug("[Segmentation] Cache hit for len=\(text.count) -> \(cached.count) spans.")
             signposter.endInterval("Segment", segInterval)
             return cached
-        } else {
-            await CustomLogger.shared.debug("[Segmentation] Cache miss for len=\(text.count). Proceeding to segment.")
         }
 
         let trieInterval = signposter.beginInterval("TrieLoad")
-        let trieLoadStart = CFAbsoluteTimeGetCurrent()
         let trie = try await getTrie()
-        let trieLoadMs = (CFAbsoluteTimeGetCurrent() - trieLoadStart) * 1000
-        let trieSource = (trieInitTask == nil && trieCache != nil) ? "cached" : (trieInitTask != nil ? "building" : "unknown")
-        await CustomLogger.shared.debug("SegmentationService: trie load completed (source=\(trieSource)) in \(String(format: "%.3f", trieLoadMs)) ms.")
         signposter.endInterval("TrieLoad", trieInterval)
 
         let nsText = text as NSString
 
         let rangesInterval = signposter.beginInterval("SegmentRanges")
-        let segmentationStart = CFAbsoluteTimeGetCurrent()
         let ranges = await segmentRanges(using: trie, text: nsText)
-        let segmentationMs = (CFAbsoluteTimeGetCurrent() - segmentationStart) * 1000
-        await CustomLogger.shared.debug("SegmentationService: segmentRanges took \(String(format: "%.3f", segmentationMs)) ms.")
         signposter.endInterval("SegmentRanges", rangesInterval)
 
         let mapInterval = signposter.beginInterval("MapRangesToSpans")
-        let mapStart = CFAbsoluteTimeGetCurrent()
         let spans: [TextSpan] = ranges.flatMap { segmented -> [TextSpan] in
             guard let trimmedRange = Self.trimmedRange(from: segmented.range, in: nsText) else { return [] }
             let newlineSeparated = Self.splitRangeByNewlines(trimmedRange, in: nsText)
@@ -83,17 +70,9 @@ actor SegmentationService {
                 return TextSpan(range: clamped, surface: surface, isLexiconMatch: segmented.isLexiconMatch)
             }
         }
-        let mapMs = (CFAbsoluteTimeGetCurrent() - mapStart) * 1000
-        await CustomLogger.shared.debug("SegmentationService: mapping ranges->spans took \(String(format: "%.3f", mapMs)) ms.")
         signposter.endInterval("MapRangesToSpans", mapInterval)
 
-        await CustomLogger.shared.print("[STAGE-1 SEGMENTS @ SEGMENTATION]")
-        await CustomLogger.shared.print(Self.describe(spans: spans))
-
         store(spans, for: key)
-        let overallDurationMsDouble = (CFAbsoluteTimeGetCurrent() - overallStart) * 1000
-        await CustomLogger.shared.debug("[Segmentation] exit spans=\(spans.count) dt=\(String(format: "%.2f", overallDurationMsDouble))ms")
-        await CustomLogger.shared.debug("Segmented text length \(text.count) into \(spans.count) spans in \(String(format: "%.3f", overallDurationMsDouble)) ms (trie: \(String(format: "%.3f", trieLoadMs)) ms, segment: \(String(format: "%.3f", segmentationMs)) ms, map: \(String(format: "%.3f", mapMs)) ms).")
         signposter.endInterval("Segment", segInterval)
         return spans
     }
@@ -278,22 +257,17 @@ actor SegmentationService {
     }
 
     private func getTrie() async throws -> LexiconTrie {
-        let start = CFAbsoluteTimeGetCurrent()
         if let t = trieCache {
-            await CustomLogger.shared.debug("getTrie(): returning cached trie in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
             return t
         }
         if let task = trieInitTask {
-            await CustomLogger.shared.debug("getTrie(): awaiting existing build task…")
             return try await task.value
         }
-        await CustomLogger.shared.debug("getTrie(): creating new build task…")
         let task = Task { try await LexiconProvider.shared.trie() }
         trieInitTask = task
         let t = try await task.value
         trieCache = t
         trieInitTask = nil
-        await CustomLogger.shared.debug("getTrie(): build task completed in \(((CFAbsoluteTimeGetCurrent()-start)*1000)) ms")
         return t
     }
 
@@ -301,19 +275,8 @@ actor SegmentationService {
         let length = text.length
         guard length > 0 else { return [] }
 
-        await CustomLogger.shared.debug("segmentRanges: starting scan length=\(length)")
-
         var ranges: [SegmentedRange] = []
         ranges.reserveCapacity(max(1, length / 2))
-
-        var kanjiCount = 0
-        var nonKanjiCount = 0
-        var trieLookups = 0
-        var matchesFound = 0
-        var singletonKanji = 0
-        var sumMatchLen = 0
-        var maxMatchLen = 0
-        var trieLookupTime: Double = 0
 
         await MainActor.run {
             trie.beginProfiling()
@@ -334,7 +297,6 @@ actor SegmentationService {
             // "ロンリーロンリーハート" → "ロンリー","ロンリー","ハート" even when the
             // full concatenation exists in the lexicon.
             if Self.isKatakana(currentUnit) {
-                nonKanjiCount += 1
                 let kind: ScriptKind = .katakana
                 if let currentKind = pendingNonKanjiKind, currentKind != kind {
                     _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
@@ -347,24 +309,18 @@ actor SegmentationService {
                 continue
             }
 
-            trieLookups += 1
-            let lookupStart = CFAbsoluteTimeGetCurrent()
             let current = cursor
             let requireKanjiMatch = (Self.isHiragana(currentUnit) == false && Self.isKatakana(currentUnit) == false)
             let matchEnd: Int? = await MainActor.run { [current, swiftText, requireKanjiMatch] in
                 let ns = swiftText as NSString
                 return trie.longestMatchEnd(in: ns, from: current, requireKanji: requireKanjiMatch)
             }
-            trieLookupTime += CFAbsoluteTimeGetCurrent() - lookupStart
             if let end = matchEnd {
                 if await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges) {
                     // start cleared inside helper
                 }
                 let len = end - cursor
-                sumMatchLen += len
-                if len > maxMatchLen { maxMatchLen = len }
                 ranges.append(SegmentedRange(range: NSRange(location: cursor, length: len), isLexiconMatch: true))
-                matchesFound += 1
                 cursor = end
                 continue
             }
@@ -377,11 +333,8 @@ actor SegmentationService {
 
             if Self.isKanji(unit) {
                 _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
-                kanjiCount += 1
-                singletonKanji += 1
                 ranges.append(SegmentedRange(range: NSRange(location: cursor, length: 1), isLexiconMatch: false))
             } else {
-                nonKanjiCount += 1
                 if Self.isWhitespaceOrNewline(scalar) || Self.isPunctuation(scalar) {
                     _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
                     ranges.append(SegmentedRange(range: NSRange(location: cursor, length: 1), isLexiconMatch: false))
@@ -405,13 +358,7 @@ actor SegmentationService {
 
         _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: length, text: text, trie: trie, into: &ranges)
 
-        await CustomLogger.shared.debug("segmentRanges: finished scan with \(ranges.count) ranges. Performing metrics…")
-
         let totalDuration = CFAbsoluteTimeGetCurrent() - profilingStart
-        let totalMs = totalDuration * 1000
-        let lookupMs = trieLookupTime * 1000
-        let avgMatchLen = matchesFound > 0 ? Double(sumMatchLen) / Double(matchesFound) : 0
-        await CustomLogger.shared.debug("segmentRanges: scanned length \(length) -> \(ranges.count) ranges in \(String(format: "%.3f", totalMs)) ms (lookups: \(trieLookups), matches: \(matchesFound), singletons: \(singletonKanji), avgMatchLen: \(String(format: "%.2f", avgMatchLen)), maxMatchLen: \(maxMatchLen), kanji: \(kanjiCount), nonKanji: \(nonKanjiCount), lookupTime: \(String(format: "%.3f", lookupMs)) ms).")
         await MainActor.run {
             trie.endProfiling(totalDuration: totalDuration)
         }

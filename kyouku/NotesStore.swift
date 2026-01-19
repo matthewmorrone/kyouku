@@ -77,7 +77,6 @@ class NotesStore: ObservableObject {
             )
             let data = try JSONEncoder().encode(archive)
             try data.write(to: saveURL, options: .atomic)
-            CustomLogger.shared.debug("Saved \(self.notes.count) notes and \(archive.overrides.count) overrides")
         } catch {
             CustomLogger.shared.error("Failed to save notes: \(error)")
         }
@@ -95,12 +94,10 @@ class NotesStore: ObservableObject {
                     overridesStore?.replaceAll(with: archive.overrides)
                     needsUpgrade = true
                 }
-                CustomLogger.shared.debug("Loaded archive with \(archive.notes.count) notes and \(archive.overrides.count) overrides")
             } else {
                 let loaded = try decoder.decode([Note].self, from: data)
                 notes = loaded
                 needsUpgrade = true
-                CustomLogger.shared.debug("Loaded legacy notes array count=\(loaded.count); upgrade scheduled")
             }
         } catch {
             notes = []
@@ -114,7 +111,6 @@ class NotesStore: ObservableObject {
     // MARK: - Bulk Replace / Export
     func replaceAll(with newNotes: [Note]) {
         self.notes = newNotes
-        CustomLogger.shared.debug("Replaced notes array with \(newNotes.count) entries")
         save()
     }
 

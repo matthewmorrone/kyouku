@@ -82,7 +82,6 @@ final class ReadingOverridesStore: ObservableObject {
             rangeLength: range.length,
             userKana: userKana
         )
-        CustomLogger.shared.debug("Upsert override note=\(noteID) range=\(range.location)-\(NSMaxRange(range)) hasKana=\(userKana != nil)")
         apply(noteID: noteID, removing: range, adding: [override])
     }
 
@@ -90,7 +89,6 @@ final class ReadingOverridesStore: ObservableObject {
         overrides.removeAll { $0.noteID == noteID && $0.overlaps(range) }
         overrides.append(contentsOf: newOverrides)
         save()
-        CustomLogger.shared.debug("Applied overrides note=\(noteID) removeRange=\(range.location)-\(NSMaxRange(range)) inserted=\(newOverrides.count) total=\(self.overrides.count)")
         notifyChange()
     }
 
@@ -99,7 +97,6 @@ final class ReadingOverridesStore: ObservableObject {
         overrides.removeAll { $0.noteID == noteID && $0.overlaps(range) }
         if overrides.count != before {
             save()
-            CustomLogger.shared.debug("Removed overrides note=\(noteID) range=\(range.location)-\(NSMaxRange(range)) remaining=\(self.overrides.count)")
             notifyChange()
         }
     }
@@ -109,7 +106,6 @@ final class ReadingOverridesStore: ObservableObject {
         overrides.removeAll { $0.noteID == noteID }
         guard overrides.count != before else { return }
         save()
-        CustomLogger.shared.debug("Removed all overrides for note=\(noteID) remaining=\(self.overrides.count)")
         notifyChange()
     }
 
@@ -118,7 +114,6 @@ final class ReadingOverridesStore: ObservableObject {
         overrides.removeAll { $0.noteID == noteID && $0.userKana == nil }
         guard overrides.count != before else { return }
         save()
-        CustomLogger.shared.debug("Removed boundary-only overrides for note=\(noteID) remaining=\(self.overrides.count)")
         notifyChange()
     }
 
@@ -127,7 +122,6 @@ final class ReadingOverridesStore: ObservableObject {
         overrides.removeAll { $0.id == id }
         if overrides.count != before {
             save()
-            CustomLogger.shared.debug("Deleted override id=\(id) remaining=\(self.overrides.count)")
             notifyChange()
         }
     }
@@ -135,7 +129,6 @@ final class ReadingOverridesStore: ObservableObject {
     func replaceAll(with overrides: [ReadingOverride]) {
         self.overrides = overrides
         save()
-        CustomLogger.shared.debug("Replaced all overrides count=\(overrides.count)")
         notifyChange()
     }
 
@@ -158,7 +151,6 @@ final class ReadingOverridesStore: ObservableObject {
         do {
             let data = try Data(contentsOf: url)
             overrides = try JSONDecoder().decode([ReadingOverride].self, from: data)
-            CustomLogger.shared.debug("Loaded overrides file entries=\(self.overrides.count)")
         } catch {
             CustomLogger.shared.error("Failed to load reading overrides: \(error)")
         }
@@ -169,7 +161,6 @@ final class ReadingOverridesStore: ObservableObject {
         do {
             let data = try JSONEncoder().encode(overrides)
             try data.write(to: url, options: .atomic)
-            CustomLogger.shared.debug("Saved overrides count=\(self.overrides.count)")
         } catch {
             CustomLogger.shared.error("Failed to save reading overrides: \(error)")
         }

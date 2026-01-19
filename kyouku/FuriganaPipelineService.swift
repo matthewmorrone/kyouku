@@ -14,6 +14,7 @@ struct FuriganaPipelineService {
         let hardCuts: [Int]
         let readingOverrides: [ReadingOverride]
         let context: String
+        let padHeadwordSpacing: Bool
     }
 
     struct Result {
@@ -24,7 +25,6 @@ struct FuriganaPipelineService {
 
     func render(_ input: Input) async -> Result {
         guard input.text.isEmpty == false else {
-            CustomLogger.shared.debug("\(input.context) skipping pipeline: text is empty.")
             return Result(spans: nil, semanticSpans: [], attributedString: nil)
         }
 
@@ -64,9 +64,9 @@ struct FuriganaPipelineService {
                 semanticSpans: resolvedSemantic,
                 textSize: input.textSize,
                 furiganaSize: input.furiganaSize,
-                context: input.context
+                context: input.context,
+                padHeadwordSpacing: input.padHeadwordSpacing
             )
-            CustomLogger.shared.debug("\(input.context) projected furigana text length=\(projected.length).")
             attributed = projected
         } else {
             attributed = nil

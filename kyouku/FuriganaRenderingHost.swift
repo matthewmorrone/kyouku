@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 
+@MainActor
 struct FuriganaRenderingHost: View {
     @State private var scrollSyncGroupID: String = UUID().uuidString
 
@@ -33,6 +34,7 @@ struct FuriganaRenderingHost: View {
     var onDragSelectionEnded: ((NSRange) -> Void)? = nil
     var contextMenuStateProvider: (() -> RubyContextMenuState?)? = nil
     var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
+    var viewMetricsContext: RubyText.ViewMetricsContext? = nil
 
     var body: some View {
         GeometryReader { proxy in
@@ -48,10 +50,11 @@ struct FuriganaRenderingHost: View {
                     if text.isEmpty {
                         EmptyView()
                     } else {
-                            rubyBlock(
-                               annotationVisibility: showFurigana ? .visible : .hiddenKeepMetrics,
-                               bottomObstruction: obstruction
-                            )
+                        rubyBlock(
+                            annotationVisibility: showFurigana ? .visible : .hiddenKeepMetrics,
+                            bottomObstruction: obstruction,
+                            viewMetricsContext: viewMetricsContext
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -121,7 +124,11 @@ struct FuriganaRenderingHost: View {
         )
     }
 
-    private func rubyBlock(annotationVisibility: RubyAnnotationVisibility, bottomObstruction: CGFloat) -> some View {
+    private func rubyBlock(
+        annotationVisibility: RubyAnnotationVisibility,
+        bottomObstruction: CGFloat,
+        viewMetricsContext: RubyText.ViewMetricsContext?
+    ) -> some View {
         let attributed = resolvedAttributedText
         let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
         let defaultRubyFontSize = max(1, CGFloat(textSize) * 0.6)
@@ -152,9 +159,11 @@ struct FuriganaRenderingHost: View {
             horizontalScrollEnabled: wrapLines == false,
             scrollSyncGroupID: scrollSyncGroupID,
             tokenOverlays: tokenColorOverlays,
+            tokenColorPalette: tokenPalette,
             semanticSpans: semanticSpans,
             selectedRange: selectedRangeHighlight,
             customizedRanges: customizedRanges,
+            alternateTokenColorsEnabled: alternateTokenColors,
             enableTapInspection: enableTapInspection,
             enableDragSelection: enableDragSelection,
             onDragSelectionBegan: onDragSelectionBegan,
@@ -162,7 +171,8 @@ struct FuriganaRenderingHost: View {
             onCharacterTap: onCharacterTap,
             onSpanSelection: onSpanSelection,
             contextMenuStateProvider: contextMenuStateProvider,
-            onContextMenuAction: onContextMenuAction
+            onContextMenuAction: onContextMenuAction,
+            viewMetricsContext: viewMetricsContext
         )
         // `RubyText` performs custom drawing for ruby annotations. When token overlay modes
         // toggle, UIKit doesn't always repaint the custom ruby layer immediately, so we
@@ -293,6 +303,7 @@ struct FuriganaRenderingHost: View {
     }
 }
 
+@MainActor
 private struct EditingTextView: UIViewRepresentable {
     @Binding var text: String
     let isEditable: Bool
@@ -547,6 +558,7 @@ private struct EditingTextView: UIViewRepresentable {
     // Removing or simplifying it will break scroll continuity.
     //
     // Copilot: treat this as externally depended-on behavior.
+    @MainActor
     final class Coordinator: NSObject, UITextViewDelegate {
         @Binding var text: String
 
@@ -576,7 +588,11 @@ private struct EditingTextView: UIViewRepresentable {
                     object: nil,
                     queue: .main
                 ) { [weak self] note in
-                    self?.handleScrollSyncNotification(note)
+                    Task { [weak self, note] in
+                        await MainActor.run {
+                            self?.handleScrollSyncNotification(note)
+                        }
+                    }
                 }
             }
         }

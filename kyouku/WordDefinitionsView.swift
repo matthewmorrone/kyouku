@@ -214,14 +214,15 @@ struct WordDefinitionsView: View {
         let isSaved = isSaved(surface: row.headword, kana: normalizedReading)
 
         return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                if containsKanji(row.headword) {
-                    Text(normalizedReading ?? "(no reading)")
-                        .font(.headline)
-                } else {
-                    // Kana headword: do not show kanji spellings.
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(row.headword)
-                        .font(.headline)
+                        .font(.title3.weight(.semibold))
+                    if containsKanji(row.headword), let normalizedReading {
+                        Text(normalizedReading)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Spacer(minLength: 0)
@@ -261,11 +262,39 @@ struct WordDefinitionsView: View {
     }
 
     private func formatSQLDebug(_ value: String) -> String {
-        let rawLines = value.split(whereSeparator: { $0.isNewline }).map(String.init)
-        let nonEmpty = rawLines.filter { $0.trimmingCharacters(in: CharacterSet.whitespaces).isEmpty == false }
-        guard nonEmpty.isEmpty == false else { return value }
+        let rawLines = value.components(separatedBy: CharacterSet.newlines)
+        guard rawLines.isEmpty == false else { return value }
 
-        let leadingSpaceCounts: [Int] = nonEmpty.map { line in
+        // Separate metadata (e.g. "selectEntries term='...'" lines) from the SQL body so
+        // indentation trimming doesn't get blocked by a header that has zero indent.
+        let sqlStartKeywords: Set<String> = ["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "PRAGMA"]
+        var headerLines: [String] = []
+        var sqlLines: [String] = []
+        var foundSQLStart = false
+        for line in rawLines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if foundSQLStart == false,
+               let firstWord = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first,
+               sqlStartKeywords.contains(firstWord.uppercased()) {
+                foundSQLStart = true
+            }
+
+            if foundSQLStart {
+                sqlLines.append(line)
+            } else {
+                headerLines.append(line)
+            }
+        }
+
+        if sqlLines.isEmpty {
+            sqlLines = rawLines
+            headerLines = []
+        }
+
+        let nonEmptySQL = sqlLines.filter { $0.trimmingCharacters(in: .whitespaces).isEmpty == false }
+        guard nonEmptySQL.isEmpty == false else { return value }
+
+        let leadingSpaceCounts: [Int] = nonEmptySQL.compactMap { line in
             var count = 0
             for ch in line {
                 if ch == " " || ch == "\t" {
@@ -277,10 +306,11 @@ struct WordDefinitionsView: View {
             return count
         }
 
-        guard let minIndent = leadingSpaceCounts.min(), minIndent > 0 else { return value }
+        let minIndent = leadingSpaceCounts.min() ?? 0
 
-        let trimmedLines: [String] = rawLines.map { line in
-            var remainingIndent = minIndent
+        func trim(indent: Int, from line: String) -> String {
+            guard indent > 0 else { return line }
+            var remainingIndent = indent
             var result = ""
             var dropped = true
             for ch in line {
@@ -294,7 +324,25 @@ struct WordDefinitionsView: View {
             return result
         }
 
-        return trimmedLines.joined(separator: "\n")
+        let normalizedSQL = sqlLines.map { line -> String in
+            let trimmed = trim(indent: minIndent, from: line)
+            return trimmed.trimmingCharacters(in: .whitespaces)
+        }
+
+        let collapsed = normalizedSQL.reduce(into: [String]()) { acc, line in
+            if line.isEmpty {
+                if acc.last?.isEmpty == false {
+                    acc.append("")
+                }
+            } else {
+                acc.append(line)
+            }
+        }
+
+        var combined = headerLines + collapsed
+        while combined.first?.isEmpty == true { combined.removeFirst() }
+        while combined.last?.isEmpty == true { combined.removeLast() }
+        return combined.joined(separator: "\n")
     }
 
     private func load() async {

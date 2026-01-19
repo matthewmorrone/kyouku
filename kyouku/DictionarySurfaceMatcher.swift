@@ -33,35 +33,24 @@ struct DictionarySurfaceMatcher {
     /// resolution is handled downstream.
     func segment(text: String) async throws -> [TextSpan] {
         guard text.isEmpty == false else {
-            CustomLogger.shared.debug("Skipping dictionary scan: input text is empty.")
             return []
         }
 
-        let overallStart = DispatchTime.now()
-
         let nsText = text as NSString
         let tokenRanges = Self.wordRanges(in: text)
-        let tokenizationEnd = DispatchTime.now()
-        let tokenizationMs = Double(tokenizationEnd.uptimeNanoseconds - overallStart.uptimeNanoseconds) / 1_000_000.0
-        CustomLogger.shared.info("Tokenized input length \(text.count) into \(tokenRanges.count) ranges in \(String(format: "%.2f", tokenizationMs)) ms.")
 
         if tokenRanges.isEmpty {
-            CustomLogger.shared.debug("Tokenizer produced zero ranges; no matches will be attempted.")
             return []
         }
 
         var spans: [TextSpan] = []
-
-        let loopStart = DispatchTime.now()
         for tokenRange in tokenRanges {
             let trimmed = Self.trimRange(tokenRange, in: nsText)
             guard trimmed.length > 0 else {
-                CustomLogger.shared.debug("Skipping token at location \(tokenRange.location) because it was entirely whitespace.")
                 continue
             }
             let word = nsText.substring(with: trimmed)
             guard Self.containsJapaneseCharacters(word) else {
-                CustomLogger.shared.debug("Skipping token '\(word)' (len \(word.count)): contains no Japanese characters.")
                 continue
             }
             guard Self.isRubyEligibleToken(word, utf16Length: trimmed.length) else {
@@ -74,42 +63,23 @@ struct DictionarySurfaceMatcher {
                 continue
             }
         }
-        let loopEnd = DispatchTime.now()
-        let loopMs = Double(loopEnd.uptimeNanoseconds - loopStart.uptimeNanoseconds) / 1_000_000.0
-        let overallEnd = DispatchTime.now()
-        let overallMs = Double(overallEnd.uptimeNanoseconds - overallStart.uptimeNanoseconds) / 1_000_000.0
-
-        CustomLogger.shared.info("Surface matcher produced \(spans.count) spans for length \(text.count) in \(String(format: "%.2f", overallMs)) ms (scan loop: \(String(format: "%.2f", loopMs)) ms).")
-
         return spans
     }
 
     private func lookupRange(_ range: NSRange, in text: NSString) async throws -> TextSpan? {
-        let start = DispatchTime.now()
-
         let candidate = text.substring(with: range)
         let entries = try await dictionaryStore.lookup(term: candidate, limit: 30)
-        let lookupEnd = DispatchTime.now()
 
         guard entries.isEmpty == false else {
-            let end = DispatchTime.now()
-            let lookupMs = Double(lookupEnd.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
-            let totalMs = Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
-            CustomLogger.shared.debug("Lookup for candidate '\(candidate)' completed in \(String(format: "%.2f", totalMs)) ms with 0 exact matches (lookup: \(String(format: "%.2f", lookupMs)) ms).")
             return nil
         }
 
         let span = TextSpan(range: range, surface: candidate)
-        let mapEnd = DispatchTime.now()
-        let lookupMs = Double(lookupEnd.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
-        let totalMs = Double(mapEnd.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
-        CustomLogger.shared.info("Matched candidate '\(candidate)' at \(range.location)-\(range.location + range.length) in \(String(format: "%.2f", totalMs)) ms (lookup: \(String(format: "%.2f", lookupMs)) ms).")
 
         return span
     }
 
     private func fallbackMatches(in text: NSString, range: NSRange) async throws -> [TextSpan] {
-        let start = DispatchTime.now()
         // NOTE: Disabled for render-time use. This performs many SQLite lookups and is too slow for UI-triggered furigana rendering.
         var matches: [TextSpan] = []
         let end = range.location + range.length
@@ -131,9 +101,6 @@ struct DictionarySurfaceMatcher {
                 matches.append(TextSpan(range: candidateRange, surface: substring))
             }
         }
-        let endTime = DispatchTime.now()
-        let ms = Double(endTime.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000.0
-        CustomLogger.shared.info("Fallback matching produced \(matches.count) matches across range \(range.location)-\(range.location + range.length) in \(String(format: "%.2f", ms)) ms.")
 
         return matches
     }

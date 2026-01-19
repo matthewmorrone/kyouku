@@ -1,38 +1,10 @@
 import Foundation
 import CoreFoundation
-import QuartzCore
 import Mecab_Swift
 import IPADic
 import OSLog
 
 internal import StringTools
-
-// INVESTIGATION: timing/logging helpers (2026-01-05)
-// NOTE: Investigation-only instrumentation. Do not change control flow beyond adding logs.
-@preconcurrency @inline(__always)
-func ivlog(_ msg: String) {
-    print("[INVESTIGATION] \(msg) main=\(Thread.isMainThread)")
-}
-
-@preconcurrency @inline(__always)
-func ivtime<T>(_ label: String, _ f: () throws -> T) rethrows -> T {
-    let t0 = CACurrentMediaTime()
-    defer {
-        let ms = (CACurrentMediaTime() - t0) * 1000
-        ivlog("\(label) dt=\(String(format: "%.2f", ms))ms")
-    }
-    return try f()
-}
-
-@preconcurrency @inline(__always)
-func ivtimeAsync<T>(_ label: String, _ f: () async throws -> T) async rethrows -> T {
-    let t0 = CACurrentMediaTime()
-    defer {
-        let ms = (CACurrentMediaTime() - t0) * 1000
-        ivlog("\(label) dt=\(String(format: "%.2f", ms))ms")
-    }
-    return try await f()
-}
 
 /// Stage 2 of the furigana pipeline. Consumes `TextSpan` boundaries, runs
 /// MeCab/IPADic exactly once per input text, and attaches kana readings. No
@@ -48,6 +20,9 @@ struct SpanReadingAttacher {
 
     private static let cache = ReadingAttachmentCache(maxEntries: 32)
     private static let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SpanReadingAttacher")
+    private static let stage2DebugLoggingEnabled: Bool = {
+        ProcessInfo.processInfo.environment["STAGE2_TRACE"] == "1"
+    }()
 
     struct Result {
         let annotatedSpans: [AnnotatedSpan]
@@ -80,18 +55,13 @@ struct SpanReadingAttacher {
         treatSpanBoundariesAsAuthoritative: Bool,
         hardCuts: [Int] = []
     ) async -> Result {
-        ivlog("Stage2.attachReadings enter len=\(text.count) spans=\(spans.count) authoritative=\(treatSpanBoundariesAsAuthoritative) hardCuts=\(hardCuts.count)")
         guard text.isEmpty == false, spans.isEmpty == false else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
             let semantic = spans.enumerated().map { idx, span in
                 SemanticSpan(range: span.range, surface: span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: nil)
             }
-            CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
-            CustomLogger.shared.print(SemanticSpan.describe(spans: semantic))
             return Result(annotatedSpans: passthrough, semanticSpans: semantic)
         }
-
-        let start = CFAbsoluteTimeGetCurrent()
         let overallInterval = Self.signposter.beginInterval("AttachReadings Overall", "len=\(text.count) spans=\(spans.count)")
 
         let key = ReadingAttachmentCacheKey(
@@ -101,25 +71,17 @@ struct SpanReadingAttacher {
             hardCutsSignature: Self.signature(forCuts: hardCuts)
         )
         if let cached = await Self.cache.value(for: key) {
-            let duration = Self.elapsedMilliseconds(since: start)
-            CustomLogger.shared.debug("[SpanReadingAttacher] Cache hit for \(spans.count) spans in \(duration) ms.")
             Self.signposter.endInterval("AttachReadings Overall", overallInterval)
-            CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
-            CustomLogger.shared.print(SemanticSpan.describe(spans: cached.semanticSpans))
             return cached
         }
 
         let tokStart = CFAbsoluteTimeGetCurrent()
         let tokInterval = Self.signposter.beginInterval("Tokenizer Acquire")
-        let tokenizerOpt: Tokenizer? = ivtime("Stage2.tokenizerAcquire") {
-            Self.tokenizer()
-        }
+        let tokenizerOpt: Tokenizer? = Self.tokenizer()
         Self.signposter.endInterval("Tokenizer Acquire", tokInterval)
         let tokMs = (CFAbsoluteTimeGetCurrent() - tokStart) * 1000
         if tokenizerOpt == nil {
-            // CustomLogger.shared.error("[SpanReadingAttacher] Tokenizer acquisition failed in \(String(format: \"%.3f\", tokMs)) ms")
-        } else {
-            CustomLogger.shared.info("[SpanReadingAttacher] Tokenizer acquired in \(String(format: "%.3f", tokMs)) ms")
+            CustomLogger.shared.error("Tokenizer acquisition failed after \(String(format: "%.3f", tokMs)) ms")
         }
         guard let tokenizer = tokenizerOpt else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
@@ -128,27 +90,19 @@ struct SpanReadingAttacher {
             }
             let result = Result(annotatedSpans: passthrough, semanticSpans: semantic)
             await Self.cache.store(result, for: key)
-            CustomLogger.shared.info("[SpanReadingAttacher] Failed to acquire tokenizer. Returning passthrough spans in (duration) ms.")
             Self.signposter.endInterval("AttachReadings Overall", overallInterval)
-            CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
-            CustomLogger.shared.print(SemanticSpan.describe(spans: result.semanticSpans))
             return result
         }
 
-        let tokenizeStart = CFAbsoluteTimeGetCurrent()
         let tokenizeInterval = Self.signposter.beginInterval("MeCab Tokenize", "len=\(text.count)")
-        let annotations: [MeCabAnnotation] = ivtime("Stage2.mecabTokenize") {
-            tokenizer.tokenize(text: text).compactMap { annotation -> MeCabAnnotation? in
-                let nsRange = NSRange(annotation.range, in: text)
-                guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
-                let surface = String(text[annotation.range])
-                let pos = String(describing: annotation.partOfSpeech)
-                return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm, partOfSpeech: pos)
-            }
+        let annotations: [MeCabAnnotation] = tokenizer.tokenize(text: text).compactMap { annotation -> MeCabAnnotation? in
+            let nsRange = NSRange(annotation.range, in: text)
+            guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
+            let surface = String(text[annotation.range])
+            let pos = String(describing: annotation.partOfSpeech)
+            return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm, partOfSpeech: pos)
         }
         Self.signposter.endInterval("MeCab Tokenize", tokenizeInterval)
-        let tokenizeMs = (CFAbsoluteTimeGetCurrent() - tokenizeStart) * 1000
-        CustomLogger.shared.info("[SpanReadingAttacher] MeCab tokenization produced \(annotations.count) annotations in \(String(format: "%.3f", tokenizeMs)) ms")
 
         var annotated: [AnnotatedSpan] = []
         annotated.reserveCapacity(spans.count)
@@ -161,34 +115,21 @@ struct SpanReadingAttacher {
             annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas, partOfSpeech: attachment.partOfSpeech))
         }
 
-        let semantic: [SemanticSpan] = await ivtimeAsync("Stage2.5.taskWait") {
-            await Task(priority: .userInitiated) { [self] in
-                let out = await ivtimeAsync("Stage2.5.semanticRegrouping") {
-                    await self.semanticRegrouping(
-                        text: text,
-                        nsText: text as NSString,
-                        spans: spans,
-                        annotatedSpans: annotated,
-                        annotations: annotations,
-                        treatSpanBoundariesAsAuthoritative: treatSpanBoundariesAsAuthoritative,
-                        hardCuts: hardCuts
-                    )
-                }
-                return out
-            }.value
-        }
-
-        #if DEBUG
-        CustomLogger.shared.print("[STAGE-2 SEGMENTS @ SEMANTIC REGROUPING]")
-        CustomLogger.shared.print(SemanticSpan.describe(spans: semantic))
-        #endif
-        CustomLogger.shared.debug("Stage2: stage1Count=\(spans.count) stage2Count=\(semantic.count)")
+        let semantic: [SemanticSpan] = await Task(priority: .userInitiated) { [self] in
+            await self.semanticRegrouping(
+                text: text,
+                nsText: text as NSString,
+                spans: spans,
+                annotatedSpans: annotated,
+                annotations: annotations,
+                treatSpanBoundariesAsAuthoritative: treatSpanBoundariesAsAuthoritative,
+                hardCuts: hardCuts
+            )
+        }.value
 
         let result = Result(annotatedSpans: annotated, semanticSpans: semantic)
         await Self.cache.store(result, for: key)
 
-        _ = Self.elapsedMilliseconds(since: start)
-        // CustomLogger.shared.info("[SpanReadingAttacher] Attached readings for \(spans.count) spans in \(String(format: \"%.3f\", duration)) ms.")
         Self.signposter.endInterval("AttachReadings Overall", overallInterval)
         return result
     }
@@ -213,20 +154,16 @@ struct SpanReadingAttacher {
         // Safety:
         //  • Never cross hard boundaries (punctuation / whitespace). We enforce contiguity and reject hard-boundary spans.
 
-        func passthroughSemanticSpans(reason: String?) -> [SemanticSpan] {
-            if let reason {
-                CustomLogger.shared.debug("[STAGE-2] bailout: \(reason)")
-            }
+        func passthroughSemanticSpans() -> [SemanticSpan] {
             return annotatedSpans.enumerated().map { idx, span in
                 SemanticSpan(range: span.span.range, surface: span.span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: span.readingKana)
             }
         }
 
         if Task.isCancelled {
-            return passthroughSemanticSpans(reason: "cancelled")
+            return passthroughSemanticSpans()
         }
 
-        ivlog("Stage2.5.mergeOnly start spans=\(spans.count)")
 
         // RANGE-SCOPED AUTHORITY (2026-01-05)
         // When the caller provides `baseSpans` (manual token edits), we must still run Stage-2.5,
@@ -269,7 +206,6 @@ struct SpanReadingAttacher {
                 // Explicit user splits are persisted separately as `hardCuts` and enforced below.
                 return insertedBoundaries
             } catch {
-                CustomLogger.shared.debug("[STAGE-2.5] authoritativeCuts: fallback (segmentation failed)")
                 return amendedEnds
             }
         }()
@@ -318,28 +254,12 @@ struct SpanReadingAttacher {
         }
 
         var counters = MergeOnlyCounters()
-        var rejectionSamplesRemaining = 20
-        var chainRejectionSamplesRemaining = 20
         var didLogLexiconUnavailable = false
         var didLogLexiconUnavailableChain = false
 
         @inline(__always)
         func fmtRange(_ r: NSRange) -> String {
             "\(r.location)-\(r.length)"
-        }
-
-        @inline(__always)
-        func logKanjiKanaReject(reason: String, A: String, ARange: NSRange, B: String, BRange: NSRange, combined: String) {
-            guard rejectionSamplesRemaining > 0 else { return }
-            rejectionSamplesRemaining -= 1
-            CustomLogger.shared.debug("[STAGE-2.5] kanjiKana reject reason=\(reason) A=«\(A)».(\(fmtRange(ARange))) B=«\(B)».(\(fmtRange(BRange))) combined=«\(combined)»")
-        }
-
-        @inline(__always)
-        func logKanjiKanaChainReject(reason: String, A: String, B: String, C: String, combined: String) {
-            guard chainRejectionSamplesRemaining > 0 else { return }
-            chainRejectionSamplesRemaining -= 1
-            CustomLogger.shared.debug("[STAGE-2.5] kanjiKanaChain reject reason=\(reason) A=«\(A)» B=«\(B)» C=«\(C)» combined=«\(combined)»")
         }
 
         struct Segment {
@@ -601,7 +521,6 @@ struct SpanReadingAttacher {
             pass += 1
             counters.passCount = pass
             let beforeCount = segments.count
-            ivlog("Stage2.5.mergeOnly pass=\(pass) spans=\(beforeCount)")
 
             var didMerge = false
             var i = 0
@@ -647,21 +566,16 @@ struct SpanReadingAttacher {
                     let rightSeg = segments[i + 1]
                     let left = surface(of: leftSeg)
                     let right = surface(of: rightSeg)
-                    let combinedSurface = left + right
 
                     let contiguous = NSMaxRange(leftSeg.range) == rightSeg.range.location
                     if contiguous == false {
                         counters.kanjiKanaRejected_notContiguous += 1
-                        logKanjiKanaReject(reason: "notContiguous", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
                     } else if isHardBoundarySurface(left) || isHardBoundarySurface(right) {
                         counters.kanjiKanaRejected_hardBoundary += 1
-                        logKanjiKanaReject(reason: "hardBoundary", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
                     } else if endsWithKanji(leftSeg) == false {
                         counters.kanjiKanaRejected_leftEndNotKanji += 1
-                        logKanjiKanaReject(reason: "leftEndNotKanji", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
                     } else if isHiraganaOnly(right) == false {
                         counters.kanjiKanaRejected_rightNotAllHiragana += 1
-                        logKanjiKanaReject(reason: "rightNotAllHiragana", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
                     } else {
                         counters.kanjiKanaCandidates += 1
                         let combinedRange = NSRange(location: leftSeg.range.location, length: leftSeg.range.length + rightSeg.range.length)
@@ -689,7 +603,9 @@ struct SpanReadingAttacher {
                                 lexiconOk = trie.containsWord(in: nsText, from: combinedRange.location, through: NSMaxRange(combinedRange), requireKanji: true)
                             } else if didLogLexiconUnavailable == false {
                                 didLogLexiconUnavailable = true
-                                CustomLogger.shared.debug("[STAGE-2.5] kanjiKana: lexicon unavailable (cached trie missing); lexicon check disabled")
+                                if Self.stage2DebugLoggingEnabled {
+                                    CustomLogger.shared.debug("[STAGE-2.5] kanjiKana: lexicon unavailable (cached trie missing); lexicon check disabled")
+                                }
                             }
                         }
 
@@ -704,7 +620,6 @@ struct SpanReadingAttacher {
                             if lexiconOk == false {
                                 counters.kanjiKanaRejected_notInLexiconSurfaceSet += 1
                             }
-                            logKanjiKanaReject(reason: "noMecabCrossingToken+lexicon", A: left, ARange: leftSeg.range, B: right, BRange: rightSeg.range, combined: combinedSurface)
                         }
                     }
                 }
@@ -777,22 +692,17 @@ struct SpanReadingAttacher {
                     let a = surface(of: aSeg)
                     let b = surface(of: bSeg)
                     let c = surface(of: cSeg)
-                    let combinedSurface = a + b + c
 
                     let abContig = NSMaxRange(aSeg.range) == bSeg.range.location
                     let bcContig = NSMaxRange(bSeg.range) == cSeg.range.location
                     if abContig == false || bcContig == false {
                         counters.kanjiKanaChainRejected_notContiguous += 1
-                        logKanjiKanaChainReject(reason: "notContiguous", A: a, B: b, C: c, combined: combinedSurface)
                     } else if isHardBoundarySurface(a) || isHardBoundarySurface(b) || isHardBoundarySurface(c) {
                         counters.kanjiKanaChainRejected_hardBoundary += 1
-                        logKanjiKanaChainReject(reason: "hardBoundary", A: a, B: b, C: c, combined: combinedSurface)
                     } else if containsKanji(a) == false {
                         counters.kanjiKanaChainRejected_leftNoKanji += 1
-                        logKanjiKanaChainReject(reason: "leftNoKanji", A: a, B: b, C: c, combined: combinedSurface)
                     } else if isHiraganaOnly(b) == false || isHiraganaOnly(c) == false {
                         counters.kanjiKanaChainRejected_BorCNotAllHiragana += 1
-                        logKanjiKanaChainReject(reason: "BorCNotAllHiragana", A: a, B: b, C: c, combined: combinedSurface)
                     } else {
                         counters.kanjiKanaChainCandidates += 1
                         let combinedRange = NSRange(location: aSeg.range.location, length: aSeg.range.length + bSeg.range.length + cSeg.range.length)
@@ -813,9 +723,10 @@ struct SpanReadingAttacher {
                                 counters.kanjiKanaChainRejected_notInLexiconSurfaceSet += 1
                                 if didLogLexiconUnavailableChain == false {
                                     didLogLexiconUnavailableChain = true
-                                    CustomLogger.shared.debug("[STAGE-2.5] kanjiKanaChain: lexicon unavailable (cached trie missing); lexicon check disabled")
+                                    if Self.stage2DebugLoggingEnabled {
+                                        CustomLogger.shared.debug("[STAGE-2.5] kanjiKanaChain: lexicon unavailable (cached trie missing); lexicon check disabled")
+                                    }
                                 }
-                                logKanjiKanaChainReject(reason: "lexiconUnavailable", A: a, B: b, C: c, combined: combinedSurface)
                             }
                         }
 
@@ -828,7 +739,6 @@ struct SpanReadingAttacher {
                         } else {
                             counters.kanjiKanaChainRejected_noMecabSingleTokenCover += 1
                             counters.kanjiKanaChainRejected_notInLexiconSurfaceSet += 1
-                            logKanjiKanaChainReject(reason: "mecabCover+lexicon", A: a, B: b, C: c, combined: combinedSurface)
                         }
                     }
                 }
@@ -855,20 +765,21 @@ struct SpanReadingAttacher {
         }
 
         counters.spansEnd = segments.count
-        ivlog("Stage2.5.mergeOnly end spansIn=\(spans.count) spansOut=\(semantic.count)")
 
-        CustomLogger.shared.debug(
-            "[STAGE-2.5] mergeOnly summary passes=\(counters.passCount) spans start=\(counters.spansStart) end=\(counters.spansEnd) " +
-            "mecabBlanket=\(counters.mecabBlanketMerges) " +
-            "kanjiKana cand=\(counters.kanjiKanaCandidates) ok=\(counters.kanjiKanaAccepted) " +
-            "rej(HB=\(counters.kanjiKanaRejected_hardBoundary) contig=\(counters.kanjiKanaRejected_notContiguous) " +
-            "leftEndKanji=\(counters.kanjiKanaRejected_leftEndNotKanji) rightHira=\(counters.kanjiKanaRejected_rightNotAllHiragana) " +
-            "mecabCross=\(counters.kanjiKanaRejected_noMecabCrossingToken) lex=\(counters.kanjiKanaRejected_notInLexiconSurfaceSet)) " +
-            "kanjiKanaChain cand=\(counters.kanjiKanaChainCandidates) ok=\(counters.kanjiKanaChainAccepted) " +
-            "rej(HB=\(counters.kanjiKanaChainRejected_hardBoundary) contig=\(counters.kanjiKanaChainRejected_notContiguous) " +
-            "leftKanji=\(counters.kanjiKanaChainRejected_leftNoKanji) hira=\(counters.kanjiKanaChainRejected_BorCNotAllHiragana) " +
-            "mecab=\(counters.kanjiKanaChainRejected_noMecabSingleTokenCover) lex=\(counters.kanjiKanaChainRejected_notInLexiconSurfaceSet))"
-        )
+        if Self.stage2DebugLoggingEnabled {
+            CustomLogger.shared.debug(
+                "[STAGE-2.5] mergeOnly summary passes=\(counters.passCount) spans start=\(counters.spansStart) end=\(counters.spansEnd) " +
+                "mecabBlanket=\(counters.mecabBlanketMerges) " +
+                "kanjiKana cand=\(counters.kanjiKanaCandidates) ok=\(counters.kanjiKanaAccepted) " +
+                "rej(HB=\(counters.kanjiKanaRejected_hardBoundary) contig=\(counters.kanjiKanaRejected_notContiguous) " +
+                "leftEndKanji=\(counters.kanjiKanaRejected_leftEndNotKanji) rightHira=\(counters.kanjiKanaRejected_rightNotAllHiragana) " +
+                "mecabCross=\(counters.kanjiKanaRejected_noMecabCrossingToken) lex=\(counters.kanjiKanaRejected_notInLexiconSurfaceSet)) " +
+                "kanjiKanaChain cand=\(counters.kanjiKanaChainCandidates) ok=\(counters.kanjiKanaChainAccepted) " +
+                "rej(HB=\(counters.kanjiKanaChainRejected_hardBoundary) contig=\(counters.kanjiKanaChainRejected_notContiguous) " +
+                "leftKanji=\(counters.kanjiKanaChainRejected_leftNoKanji) hira=\(counters.kanjiKanaChainRejected_BorCNotAllHiragana) " +
+                "mecab=\(counters.kanjiKanaChainRejected_noMecabSingleTokenCover) lex=\(counters.kanjiKanaChainRejected_notInLexiconSurfaceSet))"
+            )
+        }
         return semantic
     }
 

@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
+    @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
@@ -20,9 +21,11 @@ struct SettingsView: View {
     @AppStorage(WordOfTheDayScheduler.hourKey) private var wotdHour: Int = 9
     @AppStorage(WordOfTheDayScheduler.minuteKey) private var wotdMinute: Int = 0
 
-    @AppStorage("rubyDebugHUD") private var rubyDebugHUD: Bool = false
+    @AppStorage("debugViewMetricsHUD") private var debugViewMetricsHUD: Bool = false
     @AppStorage("rubyDebugRects") private var rubyDebugRects: Bool = false
-    @AppStorage("rubyDebugLineBands") private var rubyDebugLineBands: Bool = false
+    @AppStorage("rubyHeadwordDebugRects") private var rubyHeadwordDebugRects: Bool = false
+    @AppStorage("rubyHeadwordLineBands") private var rubyHeadwordLineBands: Bool = false
+    @AppStorage("rubyFuriganaLineBands") private var rubyFuriganaLineBands: Bool = false
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
 
@@ -43,6 +46,22 @@ struct SettingsView: View {
     @State private var pendingReadingTextSize: Double = 17
     @State private var pendingReadingFuriganaSize: Double = 9
     @State private var pendingReadingLineSpacing: Double = 4
+
+    init() {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "debugViewMetricsHUD") == nil,
+           defaults.object(forKey: "rubyDebugHUD") != nil {
+            defaults.set(defaults.bool(forKey: "rubyDebugHUD"), forKey: "debugViewMetricsHUD")
+        }
+        if defaults.object(forKey: "rubyHeadwordLineBands") == nil,
+           defaults.bool(forKey: "rubyDebugLineBands") {
+            defaults.set(true, forKey: "rubyHeadwordLineBands")
+        }
+        if defaults.object(forKey: "rubyFuriganaLineBands") == nil,
+           defaults.bool(forKey: "rubyDebugLineBands") {
+            defaults.set(true, forKey: "rubyFuriganaLineBands")
+        }
+    }
 
     private static let previewPlainLine = "かなだけのぎょうです。"
     private static let previewFuriganaLine = "京都で日本語を勉強しています。"
@@ -104,6 +123,7 @@ struct SettingsView: View {
             .onChange(of: readingTextSize) { _, newValue in syncPendingTextSize(to: newValue) }
             .onChange(of: readingFuriganaSize) { _, newValue in syncPendingFuriganaSize(to: newValue) }
             .onChange(of: readingLineSpacing) { _, newValue in syncPendingLineSpacing(to: newValue) }
+            .onChange(of: readingHeadwordSpacingPadding) { _, _ in schedulePreviewRebuild() }
             .onDisappear { previewRebuildTask?.cancel() }
             .onChange(of: wotdEnabled) { _, _ in Task { await rescheduleWordOfTheDay() } }
             .onChange(of: wotdHour) { _, _ in Task { await rescheduleWordOfTheDay() } }
@@ -177,6 +197,9 @@ struct SettingsView: View {
                     if editing == false { readingLineSpacing = pendingReadingLineSpacing }
                 }
             )
+
+            Toggle("Pad headwords when furigana are wider", isOn: $readingHeadwordSpacingPadding)
+                .toggleStyle(.switch)
 
         }
     }
@@ -259,10 +282,12 @@ struct SettingsView: View {
     private var debugSection: some View {
         Section("Debug") {
             Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
-            Toggle("Ruby HUD", isOn: $rubyDebugHUD)
-            Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
-            Toggle("Ruby line/furigana bands", isOn: $rubyDebugLineBands)
+            Toggle("View metrics", isOn: $debugViewMetricsHUD)
             Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
+            Toggle("Headword debug rects", isOn: $rubyHeadwordDebugRects)
+            Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
+            Toggle("Headword line bands", isOn: $rubyHeadwordLineBands)
+            Toggle("Ruby line bands", isOn: $rubyFuriganaLineBands)
         }
     }
 
@@ -384,10 +409,16 @@ struct SettingsView: View {
         let text = previewText
         let textSize = pendingReadingTextSize
         let furiganaSize = pendingReadingFuriganaSize
+        let spacingEnabled = readingHeadwordSpacingPadding
 
         previewRebuildTask?.cancel()
         previewRebuildTask = Task {
-            await rebuildPreviewAttributedText(text: text, textSize: textSize, furiganaSize: furiganaSize)
+            await rebuildPreviewAttributedText(
+                text: text,
+                textSize: textSize,
+                furiganaSize: furiganaSize,
+                padHeadwordSpacing: spacingEnabled
+            )
         }
     }
 
@@ -446,7 +477,12 @@ struct SettingsView: View {
         await refreshWordOfTheDayStatus()
     }
 
-    private func rebuildPreviewAttributedText(text: String, textSize: Double, furiganaSize: Double) async {
+    private func rebuildPreviewAttributedText(
+        text: String,
+        textSize: Double,
+        furiganaSize: Double,
+        padHeadwordSpacing: Bool
+    ) async {
         let stage2 = await ensurePreviewStage2(for: text)
         if Task.isCancelled { return }
         let attributed = FuriganaAttributedTextBuilder.project(
@@ -454,7 +490,8 @@ struct SettingsView: View {
             semanticSpans: stage2.semantic,
             textSize: textSize,
             furiganaSize: furiganaSize,
-            context: "SettingsPreview"
+            context: "SettingsPreview",
+            padHeadwordSpacing: padHeadwordSpacing
         )
         if Task.isCancelled { return }
         await MainActor.run {

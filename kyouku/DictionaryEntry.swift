@@ -51,8 +51,8 @@ struct SurfaceReadingOverride: Hashable, Sendable {
 
 
 enum DictionarySearchMode {
-    case auto
-    case englishFirst
+    case japanese
+    case english
 }
 
 
@@ -92,11 +92,13 @@ actor DictionarySQLiteStore {
         let normalized = normalizeFullWidthASCII(trimmed)
 
         // When English is explicitly requested, prioritize gloss search.
-        if case .englishFirst = mode {
-            let results = try selectEntriesByGloss(matching: normalized, limit: limit)
-            if !results.isEmpty { return results }
-            // Fall back to the default lookup path.
-            return try lookupSync(term: term, limit: limit, mode: .auto)
+        if case .english = mode {
+            let englishResults = try selectEntriesByGloss(matching: normalized, limit: limit)
+            if englishResults.isEmpty == false {
+                return englishResults
+            }
+            // User might have typed Japanese while EN is selected; fall back to the JP pipeline.
+            return try lookupSync(term: term, limit: limit, mode: .japanese)
         }
 
         // Default behavior: prefer Japanese surface/readings, then gloss.
@@ -117,18 +119,16 @@ actor DictionarySQLiteStore {
                 if !results.isEmpty { return results }
             }
 
-            // English gloss search via FTS (works for both English and romaji-like Latin strings).
-            results = try selectEntriesByGloss(matching: normalized, limit: limit)
-            return results
+            // For JP mode we stop here so English words don't fall through to gloss hits.
+            return []
         }
 
         // 2b) Surface substring match via indexed tokens if no hits yet
         results = try selectEntriesBySurfaceToken(matching: normalized, limit: limit)
         if !results.isEmpty { return results }
 
-        // 3) English gloss search via FTS
-        results = try selectEntriesByGloss(matching: normalized, limit: limit)
-        return results
+        // 3) English gloss search is reserved for explicit EN queries, so JP lookups end here.
+        return []
     }
 
     private func looksLikeLatinQuery(_ text: String) -> Bool {
@@ -184,7 +184,7 @@ actor DictionarySQLiteStore {
         // Actor isolation ensures safe access to `db`, but the SQL work can still be heavy.
         // We keep the work inside the actor; since callers are often on @MainActor,
         // the `await` prevents blocking UI.
-        try lookupSync(term: term, limit: limit, mode: .auto)
+        try lookupSync(term: term, limit: limit, mode: .japanese)
     }
 
     /// Variant that allows callers to influence how the query is interpreted

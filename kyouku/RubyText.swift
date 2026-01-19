@@ -1,6 +1,10 @@
 import SwiftUI
 import UIKit
 
+private let RubyDebugBoundingDefaultStrokeColor = UIColor.systemPink.withAlphaComponent(0.9)
+private let RubyDebugBoundingDarkModeStrokeColor = UIColor(white: 1.0, alpha: 0.92)
+private let RubyDebugBoundingDashPattern: [NSNumber] = [4, 3]
+
 extension Notification.Name {
     static let kyoukuSplitPaneScrollSync = Notification.Name("kyouku.splitPane.scrollSync")
 }
@@ -60,6 +64,16 @@ enum RubyContextMenuAction {
 }
 
 struct RubyText: UIViewRepresentable {
+    struct ViewMetricsContext: Equatable {
+        var pasteAreaFrame: CGRect?
+        var tokenPanelFrame: CGRect?
+
+        init(pasteAreaFrame: CGRect? = nil, tokenPanelFrame: CGRect? = nil) {
+            self.pasteAreaFrame = pasteAreaFrame
+            self.tokenPanelFrame = tokenPanelFrame
+        }
+    }
+
     var attributed: NSAttributedString
     var fontSize: CGFloat
     var lineHeightMultiple: CGFloat
@@ -73,9 +87,11 @@ struct RubyText: UIViewRepresentable {
     var horizontalScrollEnabled: Bool = false
     var scrollSyncGroupID: String? = nil
     var tokenOverlays: [TokenOverlay] = []
+    var tokenColorPalette: [UIColor] = []
     var semanticSpans: [SemanticSpan] = []
     var selectedRange: NSRange? = nil
     var customizedRanges: [NSRange] = []
+    var alternateTokenColorsEnabled: Bool = false
     var enableTapInspection: Bool = true
     var enableDragSelection: Bool = false
     var onDragSelectionBegan: (() -> Void)? = nil
@@ -84,8 +100,12 @@ struct RubyText: UIViewRepresentable {
     var onSpanSelection: ((RubySpanSelection?) -> Void)? = nil
     var contextMenuStateProvider: (() -> RubyContextMenuState?)? = nil
     var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
+    var viewMetricsContext: ViewMetricsContext? = nil
 
     private static let defaultInsets = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+    private static let verboseRubyLoggingEnabled: Bool = {
+        ProcessInfo.processInfo.environment["RUBY_TRACE"] == "1"
+    }()
 
     struct TokenOverlay: Equatable {
         let range: NSRange
@@ -128,6 +148,9 @@ struct RubyText: UIViewRepresentable {
         textView.characterTapHandler = onCharacterTap
         textView.contextMenuStateProvider = contextMenuStateProvider
         textView.contextMenuActionHandler = onContextMenuAction
+        textView.viewMetricsContext = viewMetricsContext
+        textView.tokenColorPalette = tokenColorPalette
+        textView.alternateTokenColorsEnabled = alternateTokenColorsEnabled
         textView.delegate = context.coordinator
 
         context.coordinator.attach(textView: textView, scrollSyncGroupID: scrollSyncGroupID)
@@ -322,6 +345,9 @@ struct RubyText: UIViewRepresentable {
         uiView.characterTapHandler = onCharacterTap
         uiView.contextMenuStateProvider = contextMenuStateProvider
         uiView.contextMenuActionHandler = onContextMenuAction
+        uiView.viewMetricsContext = viewMetricsContext
+        uiView.tokenColorPalette = tokenColorPalette
+        uiView.alternateTokenColorsEnabled = alternateTokenColorsEnabled
 
         context.coordinator.stateProvider = contextMenuStateProvider
         context.coordinator.actionHandler = onContextMenuAction
@@ -398,7 +424,7 @@ struct RubyText: UIViewRepresentable {
         }
 
         let shouldLog = (proposedWidth == nil) || abs(uiView.bounds.width - snappedBaseWidth) > 0.5
-        if shouldLog {
+        if Self.verboseRubyLoggingEnabled && shouldLog {
             let message = String(
                 format: "MEASURE sizeThatFits proposalWidth=%@ baseWidth=%.2f boundsWidth=%.2f insetL=%.2f insetR=%.2f padding=%.2f containerW=%.2f",
                 String(describing: proposedWidth),
@@ -796,7 +822,62 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     // Geometry for highlights + ruby anchoring is derived via TextKit 2 (`textLayoutManager`)
     // with `selectionRects(for:)` as a UI-safe fallback.
 
-    var semanticSpans: [SemanticSpan] = []
+    var semanticSpans: [SemanticSpan] = [] {
+        didSet {
+            if headwordDebugRectsEnabled {
+                updateHeadwordDebugRects()
+            }
+            updateHeadwordBoundingRects()
+            // Keep debug overlays and token hit-testing in sync without requiring the
+            // headword debug toggle to be active.
+            setNeedsLayout()
+        }
+    }
+
+    var viewMetricsContext: RubyText.ViewMetricsContext? {
+        didSet {
+            guard viewMetricsHUDEnabled else { return }
+            if oldValue != viewMetricsContext {
+                setNeedsLayout()
+            }
+        }
+    }
+
+    var alternateTokenColorsEnabled: Bool = false {
+        didSet {
+            guard oldValue != alternateTokenColorsEnabled else { return }
+            updateDebugBoundingStrokeAppearance()
+        }
+    }
+
+    var tokenColorPalette: [UIColor] = [] {
+        didSet {
+            guard TokenOverlayTextView.colorsEquivalent(tokenColorPalette, oldValue) == false else { return }
+            updateDebugBoundingStrokeAppearance()
+        }
+    }
+
+    private static func colorsEquivalent(_ lhs: [UIColor], _ rhs: [UIColor]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (left, right) in zip(lhs, rhs) {
+            if left.isEqual(right) == false { return false }
+        }
+        return true
+    }
+
+    private static func emphasizedDebugStrokeColor(from color: UIColor) -> UIColor {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        if color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+            let mix: (CGFloat) -> CGFloat = { min(1.0, $0 * 0.85 + 0.15) }
+            let targetAlpha = max(0.85, alpha)
+            return UIColor(red: mix(red), green: mix(green), blue: mix(blue), alpha: targetAlpha)
+        }
+        let fallbackAlpha = max(0.85, color.cgColor.alpha)
+        return color.withAlphaComponent(fallbackAlpha)
+    }
 
     // Cache a lightweight signature of the last fully applied attributed rendering.
     // This helps avoid reassigning `attributedText` on highlight-only updates.
@@ -826,7 +907,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard oldValue != selectionHighlightRange else { return }
             needsHighlightUpdate = true
             setNeedsLayout()
-            CustomLogger.shared.debug("selectionHighlightRange didSet -> setNeedsLayout (range=\(String(describing: selectionHighlightRange)))")
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug("selectionHighlightRange didSet -> setNeedsLayout (range=\(String(describing: selectionHighlightRange)))")
+            }
         }
     }
 
@@ -835,7 +918,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard oldValue != selectionHighlightInsets else { return }
             needsHighlightUpdate = true
             setNeedsLayout()
-            CustomLogger.shared.debug(String(format: "selectionHighlightInsets didSet -> setNeedsLayout (top=%.2f left=%.2f bottom=%.2f right=%.2f)", selectionHighlightInsets.top, selectionHighlightInsets.left, selectionHighlightInsets.bottom, selectionHighlightInsets.right))
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug(String(format: "selectionHighlightInsets didSet -> setNeedsLayout (top=%.2f left=%.2f bottom=%.2f right=%.2f)", selectionHighlightInsets.top, selectionHighlightInsets.left, selectionHighlightInsets.bottom, selectionHighlightInsets.right))
+            }
         }
     }
 
@@ -944,7 +1029,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard oldValue != rubyHighlightHeadroom else { return }
             needsHighlightUpdate = true
             setNeedsLayout()
-            CustomLogger.shared.debug(String(format: "rubyHighlightHeadroom didSet -> setNeedsLayout (headroom=%.2f)", rubyHighlightHeadroom))
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug(String(format: "rubyHighlightHeadroom didSet -> setNeedsLayout (headroom=%.2f)", rubyHighlightHeadroom))
+            }
             invalidateIntrinsicContentSize()
         }
     }
@@ -981,45 +1068,107 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         ProcessInfo.processInfo.environment["RUBY_TRACE"] == "1"
     }()
 
-    private static let rubyDebugHUDDefaultsKey = "rubyDebugHUD"
+    private static let legacyRubyDebugHUDDefaultsKey = "rubyDebugHUD"
+    private static let viewMetricsHUDDefaultsKey = "debugViewMetricsHUD"
     private static let rubyDebugRectsDefaultsKey = "rubyDebugRects"
+    private static let headwordDebugRectsDefaultsKey = "rubyHeadwordDebugRects"
     private static let rubyDebugLineBandsDefaultsKey = "rubyDebugLineBands"
+    private static let headwordLineBandsDefaultsKey = "rubyHeadwordLineBands"
+    private static let rubyLineBandsDefaultsKey = "rubyFuriganaLineBands"
 
-    private var rubyDebugHUDEnabled: Bool {
-        UserDefaults.standard.bool(forKey: Self.rubyDebugHUDDefaultsKey)
+    private var viewMetricsHUDEnabled: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: Self.viewMetricsHUDDefaultsKey) != nil {
+            return defaults.bool(forKey: Self.viewMetricsHUDDefaultsKey)
+        }
+        return defaults.bool(forKey: Self.legacyRubyDebugHUDDefaultsKey)
     }
 
     private var rubyDebugRectsEnabled: Bool {
         UserDefaults.standard.bool(forKey: Self.rubyDebugRectsDefaultsKey)
     }
 
-    private var rubyDebugLineBandsEnabled: Bool {
-        UserDefaults.standard.bool(forKey: Self.rubyDebugLineBandsDefaultsKey)
+    private var headwordDebugRectsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.headwordDebugRectsDefaultsKey)
     }
 
-    private var userDefaultsObserver: NSObjectProtocol? = nil
+    private var headwordLineBandsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.headwordLineBandsDefaultsKey)
+    }
 
-    private var lastTextContainerIdentity: ObjectIdentifier? = nil
+    private var rubyLineBandsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.rubyLineBandsDefaultsKey)
+    }
 
-    private let rubyDebugHUDLabel: UILabel = {
+    private lazy var viewMetricsHUDLabel: UILabel = {
         let label = UILabel()
         label.numberOfLines = 0
-        label.font = UIFont.monospacedSystemFont(ofSize: 10, weight: .regular)
-        label.textColor = UIColor.systemYellow
+        label.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        label.textColor = UIColor.white
         label.backgroundColor = UIColor.black.withAlphaComponent(0.65)
-        label.layer.cornerRadius = 8
+        label.layer.cornerRadius = 6
         label.layer.masksToBounds = true
         label.isUserInteractionEnabled = false
-        label.isHidden = true
         return label
     }()
+
+    private var userDefaultsObserver: NSObjectProtocol? = nil
+    private var lastTextContainerIdentity: ObjectIdentifier? = nil
+
+    private struct DebugColorKey: Hashable {
+        let red: UInt16
+        let green: UInt16
+        let blue: UInt16
+        let alpha: UInt16
+
+        init(color: UIColor) {
+            var r: CGFloat = 0
+            var g: CGFloat = 0
+            var b: CGFloat = 0
+            var a: CGFloat = 0
+            if color.getRed(&r, green: &g, blue: &b, alpha: &a) == false {
+                if let components = color.cgColor.components {
+                    switch components.count {
+                    case 2:
+                        r = components[0]
+                        g = components[0]
+                        b = components[0]
+                        a = components[1]
+                    case 3:
+                        r = components[0]
+                        g = components[1]
+                        b = components[2]
+                        a = color.cgColor.alpha
+                    case 4...:
+                        r = components[0]
+                        g = components[1]
+                        b = components[2]
+                        a = components[3]
+                    default:
+                        r = 0
+                        g = 0
+                        b = 0
+                        a = 1
+                    }
+                }
+            }
+            func quantize(_ component: CGFloat) -> UInt16 {
+                let clamped = max(0, min(1, component))
+                return UInt16(clamping: Int(round(clamped * 1000)))
+            }
+            self.red = quantize(r)
+            self.green = quantize(g)
+            self.blue = quantize(b)
+            self.alpha = quantize(a)
+        }
+    }
 
     private let rubyDebugRectsLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
         layer.fillColor = UIColor.clear.cgColor
-        layer.strokeColor = UIColor.systemPink.withAlphaComponent(0.9).cgColor
+        layer.strokeColor = RubyDebugBoundingDefaultStrokeColor.cgColor
         layer.lineWidth = 1.0
-        layer.lineDashPattern = [4, 3]
+        layer.lineDashPattern = RubyDebugBoundingDashPattern
         layer.actions = [
             "path": NSNull(),
             "position": NSNull(),
@@ -1030,6 +1179,40 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         layer.isHidden = true
         return layer
     }()
+
+    private let headwordBoundingRectsLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.black.withAlphaComponent(0.75).cgColor
+        layer.lineWidth = 1.0
+        layer.lineDashPattern = RubyDebugBoundingDashPattern
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        layer.zPosition = 40
+        return layer
+    }()
+
+    private let headwordDebugRectsContainerLayer: CALayer = {
+        let layer = CALayer()
+        layer.masksToBounds = false
+        layer.actions = [
+            "sublayers": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        return layer
+    }()
+
+    private var headwordDebugRectLayers: [DebugColorKey: CAShapeLayer] = [:]
 
     private let rubyDebugLineBandsContainerLayer: CALayer = {
         let layer = CALayer()
@@ -1046,13 +1229,11 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         return layer
     }()
 
-    private let rubyDebugGlyphBoundsLayerEven: CAShapeLayer = {
-        let layer = CAShapeLayer()
-        layer.fillColor = UIColor.clear.cgColor
-        layer.strokeColor = UIColor.systemCyan.withAlphaComponent(0.95).cgColor
-        layer.lineWidth = 1.0
+    private let rubyDebugGlyphBoundsContainerLayer: CALayer = {
+        let layer = CALayer()
+        layer.masksToBounds = false
         layer.actions = [
-            "path": NSNull(),
+            "sublayers": NSNull(),
             "position": NSNull(),
             "bounds": NSNull(),
             "opacity": NSNull(),
@@ -1062,11 +1243,43 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         return layer
     }()
 
-    private let rubyDebugGlyphBoundsLayerOdd: CAShapeLayer = {
+    private var rubyDebugGlyphLayers: [DebugColorKey: CAShapeLayer] = [:]
+
+    private func installHeadwordDebugContainerIfNeeded() {
+        if headwordDebugRectsContainerLayer.superlayer == nil {
+            headwordDebugRectsContainerLayer.contentsScale = traitCollection.displayScale
+            headwordDebugRectsContainerLayer.zPosition = 45
+            layer.addSublayer(headwordDebugRectsContainerLayer)
+        }
+    }
+
+    private func installRubyDebugGlyphContainerIfNeeded() {
+        if rubyDebugGlyphBoundsContainerLayer.superlayer == nil {
+            rubyDebugGlyphBoundsContainerLayer.contentsScale = traitCollection.displayScale
+            rubyDebugGlyphBoundsContainerLayer.zPosition = 60
+            layer.addSublayer(rubyDebugGlyphBoundsContainerLayer)
+        }
+    }
+
+    private func resolvedDisplayColor(_ color: UIColor) -> UIColor {
+        if #available(iOS 13.0, *) {
+            return color.resolvedColor(with: traitCollection)
+        }
+        return color
+    }
+
+    private func sanitizedStrokeColor(from color: UIColor?) -> UIColor? {
+        guard let color else { return nil }
+        let resolved = resolvedDisplayColor(color)
+        guard resolved.cgColor.alpha > 0 else { return nil }
+        return Self.emphasizedDebugStrokeColor(from: resolved)
+    }
+
+    private func makeDebugShapeLayer(zPosition: CGFloat) -> CAShapeLayer {
         let layer = CAShapeLayer()
         layer.fillColor = UIColor.clear.cgColor
-        layer.strokeColor = UIColor.systemPink.withAlphaComponent(0.95).cgColor
         layer.lineWidth = 1.0
+        layer.lineDashPattern = RubyDebugBoundingDashPattern
         layer.actions = [
             "path": NSNull(),
             "position": NSNull(),
@@ -1075,8 +1288,90 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             "hidden": NSNull()
         ]
         layer.isHidden = true
+        layer.zPosition = zPosition
         return layer
-    }()
+    }
+
+    private func applyDebugPaths(
+        _ pathsByKey: [DebugColorKey: CGMutablePath],
+        colorsByKey: [DebugColorKey: UIColor],
+        storage: inout [DebugColorKey: CAShapeLayer],
+        container: CALayer,
+        frame: CGRect,
+        zPosition: CGFloat
+    ) {
+        let activeKeys = Set(pathsByKey.keys)
+        let staleKeys = Set(storage.keys).subtracting(activeKeys)
+        for key in staleKeys {
+            if let layer = storage[key] {
+                layer.removeFromSuperlayer()
+            }
+            storage.removeValue(forKey: key)
+        }
+
+        container.frame = frame
+        for (key, path) in pathsByKey {
+            guard let color = colorsByKey[key] else { continue }
+            let layer: CAShapeLayer
+            if let existing = storage[key] {
+                layer = existing
+            } else {
+                let newLayer = makeDebugShapeLayer(zPosition: zPosition)
+                container.addSublayer(newLayer)
+                storage[key] = newLayer
+                layer = newLayer
+            }
+            layer.strokeColor = color.cgColor
+            layer.frame = container.bounds
+            layer.path = path.isEmpty ? nil : path
+            layer.isHidden = path.isEmpty
+        }
+
+        container.isHidden = pathsByKey.isEmpty
+    }
+
+    private func resetHeadwordDebugLayers() {
+        for (_, layer) in headwordDebugRectLayers {
+            layer.removeFromSuperlayer()
+        }
+        headwordDebugRectLayers.removeAll()
+        headwordDebugRectsContainerLayer.isHidden = true
+    }
+
+    private func resetRubyDebugGlyphLayers() {
+        for (_, layer) in rubyDebugGlyphLayers {
+            layer.removeFromSuperlayer()
+        }
+        rubyDebugGlyphLayers.removeAll()
+        rubyDebugGlyphBoundsContainerLayer.isHidden = true
+    }
+
+    private func resolvedColorForSemanticSpan(_ span: SemanticSpan) -> UIColor? {
+        guard let attributedText, attributedText.length > 0 else { return nil }
+        let documentRange = NSRange(location: 0, length: attributedText.length)
+        let bounded = NSIntersectionRange(span.range, documentRange)
+        guard bounded.length > 0 else { return nil }
+
+        let backing = attributedText.string as NSString
+        let sampleLimit = min(bounded.length, 64)
+        for offset in 0..<sampleLimit {
+            let idx = bounded.location + offset
+            if idx >= attributedText.length { break }
+            let character = backing.character(at: idx)
+            if let scalar = UnicodeScalar(character),
+               CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                continue
+            }
+            if let color = attributedText.attribute(.foregroundColor, at: idx, effectiveRange: nil) as? UIColor {
+                return resolvedDisplayColor(color)
+            }
+        }
+
+        if let fallback = attributedText.attribute(.foregroundColor, at: bounded.location, effectiveRange: nil) as? UIColor {
+            return resolvedDisplayColor(fallback)
+        }
+        return resolvedDisplayColor(textColor ?? UIColor.label)
+    }
 
     private let baseLineEvenLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
@@ -1164,12 +1459,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             //   positioning it relative to `contentOffset`.
             // - Line bands are viewport-derived (TextKit 2 is often viewport-lazy), so update
             //   them on scroll, but coalesce to the next runloop.
-            if rubyDebugHUDEnabled {
-                updateRubyDebugHUD()
+            if viewMetricsHUDEnabled {
+                updateViewMetricsHUD()
             }
-            if rubyDebugLineBandsEnabled || rubyDebugRectsEnabled {
+            if headwordLineBandsEnabled || rubyLineBandsEnabled || rubyDebugRectsEnabled {
                 scheduleDebugOverlaysUpdate()
             }
+            warmVisibleSemanticSpanLayoutIfNeeded()
         }
     }
 
@@ -1180,7 +1476,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard let self else { return }
             self.scrollRedrawScheduled = false
 
-            if self.rubyDebugLineBandsEnabled {
+            if self.headwordLineBandsEnabled || self.rubyLineBandsEnabled {
                 self.updateRubyDebugLineBands()
             }
             if self.rubyDebugRectsEnabled {
@@ -1188,6 +1484,32 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 self.updateRubyDebugGlyphBounds()
             }
         }
+    }
+
+    private func updateDebugBoundingStrokeAppearance() {
+        let strokeColor = resolvedDebugStrokeColor(at: 0) ?? resolvedDebugBoundingStrokeColor()
+        rubyDebugRectsLayer.strokeColor = strokeColor.cgColor
+        rubyDebugRectsLayer.lineDashPattern = RubyDebugBoundingDashPattern
+
+        if headwordDebugRectsEnabled {
+            updateHeadwordDebugRects()
+        }
+        if rubyDebugRectsEnabled {
+            updateRubyDebugGlyphBounds()
+        }
+    }
+
+    private func resolvedDebugBoundingStrokeColor() -> UIColor {
+        if traitCollection.userInterfaceStyle == .dark && alternateTokenColorsEnabled == false {
+            return RubyDebugBoundingDarkModeStrokeColor
+        }
+        return RubyDebugBoundingDefaultStrokeColor
+    }
+
+    private func resolvedDebugStrokeColor(at index: Int) -> UIColor? {
+        guard alternateTokenColorsEnabled else { return nil }
+        guard index >= 0 && index < tokenColorPalette.count else { return nil }
+        return TokenOverlayTextView.emphasizedDebugStrokeColor(from: tokenColorPalette[index])
     }
 
     private func scheduleScrollRedraw() {
@@ -1289,24 +1611,33 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         highlightOverlayContainerLayer.addSublayer(baseHighlightLayer)
         layer.addSublayer(highlightOverlayContainerLayer)
 
-        if rubyDebugHUDEnabled {
-            addSubview(rubyDebugHUDLabel)
-            rubyDebugHUDLabel.isHidden = false
+        headwordBoundingRectsLayer.contentsScale = traitCollection.displayScale
+        layer.addSublayer(headwordBoundingRectsLayer)
+
+        if viewMetricsHUDEnabled {
+            addSubview(viewMetricsHUDLabel)
+            viewMetricsHUDLabel.isHidden = false
         }
         if rubyDebugRectsEnabled {
             rubyDebugRectsLayer.contentsScale = traitCollection.displayScale
             rubyDebugRectsLayer.zPosition = 50
             layer.addSublayer(rubyDebugRectsLayer)
             rubyDebugRectsLayer.isHidden = false
+            installRubyDebugGlyphContainerIfNeeded()
         }
 
-        if rubyDebugLineBandsEnabled {
+        if headwordDebugRectsEnabled {
+            installHeadwordDebugContainerIfNeeded()
+        }
+
+        if headwordLineBandsEnabled || rubyLineBandsEnabled {
             rubyDebugLineBandsContainerLayer.contentsScale = traitCollection.displayScale
             rubyDebugLineBandsContainerLayer.zPosition = 2
             rubyDebugLineBandsContainerLayer.addSublayer(rubyBandEvenLayer)
             rubyDebugLineBandsContainerLayer.addSublayer(rubyBandOddLayer)
             rubyDebugLineBandsContainerLayer.addSublayer(baseLineEvenLayer)
             rubyDebugLineBandsContainerLayer.addSublayer(baseLineOddLayer)
+            rubyDebugLineBandsContainerLayer.addSublayer(rubyDebugLineBandsLabelsLayer)
             layer.addSublayer(rubyDebugLineBandsContainerLayer)
             rubyDebugLineBandsContainerLayer.isHidden = false
         }
@@ -1325,6 +1656,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             }
         }
 
+        updateDebugBoundingStrokeAppearance()
         showsVerticalScrollIndicator = false
         showsHorizontalScrollIndicator = false
         lastTextContainerIdentity = ObjectIdentifier(textContainer)
@@ -1408,6 +1740,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             invalidateIntrinsicContentSize()
         }
 
+        warmVisibleSemanticSpanLayoutIfNeeded()
+
         // Ruby highlight geometry is derived from the ruby overlay layers.
         // Ensure overlays are laid out first so highlight rects can match actual ruby bounds.
         layoutRubyOverlayIfNeeded()
@@ -1427,14 +1761,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             }
         }
 
-        if rubyDebugHUDEnabled {
-            if rubyDebugHUDLabel.superview == nil {
-                addSubview(rubyDebugHUDLabel)
+        updateHeadwordBoundingRects()
+
+        if viewMetricsHUDEnabled {
+            if viewMetricsHUDLabel.superview == nil {
+                addSubview(viewMetricsHUDLabel)
             }
-            updateRubyDebugHUD()
-            rubyDebugHUDLabel.isHidden = false
+            updateViewMetricsHUD()
+            viewMetricsHUDLabel.isHidden = false
         } else {
-            rubyDebugHUDLabel.isHidden = true
+            viewMetricsHUDLabel.isHidden = true
         }
         if rubyDebugRectsEnabled {
             if rubyDebugRectsLayer.superlayer == nil {
@@ -1442,29 +1778,25 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 rubyDebugRectsLayer.zPosition = 50
                 layer.addSublayer(rubyDebugRectsLayer)
             }
-            if rubyDebugGlyphBoundsLayerEven.superlayer == nil {
-                rubyDebugGlyphBoundsLayerEven.contentsScale = traitCollection.displayScale
-                rubyDebugGlyphBoundsLayerOdd.contentsScale = traitCollection.displayScale
-                rubyDebugGlyphBoundsLayerEven.zPosition = 60
-                rubyDebugGlyphBoundsLayerOdd.zPosition = 60
-                layer.addSublayer(rubyDebugGlyphBoundsLayerEven)
-                layer.addSublayer(rubyDebugGlyphBoundsLayerOdd)
-            }
+            installRubyDebugGlyphContainerIfNeeded()
             updateRubyDebugRects()
             updateRubyDebugGlyphBounds()
             rubyDebugRectsLayer.isHidden = false
-            rubyDebugGlyphBoundsLayerEven.isHidden = false
-            rubyDebugGlyphBoundsLayerOdd.isHidden = false
         } else {
             rubyDebugRectsLayer.path = nil
             rubyDebugRectsLayer.isHidden = true
-            rubyDebugGlyphBoundsLayerEven.path = nil
-            rubyDebugGlyphBoundsLayerOdd.path = nil
-            rubyDebugGlyphBoundsLayerEven.isHidden = true
-            rubyDebugGlyphBoundsLayerOdd.isHidden = true
+            resetRubyDebugGlyphLayers()
         }
 
-        if rubyDebugLineBandsEnabled {
+        if headwordDebugRectsEnabled {
+            installHeadwordDebugContainerIfNeeded()
+            updateHeadwordDebugRects()
+        } else {
+            resetHeadwordDebugLayers()
+        }
+
+        let wantsLineBands = headwordLineBandsEnabled || rubyLineBandsEnabled
+        if wantsLineBands {
             if rubyDebugLineBandsContainerLayer.superlayer == nil {
                 rubyDebugLineBandsContainerLayer.contentsScale = traitCollection.displayScale
                 rubyDebugLineBandsContainerLayer.zPosition = 2
@@ -1489,8 +1821,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
     }
 
-    private func updateRubyDebugHUD() {
-        guard rubyDebugHUDLabel.superview != nil else { return }
+    @available(iOS, deprecated: 17.0, message: "Use UITraitChangeObservable APIs once iOS 17+ only.")
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
+            updateDebugBoundingStrokeAppearance()
+        }
+    }
+
+    private func updateViewMetricsHUD() {
+        guard viewMetricsHUDLabel.superview != nil else { return }
 
         let inset = textContainerInset
         let offset = contentOffset
@@ -1515,26 +1855,59 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }()
 
         func f(_ v: CGFloat) -> String { String(format: "%.1f", v) }
-        rubyDebugHUDLabel.text = [
+        var lines: [String] = [
             "\(vis) runs=\(cachedRubyRuns.count) layers=\(rubyLayerCount)",
             "b=\(f(b.width))x\(f(b.height)) cs=\(f(cs.width))x\(f(cs.height))",
             "off=\(f(offset.x)),\(f(offset.y)) insetT=\(f(inset.top))",
             "tcW=\(f(textContainer.size.width)) mW=\(f(measuredW)) mTCW=\(f(measuredTCW))",
             "headroom=\(f(rubyHighlightHeadroom)) gap=\(f(rubyBaselineGap)) \(sel)"
-        ].joined(separator: "\n")
+        ]
+
+        if let metrics = viewMetricsContext {
+            if let paste = metrics.pasteAreaFrame {
+                lines.append(String(format: "Paste x=%.1f y=%.1f w=%.1f h=%.1f", paste.minX, paste.minY, paste.width, paste.height))
+            } else {
+                lines.append("Paste: <none>")
+            }
+            if let panel = metrics.tokenPanelFrame {
+                lines.append(String(format: "Panel x=%.1f y=%.1f w=%.1f h=%.1f", panel.minX, panel.minY, panel.width, panel.height))
+            } else {
+                lines.append("Panel: <none>")
+            }
+        }
+
+        viewMetricsHUDLabel.text = lines.joined(separator: "\n")
 
         // Pin to top-left in *viewport* coordinates.
         // Note: UITextView is a UIScrollView; subviews live in content coordinates, so we must
         // offset by `contentOffset` to keep the HUD visually fixed while scrolling.
         let padding: CGFloat = 8
         let maxWidth = max(120, bounds.width - (padding * 2))
-        let size = rubyDebugHUDLabel.sizeThatFits(CGSize(width: maxWidth, height: 200))
-        rubyDebugHUDLabel.frame = CGRect(
+        let size = viewMetricsHUDLabel.sizeThatFits(CGSize(width: maxWidth, height: 200))
+        viewMetricsHUDLabel.frame = CGRect(
             x: contentOffset.x + padding,
             y: contentOffset.y + padding,
             width: min(maxWidth, size.width + 12),
             height: min(200, size.height + 10)
         )
+    }
+
+    private func warmVisibleSemanticSpanLayoutIfNeeded() {
+        guard semanticSpans.isEmpty == false else { return }
+        guard let attributedText, attributedText.length > 0 else { return }
+        guard let visibleRange = visibleUTF16Range(), visibleRange.length > 0 else { return }
+        let warmLimit = 256
+        var warmed = 0
+        let expandedVisible = expandRange(visibleRange, by: 128)
+
+        for span in semanticSpans {
+            let spanRange = span.range
+            guard spanRange.location != NSNotFound, spanRange.length > 0 else { continue }
+            guard NSIntersectionRange(spanRange, expandedVisible).length > 0 else { continue }
+            _ = baseHighlightRectsInContentCoordinates(in: spanRange)
+            warmed += 1
+            if warmed >= warmLimit { break }
+        }
     }
 
     private func updateRubyDebugRects() {
@@ -1553,6 +1926,69 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         rubyDebugRectsLayer.path = path.isEmpty ? nil : path
     }
 
+    private func updateHeadwordBoundingRects() {
+        guard semanticSpans.isEmpty == false else {
+            headwordBoundingRectsLayer.path = nil
+            headwordBoundingRectsLayer.isHidden = true
+            return
+        }
+
+        let path = CGMutablePath()
+        let maxSpans = min(semanticSpans.count, 256)
+        for idx in 0..<maxSpans {
+            let span = semanticSpans[idx]
+            guard span.range.location != NSNotFound, span.range.length > 0 else { continue }
+            let rects = baseHighlightRectsInContentCoordinates(in: span.range)
+            for rect in rects.prefix(8) {
+                path.addRect(rect.insetBy(dx: -0.5, dy: -0.5))
+            }
+        }
+
+        headwordBoundingRectsLayer.frame = CGRect(origin: .zero, size: contentSize)
+        headwordBoundingRectsLayer.path = path.isEmpty ? nil : path
+        headwordBoundingRectsLayer.isHidden = path.isEmpty
+    }
+
+    private func updateHeadwordDebugRects() {
+        guard headwordDebugRectsEnabled else {
+            resetHeadwordDebugLayers()
+            return
+        }
+        installHeadwordDebugContainerIfNeeded()
+
+        guard semanticSpans.isEmpty == false else {
+            resetHeadwordDebugLayers()
+            return
+        }
+
+        var pathsByKey: [DebugColorKey: CGMutablePath] = [:]
+        var colorsByKey: [DebugColorKey: UIColor] = [:]
+        let maxSpans = min(semanticSpans.count, 256)
+        for idx in 0..<maxSpans {
+            let span = semanticSpans[idx]
+            guard span.range.location != NSNotFound, span.range.length > 0 else { continue }
+            guard let color = sanitizedStrokeColor(from: resolvedColorForSemanticSpan(span)) else { continue }
+            let key = DebugColorKey(color: color)
+            let path = pathsByKey[key] ?? CGMutablePath()
+            let rects = baseHighlightRectsInContentCoordinates(in: span.range)
+            for rect in rects.prefix(8) {
+                path.addRect(rect.insetBy(dx: -0.5, dy: -0.5))
+            }
+            pathsByKey[key] = path
+            colorsByKey[key] = color
+        }
+
+        let frame = CGRect(origin: .zero, size: contentSize)
+        applyDebugPaths(
+            pathsByKey,
+            colorsByKey: colorsByKey,
+            storage: &headwordDebugRectLayers,
+            container: headwordDebugRectsContainerLayer,
+            frame: frame,
+            zPosition: 45
+        )
+    }
+
     private func updateRubyDebugLineBands() {
         // Draw alternating content-space bands for base text lines and the ruby headroom above them.
         // TextKit 2 layout is frequently viewport-lazy; compute VISIBLE lines in view coords and
@@ -1560,6 +1996,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         let offset = contentOffset
         let linesInView = textKit2LineTypographicRectsInViewCoordinates(visibleOnly: true)
         let lines = linesInView.map { $0.offsetBy(dx: offset.x, dy: offset.y) }
+        let allDocumentLines = textKit2LineTypographicRectsInContentCoordinates()
 
         rubyDebugLineBandsContainerLayer.frame = CGRect(origin: .zero, size: contentSize)
         baseLineEvenLayer.frame = rubyDebugLineBandsContainerLayer.bounds
@@ -1582,121 +2019,195 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         let rubyEven = CGMutablePath()
         let rubyOdd = CGMutablePath()
         let headroom = max(0, rubyHighlightHeadroom)
+        let rubyBandHeight = max(0, headroom - rubyBaselineGap)
+        let drawBaseBands = headwordLineBandsEnabled
+        let rubyOverlayFrames: [CGRect] = {
+            guard rubyAnnotationVisibility == .visible,
+                  let layers = rubyOverlayContainerLayer.sublayers else {
+                return []
+            }
+            var frames: [CGRect] = []
+            frames.reserveCapacity(layers.count)
+            for layer in layers {
+                if let textLayer = layer as? CATextLayer {
+                    frames.append(textLayer.frame)
+                }
+            }
+            return frames
+        }()
+        let drawRubyBands = rubyLineBandsEnabled && (rubyBandHeight > 0 || rubyOverlayFrames.isEmpty == false)
 
         // Replace labels each update (visible lines only, so this is cheap).
         rubyDebugLineBandsLabelsLayer.sublayers = nil
         var labelLayers: [CALayer] = []
-        labelLayers.reserveCapacity(min(lines.count, 64))
+        let estimatedLabelCount = lines.count * ((drawBaseBands ? 1 : 0) + (drawRubyBands ? 1 : 0))
+        if estimatedLabelCount > 0 {
+            labelLayers.reserveCapacity(min(estimatedLabelCount, 96))
+        }
 
-        for (idx, line) in lines.enumerated() {
-            let isEven = (idx % 2 == 0)
+        func resolveRubyBandRect(for line: CGRect) -> CGRect? {
+            let horizontalPadding: CGFloat = 1
+            let verticalTolerance: CGFloat = 1
 
-            let baseRect = line.insetBy(dx: -1, dy: -0.5)
-            if isEven {
-                baseEven.addRect(baseRect)
-            } else {
-                baseOdd.addRect(baseRect)
+            if rubyOverlayFrames.isEmpty == false {
+                var minTop = CGFloat.greatestFiniteMagnitude
+                var maxBottom: CGFloat = -.greatestFiniteMagnitude
+                var matched = false
+
+                for frame in rubyOverlayFrames {
+                    let overlap = min(line.maxX, frame.maxX) - max(line.minX, frame.minX)
+                    if overlap <= 1 { continue }
+                    if frame.maxY > line.minY + verticalTolerance { continue }
+                    matched = true
+                    minTop = min(minTop, frame.minY)
+                    maxBottom = max(maxBottom, frame.maxY)
+                }
+
+                if matched, maxBottom > minTop {
+                    let rect = CGRect(
+                        x: line.minX,
+                        y: minTop,
+                        width: line.width,
+                        height: maxBottom - minTop
+                    ).insetBy(dx: -horizontalPadding, dy: -0.5)
+                    return rect
+                }
+
+                // Overlay geometry is available but nothing matched this line; skip drawing
+                // to avoid showing misleading ruby bands.
+                return nil
             }
 
-            if headroom > 0 {
-                let rubyRect = CGRect(
-                    x: line.minX,
-                    y: line.minY - headroom,
-                    width: line.width,
-                    height: headroom
-                ).insetBy(dx: -1, dy: -0.5)
+            guard rubyBandHeight > 0 else { return nil }
+            return CGRect(
+                x: line.minX,
+                y: line.minY - headroom,
+                width: line.width,
+                height: rubyBandHeight
+            ).insetBy(dx: -horizontalPadding, dy: 0)
+        }
+
+        for (idx, line) in lines.enumerated() {
+            let absoluteIndex = bestMatchingLineIndex(for: line, candidates: allDocumentLines) ?? idx
+            let isEven = (idx % 2 == 0)
+
+            if drawBaseBands {
+                let baseRect = line.insetBy(dx: -1, dy: -0.5)
+                if isEven {
+                    baseEven.addRect(baseRect)
+                } else {
+                    baseOdd.addRect(baseRect)
+                }
+
+                let baseLabel = CATextLayer()
+                baseLabel.contentsScale = traitCollection.displayScale
+                baseLabel.string = "L\(absoluteIndex)"
+                baseLabel.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .semibold)
+                baseLabel.fontSize = 9
+                baseLabel.alignmentMode = .left
+                baseLabel.foregroundColor = UIColor.white.withAlphaComponent(0.92).cgColor
+                baseLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55).cgColor
+                baseLabel.cornerRadius = 4
+                baseLabel.masksToBounds = true
+                let labelX = max(2, line.minX + 2)
+                let labelY = max(2, line.minY + 2)
+                baseLabel.frame = CGRect(x: labelX, y: labelY, width: 26, height: 14)
+                baseLabel.actions = [
+                    "position": NSNull(),
+                    "bounds": NSNull(),
+                    "contents": NSNull(),
+                    "opacity": NSNull(),
+                    "hidden": NSNull()
+                ]
+                labelLayers.append(baseLabel)
+            }
+
+            if drawRubyBands, let rubyRect = resolveRubyBandRect(for: line) {
                 if isEven {
                     rubyEven.addRect(rubyRect)
                 } else {
                     rubyOdd.addRect(rubyRect)
                 }
-            }
 
-            // Label each band with a small line index to make correspondence obvious.
-            let label = CATextLayer()
-            label.contentsScale = traitCollection.displayScale
-            label.string = "L\(idx)"
-            label.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .semibold)
-            label.fontSize = 9
-            label.alignmentMode = .left
-            label.foregroundColor = UIColor.white.withAlphaComponent(0.92).cgColor
-            label.backgroundColor = UIColor.black.withAlphaComponent(0.55).cgColor
-            label.cornerRadius = 4
-            label.masksToBounds = true
-            let labelX = max(2, line.minX + 2)
-            // Place label at the top of the BASE band.
-            let labelY = max(2, line.minY + 2)
-            label.frame = CGRect(x: labelX, y: labelY, width: 26, height: 14)
-            label.actions = [
-                "position": NSNull(),
-                "bounds": NSNull(),
-                "contents": NSNull(),
-                "opacity": NSNull(),
-                "hidden": NSNull()
-            ]
-            labelLayers.append(label)
+                let rubyLabel = CATextLayer()
+                rubyLabel.contentsScale = traitCollection.displayScale
+                rubyLabel.string = "R\(absoluteIndex)"
+                rubyLabel.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .semibold)
+                rubyLabel.fontSize = 9
+                rubyLabel.alignmentMode = .left
+                rubyLabel.foregroundColor = UIColor.white.withAlphaComponent(0.92).cgColor
+                rubyLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55).cgColor
+                rubyLabel.cornerRadius = 4
+                rubyLabel.masksToBounds = true
+                let labelX = max(2, line.minX + 2)
+                let labelY = max(2, rubyRect.minY + 2)
+                rubyLabel.frame = CGRect(x: labelX, y: labelY, width: 26, height: 14)
+                rubyLabel.actions = [
+                    "position": NSNull(),
+                    "bounds": NSNull(),
+                    "contents": NSNull(),
+                    "opacity": NSNull(),
+                    "hidden": NSNull()
+                ]
+                labelLayers.append(rubyLabel)
+            }
         }
 
-        baseLineEvenLayer.path = baseEven.isEmpty ? nil : baseEven
-        baseLineOddLayer.path = baseOdd.isEmpty ? nil : baseOdd
-        rubyBandEvenLayer.path = rubyEven.isEmpty ? nil : rubyEven
-        rubyBandOddLayer.path = rubyOdd.isEmpty ? nil : rubyOdd
+        if headwordLineBandsEnabled {
+            baseLineEvenLayer.path = baseEven.isEmpty ? nil : baseEven
+            baseLineOddLayer.path = baseOdd.isEmpty ? nil : baseOdd
+        } else {
+            baseLineEvenLayer.path = nil
+            baseLineOddLayer.path = nil
+        }
+
+        if rubyLineBandsEnabled {
+            rubyBandEvenLayer.path = rubyEven.isEmpty ? nil : rubyEven
+            rubyBandOddLayer.path = rubyOdd.isEmpty ? nil : rubyOdd
+        } else {
+            rubyBandEvenLayer.path = nil
+            rubyBandOddLayer.path = nil
+        }
         rubyDebugLineBandsLabelsLayer.sublayers = labelLayers
     }
 
     private func updateRubyDebugGlyphBounds() {
-        rubyDebugGlyphBoundsLayerEven.frame = CGRect(origin: .zero, size: contentSize)
-        rubyDebugGlyphBoundsLayerOdd.frame = CGRect(origin: .zero, size: contentSize)
+        guard rubyDebugRectsEnabled else {
+            resetRubyDebugGlyphLayers()
+            return
+        }
+        installRubyDebugGlyphContainerIfNeeded()
 
         guard let rubyLayers = rubyOverlayContainerLayer.sublayers, rubyLayers.isEmpty == false else {
-            rubyDebugGlyphBoundsLayerEven.path = nil
-            rubyDebugGlyphBoundsLayerOdd.path = nil
+            resetRubyDebugGlyphLayers()
             return
         }
 
-        // Use visible line rects as the index source so parity matches the on-screen labels.
-        let offset = contentOffset
-        let linesInView = textKit2LineTypographicRectsInViewCoordinates(visibleOnly: true)
-        let lines = linesInView.map { $0.offsetBy(dx: offset.x, dy: offset.y) }
-
-        let even = CGMutablePath()
-        let odd = CGMutablePath()
-
-        func bestLineIndex(for rubyRect: CGRect) -> Int? {
-            guard lines.isEmpty == false else { return nil }
-            // Approximate where the base line is relative to the ruby layer.
-            let expectedBaseY = rubyRect.maxY + max(1, rubyBaselineGap)
-            var bestIdx: Int? = nil
-            var bestScore: CGFloat = .greatestFiniteMagnitude
-
-            for (idx, line) in lines.enumerated() {
-                // Prefer lines that overlap horizontally; fallback to vertical proximity.
-                let xOverlap = max(0, min(rubyRect.maxX, line.maxX) - max(rubyRect.minX, line.minX))
-                let xPenalty: CGFloat = (xOverlap > 0) ? 0 : 50
-                let dy = abs(line.minY - expectedBaseY)
-                let score = dy + xPenalty
-                if score < bestScore {
-                    bestScore = score
-                    bestIdx = idx
-                }
-            }
-            return bestIdx
-        }
+        var pathsByKey: [DebugColorKey: CGMutablePath] = [:]
+        var colorsByKey: [DebugColorKey: UIColor] = [:]
 
         for layer in rubyLayers {
             guard let ruby = layer as? CATextLayer else { continue }
             let rect = ruby.frame
             guard rect.isNull == false, rect.isEmpty == false else { continue }
-            let idx = bestLineIndex(for: rect) ?? 0
-            if idx % 2 == 0 {
-                even.addRect(rect.insetBy(dx: -0.5, dy: -0.5))
-            } else {
-                odd.addRect(rect.insetBy(dx: -0.5, dy: -0.5))
-            }
+            let rawColor = ruby.foregroundColor.map { UIColor(cgColor: $0) }
+            guard let color = sanitizedStrokeColor(from: rawColor) else { continue }
+            let key = DebugColorKey(color: color)
+            let path = pathsByKey[key] ?? CGMutablePath()
+            path.addRect(rect.insetBy(dx: -0.5, dy: -0.5))
+            pathsByKey[key] = path
+            colorsByKey[key] = color
         }
 
-        rubyDebugGlyphBoundsLayerEven.path = even.isEmpty ? nil : even
-        rubyDebugGlyphBoundsLayerOdd.path = odd.isEmpty ? nil : odd
+        let frame = CGRect(origin: .zero, size: contentSize)
+        applyDebugPaths(
+            pathsByKey,
+            colorsByKey: colorsByKey,
+            storage: &rubyDebugGlyphLayers,
+            container: rubyDebugGlyphBoundsContainerLayer,
+            frame: frame,
+            zPosition: 60
+        )
     }
 
     override func draw(_ rect: CGRect) {
@@ -1872,8 +2383,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         guard cachedRubyRuns.isEmpty == false else { return }
 
         // Precompute visible line typographic bounds once per draw pass.
-        // This keeps ruby anchored correctly even when line spacing/leading is present,
-        // and avoids per-run fragment enumeration.
         let visibleLineRectsInView = textKit2LineTypographicRectsInViewCoordinates(visibleOnly: true)
 
         // During fast scrolling, drawing ruby for the entire document is unnecessary and expensive.
@@ -1890,13 +2399,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             // The TextKit 2 segment path can be enabled for debugging via `RUBY_TK2_ANCHORS=1`.
             let baseRects: [CGRect] = {
                 if Self.useTextKit2RubyAnchorRects {
-                    return self.textKit2AnchorRectsInViewCoordinates(for: run.range, visibleLineRectsInView: visibleLineRectsInView)
+                    return textKit2AnchorRectsInViewCoordinates(for: run.range, visibleLineRectsInView: visibleLineRectsInView)
                 }
-                return self.rubyAnchorRects(in: run.range, lineRectsInView: visibleLineRectsInView)
+                return rubyAnchorRects(in: run.range, lineRectsInView: visibleLineRectsInView)
             }()
             guard baseRects.isEmpty == false else { continue }
 
-            let unions = self.unionRectsByLine(baseRects)
+            let unions = unionRectsByLine(baseRects)
             guard unions.isEmpty == false else { continue }
 
             let rubyFont = UIFont.systemFont(ofSize: run.fontSize)
@@ -1907,7 +2416,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             ]
 
             for baseUnion in unions {
-                let headroom = max(0, self.rubyHighlightHeadroom)
+                let headroom = max(0, rubyHighlightHeadroom)
                 guard headroom > 0 else { continue }
 
                 let rubyRect = CGRect(
@@ -1922,7 +2431,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
                 // Bottom-anchor ruby near the headword: keep a small consistent gap and let
                 // the top edge move when ruby size changes.
-                let gap = max(1.0, self.rubyBaselineGap)
+                let gap = max(1.0, rubyBaselineGap)
                 let y = (baseUnion.minY - gap) - size.height
                 (run.reading as NSString).draw(at: CGPoint(x: x, y: y), withAttributes: attrs)
             }
@@ -2327,7 +2836,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // ensure we redraw whenever the attributed text changes.
         setNeedsDisplay()
         invalidateIntrinsicContentSize()
-        CustomLogger.shared.debug("applyAttributedText -> setNeedsLayout")
+        if Self.verboseRubyLoggingEnabled {
+            CustomLogger.shared.debug("applyAttributedText -> setNeedsLayout")
+        }
     }
 
     private func rebuildRubyRunCache(from text: NSAttributedString) {
@@ -2611,22 +3122,26 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         return rects
     }
 
-    private func bestMatchingLineRect(for rect: CGRect, candidates: [CGRect]) -> CGRect? {
-        var best: CGRect? = nil
+    private func bestMatchingLineIndex(for rect: CGRect, candidates: [CGRect]) -> Int? {
+        var bestIndex: Int? = nil
         var bestScore: CGFloat = 0
 
-        for lineRect in candidates {
+        for (idx, lineRect) in candidates.enumerated() {
             let intersection = rect.intersection(lineRect)
             guard intersection.isNull == false, intersection.isEmpty == false else { continue }
-            // Score by intersection area (stable when selection rect is slightly padded).
             let score = intersection.width * intersection.height
             if score > bestScore {
                 bestScore = score
-                best = lineRect
+                bestIndex = idx
             }
         }
 
-        return best
+        return bestIndex
+    }
+
+    private func bestMatchingLineRect(for rect: CGRect, candidates: [CGRect]) -> CGRect? {
+        guard let idx = bestMatchingLineIndex(for: rect, candidates: candidates) else { return nil }
+        return candidates[idx]
     }
 
     private func textRange(for nsRange: NSRange) -> UITextRange? {
@@ -2792,17 +3307,23 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // - spanSelectionContext(forUTF16Index:) complexity
         // - logging volume
         let tapPoint = recognizer.location(in: self)
-        CustomLogger.shared.debug("Inspect tap at x=\(tapPoint.x) y=\(tapPoint.y)")
+        if Self.verboseRubyLoggingEnabled {
+            CustomLogger.shared.debug("Inspect tap at x=\(tapPoint.x) y=\(tapPoint.y)")
+        }
 
         guard let rawIndex = utf16IndexForTap(at: tapPoint) else {
             clearInspectionHighlight()
-            CustomLogger.shared.debug("Inspect tap ignored: no glyph resolved")
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug("Inspect tap ignored: no glyph resolved")
+            }
             return
         }
 
         guard let resolvedIndex = resolvedTextIndex(from: rawIndex) else {
             clearInspectionHighlight()
-            CustomLogger.shared.debug("Inspect tap unresolved: no base character near index=\(rawIndex)")
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug("Inspect tap unresolved: no base character near index=\(rawIndex)")
+            }
             return
         }
 
@@ -2815,7 +3336,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
         guard let selection = spanSelectionContext(forUTF16Index: resolvedIndex) else {
             clearInspectionHighlight()
-            CustomLogger.shared.debug("Inspect tap unresolved: no annotated span contains index=\(resolvedIndex)")
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug("Inspect tap unresolved: no annotated span contains index=\(resolvedIndex)")
+            }
             return
         }
 
@@ -2828,10 +3351,14 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             let scalarsDescription = details.scalars.joined(separator: ", ")
             let indexSummary = rawIndex == resolvedIndex ? "\(resolvedIndex)" : "\(resolvedIndex) (resolved from \(rawIndex))"
 
-            CustomLogger.shared.debug("Inspect tap char=\(charDescription) utf16Index=\(indexSummary) utf16Range=\(rangeDescription) scalars=[\(scalarsDescription)]")
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug("Inspect tap char=\(charDescription) utf16Index=\(indexSummary) utf16Range=\(rangeDescription) scalars=[\(scalarsDescription)]")
+            }
         } else {
             let highlightDescription = "[\(selection.highlightRange.location)..<\(NSMaxRange(selection.highlightRange))]"
-            CustomLogger.shared.debug("Inspect tap resolved to span range \(highlightDescription) but no character details could be extracted")
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug("Inspect tap resolved to span range \(highlightDescription) but no character details could be extracted")
+            }
         }
 
         logSpanResolution(for: resolvedIndex)
@@ -2915,15 +3442,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
           guard pointHitsVisibleLineBand(point) else { return nil }
           guard let textRange = textRangeNearPoint(point),
               let closestPosition = textRange.start as UITextPosition? else { return nil }
-
-        // `closestPosition(to:)` can snap to the previous line when tapping on an empty/blank line.
-        // Gate the fallback hit-test so taps clearly below a line don't select its last glyph.
-        let caret = caretRect(for: closestPosition)
-        let upTolerance = max(6, rubyHighlightHeadroom + caret.height * 0.35)
-        let downTolerance = max(6, caret.height * 0.35)
-        if point.y < (caret.minY - upTolerance) || point.y > (caret.maxY + downTolerance) {
-            return nil
-        }
 
         let offset = offset(from: beginningOfDocument, to: closestPosition)
         guard offset >= 0, offset < attributedLength else { return nil }
@@ -3070,13 +3588,17 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
     private func logSpanResolution(for index: Int) {
         guard let span = semanticSpans.spanContainingUTF16Index(index) else {
-            CustomLogger.shared.debug("Inspect tap span unresolved: no semantic span contains index=\(index)")
+            if Self.verboseRubyLoggingEnabled {
+                CustomLogger.shared.debug("Inspect tap span unresolved: no semantic span contains index=\(index)")
+            }
             return
         }
         let spanRange = span.range
         let spanSurfaceDescription = span.surface.debugDescription
         let rangeDescription = "[\(spanRange.location)..<\(NSMaxRange(spanRange))]"
-        CustomLogger.shared.debug("Inspect tap span surface=\(spanSurfaceDescription) range=\(rangeDescription)")
+        if Self.verboseRubyLoggingEnabled {
+            CustomLogger.shared.debug("Inspect tap span surface=\(spanSurfaceDescription) range=\(rangeDescription)")
+        }
     }
 
 }

@@ -6,19 +6,20 @@ struct WordsView: View {
     @EnvironmentObject var notesStore: NotesStore
     @StateObject private var lookup = DictionaryLookupViewModel()
     @State private var searchText: String = ""
-    @State private var searchMode: DictionarySearchMode = .auto
+    @State private var searchMode: DictionarySearchMode = .japanese
     @State private var editModeState: EditMode = .inactive
     @State private var selectedWordIDs: Set<Word.ID> = []
     @State private var showCSVImportSheet = false
 
     var body: some View {
         NavigationStack {
-            mainList
+            VStack(spacing: 0) {
+                searchBar
+                mainList
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .environment(\.editMode, $editModeState)
             .listStyle(.plain)
-            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Japanese or English")
-            .textInputAutocapitalization(.never)
-            .disableAutocorrection(true)
             .navigationTitle("Words")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -30,14 +31,6 @@ struct WordsView: View {
                     .accessibilityLabel("Import CSV")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Picker("Mode", selection: $searchMode) {
-                        Text("JP").tag(DictionarySearchMode.auto)
-                        Text("EN").tag(DictionarySearchMode.englishFirst)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 96)
-                    .disabled(hasActiveSearch == false)
-
                     if isEditing {
                         if canEditSavedWords {
                             Button {
@@ -87,6 +80,43 @@ struct WordsView: View {
                 WordsCSVImportView()
             }
         }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 0) {
+            TextField("Search Japanese or English", text: $searchText)
+                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
+                .submitLabel(.search)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+
+            Divider()
+                .frame(height: 28)
+                .background(Color(uiColor: .separator))
+                .padding(.vertical, 6)
+
+            Picker("Search language", selection: $searchMode) {
+                Text("JP").tag(DictionarySearchMode.japanese)
+                Text("EN").tag(DictionarySearchMode.english)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 110)
+            .padding(.horizontal, 8)
+            .accessibilityLabel("Search language")
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color(uiColor: .separator).opacity(0.35), lineWidth: 1)
+        )
+        .padding(.horizontal)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
     }
 
     @ViewBuilder
@@ -243,7 +273,7 @@ struct WordsView: View {
         // If the user cleared the search, reset results immediately
         // without waiting for the debounce delay.
         if term.isEmpty {
-            await lookup.load(term: "", englishFirst: searchMode == .englishFirst)
+            await lookup.load(term: "", mode: searchMode)
             return
         }
 
@@ -253,7 +283,7 @@ struct WordsView: View {
         try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
         if Task.isCancelled { return }
 
-        await lookup.load(term: term, englishFirst: searchMode == .englishFirst)
+        await lookup.load(term: term, mode: searchMode)
     }
 
     private func add(entry: DictionaryEntry) {
@@ -365,7 +395,7 @@ struct WordsView: View {
     }
 
     private var searchTaskID: String {
-        "\(searchMode == .englishFirst ? "EN" : "JP")|\(trimmedSearchText)"
+        "\(searchMode == .english ? "EN" : "JP")|\(trimmedSearchText)"
     }
 
     /// Merge dictionary lookup results that differ only by kana script (hiragana/katakana)

@@ -120,6 +120,7 @@ struct PasteView: View {
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
+    @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingShowFurigana") private var showFurigana: Bool = true
     @AppStorage("readingWrapLines") private var wrapLines: Bool = false
     @AppStorage("readingAlternateTokenColors") private var alternateTokenColors: Bool = false
@@ -195,15 +196,29 @@ struct PasteView: View {
         noteTitleInput.isEmpty ? "Paste" : noteTitleInput
     }
 
+    private func sanitizeGeometryRect(_ rect: CGRect?) -> CGRect? {
+        guard var rect = rect else { return nil }
+        guard rect.origin.x.isFinite, rect.origin.y.isFinite else { return nil }
+        guard rect.size.width.isFinite, rect.size.height.isFinite else { return nil }
+        rect.size.width = max(0, rect.size.width)
+        rect.size.height = max(0, rect.size.height)
+        return rect
+    }
+
+    private func sanitizeLength(_ value: CGFloat) -> CGFloat {
+        guard value.isFinite else { return 0 }
+        return max(0, value)
+    }
+
     var body: some View {
         NavigationStack {
             applyDictionarySheet(to: coreContent)
         }
         .onPreferenceChange(TokenActionPanelFramePreferenceKey.self) { newValue in
-            tokenPanelFrame = newValue
+            tokenPanelFrame = sanitizeGeometryRect(newValue)
         }
         .onPreferenceChange(PasteAreaFramePreferenceKey.self) { newValue in
-            pasteAreaFrame = newValue
+            pasteAreaFrame = sanitizeGeometryRect(newValue)
         }
         .sheet(isPresented: $showWordDefinitionsSheet, onDismiss: {
             // When the dictionary details sheet is dismissed, also clear the
@@ -240,7 +255,7 @@ struct PasteView: View {
                 furiganaTaskHandle?.cancel()
             }
 
-        return base
+        let inputHandling = base
             .onChange(of: inputText) { _, newValue in
                 skipNextInitialFuriganaEnsure = false
                 clearSelection()
@@ -269,6 +284,7 @@ struct PasteView: View {
                 showToast(editing ? "Edit mode enabled" : "Edit mode disabled")
             }
 
+        let furiganaControls = inputHandling
             .onChange(of: words.words.count) {
                 guard incrementalLookupEnabled else { return }
                 recomputeSavedWordOverlays()
@@ -303,6 +319,14 @@ struct PasteView: View {
             .onChange(of: readingFuriganaSize) {
                 triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
             }
+            .onChange(of: readingHeadwordSpacingPadding) { _, enabled in
+                triggerFuriganaRefreshIfNeeded(
+                    reason: enabled ? "headword spacing padding toggled on" : "headword spacing padding toggled off",
+                    recomputeSpans: false
+                )
+            }
+
+        let selectionHandling = furiganaControls
             .onChange(of: selectionController.tokenSelection?.id) { (_: String?, newID: String?) in
                 let newSelection = selectionController.tokenSelection
                 if newSelection == nil {
@@ -339,6 +363,8 @@ struct PasteView: View {
                     CustomLogger.shared.debug("Dictionary popup hidden (sheet binding cleared)")
                 }
             }
+
+        let noteHandling = selectionHandling
             .onChange(of: currentNote?.id) { _, newValue in
                 lastOpenedNoteIDRaw = newValue?.uuidString ?? ""
                 clearSelection()
@@ -356,6 +382,8 @@ struct PasteView: View {
             .onReceive(readingOverrides.$overrides) { _ in
                 handleOverridesExternalChange()
             }
+
+        return noteHandling
             .onChange(of: router.pendingResetNoteID) { _, newValue in
                 pendingRouterResetNoteID = newValue
                 processPendingRouterResetRequest()
@@ -428,31 +456,6 @@ struct PasteView: View {
                     .position(x: panel.midX, y: panel.midY)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                // Text("Token Geometry Debug")
-                //     .font(.caption2.bold())
-                Text(String(format: "Container (yellow dashed) x=0.0 y=0.0 w=%.1f h=%.1f", proxy.size.width, proxy.size.height))
-                    .font(.caption2)
-                if let paste = pasteAreaFrame {
-                    Text(String(format: "Paste (cyan dashed) x=%.1f y=%.1f w=%.1f h=%.1f", paste.minX, paste.minY, paste.width, paste.height))
-                        .font(.caption2)
-                } else {
-                    Text("Paste: <none>")
-                        .font(.caption2)
-                }
-                if let panel = tokenPanelFrame {
-                    Text(String(format: "Panel (red) x=%.1f y=%.1f w=%.1f h=%.1f", panel.minX, panel.minY, panel.width, panel.height))
-                        .font(.caption2)
-                } else {
-                    Text("Panel: <none>")
-                        .font(.caption2)
-                }
-            }
-            .padding(8)
-            .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .foregroundColor(.white)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(8)
             }
             .allowsHitTesting(false)
         }
@@ -499,6 +502,11 @@ struct PasteView: View {
             // can undercount, making it feel like you "can't scroll to the end".
             return min(max(0, panel.height), paste.height)
         }()
+
+        let viewMetricsContext = RubyText.ViewMetricsContext(
+            pasteAreaFrame: pasteAreaFrame,
+            tokenPanelFrame: tokenPanelFrame
+        )
 
         return VStack(spacing: 0) {
             FuriganaRenderingHost(
@@ -580,7 +588,8 @@ struct PasteView: View {
                     presentDictionaryForArbitraryRange(range)
                 },
                 contextMenuStateProvider: contextMenuStateProvider,
-                onContextMenuAction: contextMenuActionHandler
+                onContextMenuAction: contextMenuActionHandler,
+                viewMetricsContext: viewMetricsContext
             )
             .background(
                 GeometryReader { proxy in
@@ -1170,8 +1179,6 @@ struct PasteView: View {
             return
         }
 
-        ivlog("Tap.handleInlineSpanSelection tokenIndex=\(selection.tokenIndex) highlight=\(selection.highlightRange.location)-\(NSMaxRange(selection.highlightRange))")
-
         // INVESTIGATION NOTES (2026-01-04)
         // Token tap → dictionary popup execution path:
         // RubyText.TokenOverlayTextView.handleInspectionTap → spanSelectionHandler → PasteView.handleInlineSpanSelection
@@ -1271,7 +1278,6 @@ struct PasteView: View {
             fallbacks.append(readingFallback)
         }
 
-        ivlog("Tap.handleSelectionLookup term='\(term)' fallbacks=\(fallbacks.count)")
         Task { [fallbacks] in
             await inlineLookup.load(term: term, fallbackTerms: fallbacks)
         }
@@ -1441,8 +1447,9 @@ struct PasteView: View {
                                 }
                             )
                             .onPreferenceChange(SheetPanelHeightPreferenceKey.self) { newValue in
-                                sheetPanelHeight = newValue
-                                measuredSheetHeight = newValue
+                                let sanitized = sanitizeLength(newValue)
+                                sheetPanelHeight = sanitized
+                                measuredSheetHeight = sanitized
                             }
                             .presentationDragIndicator(.visible)
                             .presentationDetents(Set([.height(max(sheetPanelHeight + 50, 300))]))
@@ -1490,12 +1497,64 @@ struct PasteView: View {
             EmptyView()
         }
         else {
-            Color.black.opacity(0.001)
+            GeometryReader { proxy in
+                let containerFrame = proxy.frame(in: .named(Self.coordinateSpaceName))
+                let localPaste: CGRect? = pasteAreaFrame.map { paste in
+                    CGRect(
+                        x: paste.minX - containerFrame.minX,
+                        y: paste.minY - containerFrame.minY,
+                        width: paste.width,
+                        height: paste.height
+                    )
+                }
+                let regions = legacyDismissHitRegions(containerSize: proxy.size, localPaste: localPaste)
+
+                ZStack {
+                    ForEach(Array(regions.enumerated()), id: \.offset) { _, rect in
+                        Color.black.opacity(0.001)
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.midX, y: rect.midY)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                clearSelection(resetPersistent: false)
+                            }
+                    }
+                }
                 .ignoresSafeArea()
-                .onTapGesture { clearSelection(resetPersistent: false) }
-                .transition(.opacity)
-                .zIndex(0.5)
+            }
+            .transition(.opacity)
+            .zIndex(0.5)
         }
+    }
+
+    private func legacyDismissHitRegions(containerSize: CGSize, localPaste: CGRect?) -> [CGRect] {
+        let container = CGRect(origin: .zero, size: containerSize)
+        guard let paste = localPaste?.intersection(container),
+              paste.isNull == false,
+              paste.isEmpty == false else {
+            return container.size.width > 0 && container.size.height > 0 ? [container] : []
+        }
+
+        var regions: [CGRect] = []
+
+        if paste.minY > container.minY {
+            let height = paste.minY - container.minY
+            regions.append(CGRect(x: container.minX, y: container.minY, width: container.width, height: height))
+        }
+        if paste.maxY < container.maxY {
+            let height = container.maxY - paste.maxY
+            regions.append(CGRect(x: container.minX, y: paste.maxY, width: container.width, height: height))
+        }
+        if paste.minX > container.minX {
+            let width = paste.minX - container.minX
+            regions.append(CGRect(x: container.minX, y: paste.minY, width: width, height: paste.height))
+        }
+        if paste.maxX < container.maxX {
+            let width = container.maxX - paste.maxX
+            regions.append(CGRect(x: paste.maxX, y: paste.minY, width: width, height: paste.height))
+        }
+
+        return regions.filter { $0.width > 1 && $0.height > 1 }
     }
 
     private func trimmedRangeAndSurface(for spanRange: NSRange) -> (range: NSRange, surface: String)? {
@@ -1579,14 +1638,9 @@ struct PasteView: View {
     }
 
     private func presentDictionaryForSpan(at index: Int, focusSplitMenu: Bool) {
-        let contextOpt: TokenSelectionContext? = ivtime("Tap.presentDictionaryForSpan selectionContext") {
-            selectionContext(forSpanAt: index)
-        }
-        guard let context = contextOpt else {
-            ivlog("Tap.presentDictionaryForSpan missingContext tokenIndex=\(index)")
+        guard let context = selectionContext(forSpanAt: index) else {
             return
         }
-        ivlog("Tap.presentDictionaryForSpan haveContext tokenIndex=\(index) range=\(context.range.location)-\(NSMaxRange(context.range)) surfaceLen=\(context.surface.count)")
         pendingSelectionRange = nil
         persistentSelectionRange = context.range
         tokenSelection = context
@@ -2316,12 +2370,8 @@ struct PasteView: View {
     }
 
     private func triggerFuriganaRefreshIfNeeded(reason: String = "state change", recomputeSpans: Bool = true) {
-        guard inputText.isEmpty == false else {
-            CustomLogger.shared.info("Skipping refresh (\(reason)): paste text is empty.")
-            return
-        }
+        guard inputText.isEmpty == false else { return }
         furiganaRefreshToken &+= 1
-        CustomLogger.shared.info("Queued refresh token \(furiganaRefreshToken) for text length \(inputText.count). Reason: \(reason)")
         startFuriganaTask(token: furiganaRefreshToken, recomputeSpans: recomputeSpans)
     }
 
@@ -2340,10 +2390,7 @@ struct PasteView: View {
     }
 
     private func makeFuriganaTask(token: Int, recomputeSpans: Bool) -> (() async -> Void)? {
-        guard inputText.isEmpty == false else {
-            CustomLogger.shared.info("No furigana task created because text is empty.")
-            return nil
-        }
+        guard inputText.isEmpty == false else { return nil }
 
         // INVESTIGATION NOTES (2026-01-04)
         // Initial load / furigana recompute execution path:
@@ -2365,6 +2412,7 @@ struct PasteView: View {
         let currentOverrides = readingOverrides.overrides(for: activeNoteID).filter { $0.userKana != nil }
         let currentAmendedSpans = tokenBoundaries.spans(for: activeNoteID, text: currentText)
         let currentHardCuts = tokenBoundaries.hardCuts(for: activeNoteID, text: currentText)
+        let currentHeadwordSpacingPadding = readingHeadwordSpacingPadding
         let pipelineInput = FuriganaPipelineService.Input(
             text: currentText,
             showFurigana: currentShowFurigana,
@@ -2377,28 +2425,24 @@ struct PasteView: View {
             amendedSpans: currentAmendedSpans,
             hardCuts: currentHardCuts,
             readingOverrides: currentOverrides,
-            context: "PasteView"
+            context: "PasteView",
+            padHeadwordSpacing: currentHeadwordSpacingPadding
         )
         let service = furiganaPipeline
-        CustomLogger.shared.info("Creating furigana task token \(token) for text length \(currentText.count). ShowFurigana: \(currentShowFurigana)")
         return {
             let result = await service.render(pipelineInput)
             await MainActor.run {
                 guard Task.isCancelled == false else {
-                    CustomLogger.shared.info("Discarded cancelled furigana task token \(token)")
                     return
                 }
                 guard token == furiganaRefreshToken else {
-                    CustomLogger.shared.info("Discarded stale furigana result token \(token); latest token is \(furiganaRefreshToken)")
                     return
                 }
                 guard inputText == currentText else {
-                    CustomLogger.shared.info("Discarded furigana result token \(token) because text changed before apply")
                     return
                 }
                 furiganaSpans = result.spans
                 furiganaSemanticSpans = result.semanticSpans
-                CustomLogger.shared.info("Applied spans: \(result.spans?.count ?? 0)")
                 if showFurigana == currentShowFurigana {
                     furiganaAttributedText = result.attributedString
                 } else if showFurigana == false {
