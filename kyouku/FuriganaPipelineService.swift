@@ -1,6 +1,36 @@
 import Foundation
 
 struct FuriganaPipelineService {
+    private static func isIgnorableTokenSurfaceScalar(_ scalar: UnicodeScalar) -> Bool {
+        // Regular whitespace/newlines.
+        if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
+
+        // Common invisible separators that can appear in copied text.
+        switch scalar.value {
+        case 0x00AD: return true // soft hyphen
+        case 0x034F: return true // combining grapheme joiner
+        case 0x061C: return true // arabic letter mark
+        case 0x180E: return true // mongolian vowel separator (deprecated but seen in the wild)
+        case 0x200B: return true // zero width space
+        case 0x200C: return true // zero width non-joiner
+        case 0x200D: return true // zero width joiner
+        case 0x2060: return true // word joiner
+        case 0xFEFF: return true // zero width no-break space / BOM
+        default: break
+        }
+
+        // Variation selectors (VS1..VS16) and IVS (Variation Selector Supplement).
+        // These can appear in Japanese text like 朕󠄂 / 通󠄁 and render “invisible” on their own.
+        if (0xFE00...0xFE0F).contains(scalar.value) { return true }
+        if (0xE0100...0xE01EF).contains(scalar.value) { return true }
+
+        return false
+    }
+
+    private static func isEffectivelyEmptyTokenSurface(_ surface: String) -> Bool {
+        surface.unicodeScalars.allSatisfy { isIgnorableTokenSurfaceScalar($0) }
+    }
+
     struct Input {
         let text: String
         let showFurigana: Bool
@@ -103,7 +133,7 @@ struct FuriganaPipelineService {
                     if pieceStart < r.location {
                         let piece = NSRange(location: pieceStart, length: r.location - pieceStart)
                         let surface = nsText.substring(with: piece)
-                        if surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                        if isEffectivelyEmptyTokenSurface(surface) == false {
                             out.append(
                                 SemanticSpan(
                                     range: piece,
@@ -122,7 +152,7 @@ struct FuriganaPipelineService {
             if pieceStart < end {
                 let piece = NSRange(location: pieceStart, length: end - pieceStart)
                 let surface = nsText.substring(with: piece)
-                if surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                if isEffectivelyEmptyTokenSurface(surface) == false {
                     let reading = (piece == clamped) ? span.readingKana : nil
                     out.append(
                         SemanticSpan(

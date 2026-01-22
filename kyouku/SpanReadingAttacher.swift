@@ -110,7 +110,7 @@ struct SpanReadingAttacher {
         for span in spans {
             let attachment = attachmentForSpan(span, annotations: annotations, tokenizer: tokenizer)
             let override = await ReadingOverridePolicy.shared.overrideReading(for: span.surface, mecabReading: attachment.reading)
-            let finalReading = override ?? attachment.reading
+            let finalReading = sanitizeRubyReading(override ?? attachment.reading)
 
             annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas, partOfSpeech: attachment.partOfSpeech))
         }
@@ -951,6 +951,16 @@ struct SpanReadingAttacher {
 
     private typealias RetokenizedResult = (reading: String, lemmas: [String])
 
+    private func sanitizeRubyReading(_ reading: String?) -> String? {
+        guard let reading else { return nil }
+        let trimmed = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return nil }
+        // Ruby should be kana. Drop anything that contains kanji or contains no kana.
+        guard containsKanji(trimmed) == false else { return nil }
+        guard trimmed.unicodeScalars.contains(where: { Self.isKana($0) }) else { return nil }
+        return trimmed
+    }
+
     private func attachmentForSpan(_ span: TextSpan, annotations: [MeCabAnnotation], tokenizer: Tokenizer) -> SpanAttachmentResult {
         guard span.range.length > 0 else { return SpanAttachmentResult(reading: nil, lemmas: [], partOfSpeech: nil) }
 
@@ -1015,6 +1025,24 @@ struct SpanReadingAttacher {
             } else if let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
                 let normalized = Self.toHiragana(retokenized.reading)
                 readingResult = normalized.isEmpty ? nil : normalized
+            }
+        }
+
+        // Reading sanitation:
+        // MeCab can legitimately produce tokens with empty readings (esp. for punctuation/rare glyphs),
+        // and our fallback path can yield `token.surface` as the “reading source”. When the surface is
+        // kanji (e.g. 以 / 對 / 茲), this produces a kanji "reading" which then gets rendered as ruby.
+        // Only keep readings that contain at least one kana scalar and contain no kanji.
+        if let r = readingResult {
+            let trimmed = r.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                readingResult = nil
+            } else if containsKanji(trimmed) {
+                readingResult = nil
+            } else if trimmed.unicodeScalars.contains(where: { Self.isKana($0) }) == false {
+                readingResult = nil
+            } else {
+                readingResult = trimmed
             }
         }
 

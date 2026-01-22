@@ -185,6 +185,7 @@ enum FuriganaAttributedTextBuilder {
             guard let reading = annotatedSpan.readingKana, annotatedSpan.span.range.location != NSNotFound else { continue }
             guard annotatedSpan.span.range.length > 0 else { continue }
             guard containsKanji(in: annotatedSpan.span.surface) else { continue }
+            guard isValidRubyReading(reading) else { continue }
 
             // Some segmentation outputs isolate the kanji and exclude the following okurigana.
             // If we only project within that kanji-only range, the projector cannot split readings
@@ -269,6 +270,7 @@ enum FuriganaAttributedTextBuilder {
             guard let reading = semantic.readingKana, semantic.range.location != NSNotFound else { continue }
             guard semantic.range.length > 0 else { continue }
             guard containsKanji(in: semantic.surface) else { continue }
+            guard isValidRubyReading(reading) else { continue }
             guard NSMaxRange(semantic.range) <= nsText.length else { continue }
 
             // The semantic span range already includes any okurigana that is proven
@@ -309,6 +311,16 @@ enum FuriganaAttributedTextBuilder {
 
     private static func containsKanji(in text: String) -> Bool {
         text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+    }
+
+    private static func isValidRubyReading(_ reading: String) -> Bool {
+        let trimmed = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return false }
+        // Ruby readings should be kana. If a reading contains kanji (or contains no kana),
+        // skip ruby rather than rendering duplicated kanji above the base.
+        if containsKanji(in: trimmed) { return false }
+        let hasKana = trimmed.unicodeScalars.contains { (0x3040...0x309F).contains($0.value) || (0x30A0...0x30FF).contains($0.value) }
+        return hasKana
     }
 
     private static func extendRangeForwardOverKana(_ range: NSRange, in text: NSString, maxEnd: Int) -> NSRange {
@@ -565,40 +577,43 @@ private extension FuriganaAttributedTextBuilder {
         let trigger = max(0.5, rubyFont.pointSize * 0.1)
         guard overhang > trigger else { return [] }
 
-        let maxPad = max(1.0, baseFont.pointSize * 0.85)
+        // Cap padding so we don't explode tracking on very long readings.
+        // This is intentionally generous; the wrap delegate will prefer breaking at span boundaries.
+        let maxPad = max(1.0, baseFont.pointSize * 1.25)
         let totalPad = min(overhang, maxPad)
         let perSide = max(0.5, totalPad / 2.0)
         guard perSide > 0 else { return [] }
 
         var adjustments: [HeadwordSpacingAdjustment] = []
 
-        if headwordRange.location > 0 {
-            let beforeIndex = headwordRange.location - 1
-            let beforeRange = text.rangeOfComposedCharacterSequence(at: beforeIndex)
-            if beforeRange.location != NSNotFound,
-               NSMaxRange(beforeRange) <= text.length {
-                let preceding = text.substring(with: beforeRange)
-                if preceding.trimmingCharacters(in: whitespaceAndNewlineSet).isEmpty == false {
-                    adjustments.append(HeadwordSpacingAdjustment(range: beforeRange, kern: perSide))
-                }
+        // Apply padding INSIDE the headword so it remains effective at soft-wrap line starts
+        // and at visual line ends. Applying kern only "after" the last glyph can be ignored
+        // by the layout engine when the run ends the line/document.
+        var glyphRanges: [NSRange] = []
+        glyphRanges.reserveCapacity(min(8, headwordRange.length))
+
+        var cursor = headwordRange.location
+        let upperBound = NSMaxRange(headwordRange)
+        while cursor < upperBound {
+            let r = text.rangeOfComposedCharacterSequence(at: cursor)
+            guard r.location != NSNotFound, r.length > 0 else { break }
+            guard NSMaxRange(r) <= upperBound else { break }
+            let s = text.substring(with: r)
+            if s.trimmingCharacters(in: whitespaceAndNewlineSet).isEmpty == false {
+                glyphRanges.append(r)
             }
+            cursor = NSMaxRange(r)
         }
 
-        let afterBoundary = NSMaxRange(headwordRange)
-        if afterBoundary < text.length {
-            let followingRange = text.rangeOfComposedCharacterSequence(at: afterBoundary)
-            if followingRange.location != NSNotFound,
-               NSMaxRange(followingRange) <= text.length {
-                let following = text.substring(with: followingRange)
-                if following.trimmingCharacters(in: whitespaceAndNewlineSet).isEmpty == false {
-                    let lastIndex = max(headwordRange.location, afterBoundary - 1)
-                    let lastRange = text.rangeOfComposedCharacterSequence(at: lastIndex)
-                    if lastRange.location != NSNotFound,
-                       NSMaxRange(lastRange) <= text.length {
-                        adjustments.append(HeadwordSpacingAdjustment(range: lastRange, kern: perSide))
-                    }
-                }
+        if glyphRanges.count >= 2 {
+            // Distribute padding across inter-glyph gaps.
+            let perGap = max(0.25, totalPad / CGFloat(max(1, glyphRanges.count - 1)))
+            for r in glyphRanges.dropLast() {
+                adjustments.append(HeadwordSpacingAdjustment(range: r, kern: perGap))
             }
+        } else if let only = glyphRanges.first {
+            // Single glyph (common for lone kanji): fall back to trailing kern on the glyph.
+            adjustments.append(HeadwordSpacingAdjustment(range: only, kern: totalPad))
         }
 
         return adjustments

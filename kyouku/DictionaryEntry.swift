@@ -34,11 +34,43 @@ struct DictionaryEntry: Identifiable, Hashable {
     var id: String { stableIdentifier }
 }
 
-private struct RawDictionaryRow {
-    let entryID: Int64
-    let kanji: String
-    let gloss: String
+struct DictionaryEntryForm: Identifiable, Hashable {
+    let id: Int64
+    let text: String
     let isCommon: Bool
+    let tags: [String]
+}
+
+struct DictionarySenseGloss: Identifiable, Hashable {
+    let id: Int64
+    let text: String
+    let language: String
+    let orderIndex: Int
+}
+
+struct DictionaryEntrySense: Identifiable, Hashable {
+    let id: Int64
+    let orderIndex: Int
+    let partsOfSpeech: [String]
+    let miscellaneous: [String]
+    let fields: [String]
+    let dialects: [String]
+    let glosses: [DictionarySenseGloss]
+}
+
+struct DictionaryEntryDetail: Identifiable, Hashable {
+    let entryID: Int64
+    let isCommon: Bool
+    let kanjiForms: [DictionaryEntryForm]
+    let kanaForms: [DictionaryEntryForm]
+    let senses: [DictionaryEntrySense]
+
+    var id: Int64 { entryID }
+}
+
+private struct RawDictionaryRow {
+    // Removed: lookup now returns one row per JMdict entry and no longer expands
+    // kana variants into separate DictionaryEntry results.
 }
 
 
@@ -191,6 +223,19 @@ actor DictionarySQLiteStore {
     /// (e.g., prefer English gloss matches for Latin input).
     func lookup(term: String, limit: Int = 30, mode: DictionarySearchMode) async throws -> [DictionaryEntry] {
         try lookupSync(term: term, limit: limit, mode: mode)
+    }
+
+    func fetchEntryDetails(for entryIDs: [Int64]) async throws -> [DictionaryEntryDetail] {
+        try fetchEntryDetailsSync(for: entryIDs)
+    }
+
+    /// Returns a best-effort priority score for each entry based on JMdict tags.
+    /// Lower scores indicate higher priority (more common/important forms).
+    ///
+    /// This helps produce Jisho-like ordering when many entries share the same
+    /// reading/surface (e.g. こと → 事/言/琴…).
+    func fetchEntryPriorityScores(for entryIDs: [Int64]) async throws -> [Int64: Int] {
+        try fetchEntryPriorityScoresSync(for: entryIDs)
     }
 
     private func queryExactMatches(for term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -365,10 +410,14 @@ actor DictionarySQLiteStore {
                          WHERE r.entry_id = e.id
                          ORDER BY r.is_common DESC, r.id ASC
                          LIMIT 1), '') AS kana_text,
-               COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
-                         FROM senses s
-                         JOIN glosses g ON g.sense_id = s.id
-                         WHERE s.entry_id = e.id), '') AS gloss_text,
+                             COALESCE((SELECT GROUP_CONCAT(t.text, '; ')
+                                                 FROM (
+                                                         SELECT g.text AS text
+                                                         FROM senses s
+                                                         JOIN glosses g ON g.sense_id = s.id
+                                                         WHERE s.entry_id = e.id
+                                                         ORDER BY s.order_index ASC, g.order_index ASC, g.id ASC
+                                                 ) t), '') AS gloss_text,
                CASE
                  WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
                    OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
@@ -390,23 +439,75 @@ actor DictionarySQLiteStore {
         sqlite3_bind_text(stmt, 1, term, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
-        var rows: [RawDictionaryRow] = []
+        var out: [DictionaryEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
+            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(RawDictionaryRow(entryID: id, kanji: kanji, gloss: gloss, isCommon: isCommon))
+            let trimmedKana = kanaText.trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(
+                DictionaryEntry(
+                    entryID: id,
+                    kanji: kanji,
+                    kana: trimmedKana.isEmpty ? nil : trimmedKana,
+                    gloss: gloss,
+                    isCommon: isCommon
+                )
+            )
         }
 
-        return try expandRows(rows)
+        return out
     }
 
     private func selectEntriesByGloss(matching term: String, limit: Int) throws -> [DictionaryEntry] {
-        guard hasGlossesFTS else { return [] }
         guard let db else { return [] }
-        guard let ftsQuery = buildFTSQuery(from: term) else { return [] }
-        let sql = """
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return [] }
+
+        if hasGlossesFTS {
+            guard let ftsQuery = buildFTSQuery(from: trimmed) else { return [] }
+        let rankedSQL = """
+        WITH matched AS (
+            SELECT entry_id, MIN(bm25(glosses_fts)) AS score
+            FROM glosses_fts
+            WHERE glosses_fts MATCH ?1
+            GROUP BY entry_id
+            ORDER BY score ASC
+            LIMIT ?2
+        )
+        SELECT e.id,
+               COALESCE((SELECT k.text
+                         FROM kanji k
+                         WHERE k.entry_id = e.id
+                         ORDER BY k.is_common DESC, k.id ASC
+                         LIMIT 1), '') AS kanji_text,
+               COALESCE((SELECT r.text
+                         FROM kana_forms r
+                         WHERE r.entry_id = e.id
+                         ORDER BY r.is_common DESC, r.id ASC
+                         LIMIT 1), '') AS kana_text,
+                             COALESCE((SELECT GROUP_CONCAT(t.text, '; ')
+                                                 FROM (
+                                                         SELECT g.text AS text
+                                                         FROM senses s
+                                                         JOIN glosses g ON g.sense_id = s.id
+                                                         WHERE s.entry_id = e.id
+                                                         ORDER BY s.order_index ASC, g.order_index ASC, g.id ASC
+                                                 ) t), '') AS gloss_text,
+               CASE
+                 WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
+                   OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
+               THEN 1 ELSE 0 END AS is_common_flag,
+               m.score
+        FROM entries e
+        JOIN matched m ON m.entry_id = e.id
+        ORDER BY m.score ASC, is_common_flag DESC, e.id ASC
+        LIMIT ?2;
+        """
+
+        let fallbackSQL = """
         WITH matched AS (
             SELECT entry_id
             FROM glosses_fts
@@ -425,10 +526,14 @@ actor DictionarySQLiteStore {
                          WHERE r.entry_id = e.id
                          ORDER BY r.is_common DESC, r.id ASC
                          LIMIT 1), '') AS kana_text,
-               COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
-                         FROM senses s
-                         JOIN glosses g ON g.sense_id = s.id
-                         WHERE s.entry_id = e.id), '') AS gloss_text,
+                             COALESCE((SELECT GROUP_CONCAT(t.text, '; ')
+                                                 FROM (
+                                                         SELECT g.text AS text
+                                                         FROM senses s
+                                                         JOIN glosses g ON g.sense_id = s.id
+                                                         WHERE s.entry_id = e.id
+                                                         ORDER BY s.order_index ASC, g.order_index ASC, g.id ASC
+                                                 ) t), '') AS gloss_text,
                CASE
                  WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
                    OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
@@ -438,7 +543,98 @@ actor DictionarySQLiteStore {
         LIMIT ?2;
         """
 
-        lastQueryDescription = "selectEntriesByGloss term='\(term)' fts='\(ftsQuery)' limit=\(limit)\n" + sql
+        var stmt: OpaquePointer?
+        var sqlUsed = rankedSQL
+        if sqlite3_prepare_v2(db, rankedSQL, -1, &stmt, nil) != SQLITE_OK {
+            // Some SQLite builds/FTS schemas may not support bm25(); fall back to a basic query.
+            sqlUsed = fallbackSQL
+            if sqlite3_prepare_v2(db, fallbackSQL, -1, &stmt, nil) != SQLITE_OK {
+                throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+        defer { sqlite3_finalize(stmt) }
+
+            lastQueryDescription = "selectEntriesByGloss term='\(trimmed)' fts='\(ftsQuery)' limit=\(limit)\n" + sqlUsed
+
+        sqlite3_bind_text(stmt, 1, ftsQuery, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
+
+        var out: [DictionaryEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = sqlite3_column_int64(stmt, 0)
+            let kanji = String(cString: sqlite3_column_text(stmt, 1))
+            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
+            let gloss = String(cString: sqlite3_column_text(stmt, 3))
+            let isCommon = sqlite3_column_int(stmt, 4) != 0
+            let trimmedKana = kanaText.trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(
+                DictionaryEntry(
+                    entryID: id,
+                    kanji: kanji,
+                    kana: trimmedKana.isEmpty ? nil : trimmedKana,
+                    gloss: gloss,
+                    isCommon: isCommon
+                )
+            )
+        }
+        return out
+        }
+
+        // Fallback when the bundled DB lacks the optional gloss FTS table (or it wasn't detected).
+        // This is slower than FTS but keeps EN search functional.
+        let lower = trimmed.lowercased()
+        var tokens: [String] = []
+        var current = ""
+        for ch in lower {
+            if ch.isLetter || ch.isNumber {
+                current.append(ch)
+            } else if current.isEmpty == false {
+                tokens.append(current)
+                current.removeAll(keepingCapacity: false)
+            }
+        }
+        if current.isEmpty == false { tokens.append(current) }
+        guard tokens.isEmpty == false else { return [] }
+
+        let likeClauses = tokens.enumerated().map { idx, _ in
+            "lower(g.text) LIKE '%' || ?\(idx + 1) || '%'"
+        }.joined(separator: " AND ")
+
+        let sql = """
+        WITH matched AS (
+            SELECT s.entry_id
+            FROM glosses g
+            JOIN senses s ON s.id = g.sense_id
+            WHERE (g.lang = 'eng' OR g.lang IS NULL OR g.lang = '')
+              AND \(likeClauses)
+            GROUP BY s.entry_id
+            LIMIT ?\(tokens.count + 1)
+        )
+        SELECT e.id,
+               COALESCE((SELECT k.text
+                         FROM kanji k
+                         WHERE k.entry_id = e.id
+                         ORDER BY k.is_common DESC, k.id ASC
+                         LIMIT 1), '') AS kanji_text,
+               COALESCE((SELECT r.text
+                         FROM kana_forms r
+                         WHERE r.entry_id = e.id
+                         ORDER BY r.is_common DESC, r.id ASC
+                         LIMIT 1), '') AS kana_text,
+               COALESCE((SELECT GROUP_CONCAT(g2.text, '; ')
+                         FROM senses s2
+                         JOIN glosses g2 ON g2.sense_id = s2.id
+                         WHERE s2.entry_id = e.id), '') AS gloss_text,
+               CASE
+                 WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
+                   OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
+               THEN 1 ELSE 0 END AS is_common_flag
+        FROM entries e
+        JOIN matched m ON m.entry_id = e.id
+        LIMIT ?\(tokens.count + 1);
+        """
+
+        lastQueryDescription = "selectEntriesByGlossFallback term='\(trimmed)' tokens='\(tokens.joined(separator: " "))' limit=\(limit)\n" + sql
 
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
@@ -446,18 +642,30 @@ actor DictionarySQLiteStore {
         }
         defer { sqlite3_finalize(stmt) }
 
-        sqlite3_bind_text(stmt, 1, ftsQuery, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-        sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
+        for (i, token) in tokens.enumerated() {
+            sqlite3_bind_text(stmt, Int32(i + 1), token, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
+        sqlite3_bind_int(stmt, Int32(tokens.count + 1), Int32(max(1, limit)))
 
-        var rows: [RawDictionaryRow] = []
+        var out: [DictionaryEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
+            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(RawDictionaryRow(entryID: id, kanji: kanji, gloss: gloss, isCommon: isCommon))
+            let trimmedKana = kanaText.trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(
+                DictionaryEntry(
+                    entryID: id,
+                    kanji: kanji,
+                    kana: trimmedKana.isEmpty ? nil : trimmedKana,
+                    gloss: gloss,
+                    isCommon: isCommon
+                )
+            )
         }
-        return try expandRows(rows)
+        return out
     }
 
     private func selectEntriesBySurfaceToken(matching term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -487,10 +695,14 @@ actor DictionarySQLiteStore {
                          WHERE r.entry_id = e.id
                          ORDER BY r.is_common DESC, r.id ASC
                          LIMIT 1), '') AS kana_text,
-               COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
-                         FROM senses s
-                         JOIN glosses g ON g.sense_id = s.id
-                         WHERE s.entry_id = e.id), '') AS gloss_text,
+                             COALESCE((SELECT GROUP_CONCAT(t.text, '; ')
+                                                 FROM (
+                                                         SELECT g.text AS text
+                                                         FROM senses s
+                                                         JOIN glosses g ON g.sense_id = s.id
+                                                         WHERE s.entry_id = e.id
+                                                         ORDER BY s.order_index ASC, g.order_index ASC, g.id ASC
+                                                 ) t), '') AS gloss_text,
                CASE
                  WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
                    OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
@@ -519,10 +731,14 @@ actor DictionarySQLiteStore {
                          WHERE r.entry_id = e.id
                          ORDER BY r.is_common DESC, r.id ASC
                          LIMIT 1), '') AS kana_text,
-               COALESCE((SELECT GROUP_CONCAT(g.text, '; ')
-                         FROM senses s
-                         JOIN glosses g ON g.sense_id = s.id
-                         WHERE s.entry_id = e.id), '') AS gloss_text,
+                             COALESCE((SELECT GROUP_CONCAT(t.text, '; ')
+                                                 FROM (
+                                                         SELECT g.text AS text
+                                                         FROM senses s
+                                                         JOIN glosses g ON g.sense_id = s.id
+                                                         WHERE s.entry_id = e.id
+                                                         ORDER BY s.order_index ASC, g.order_index ASC, g.id ASC
+                                                 ) t), '') AS gloss_text,
                CASE
                  WHEN EXISTS (SELECT 1 FROM kanji k3 WHERE k3.entry_id = e.id AND k3.is_common = 1)
                    OR EXISTS (SELECT 1 FROM kana_forms r3 WHERE r3.entry_id = e.id AND r3.is_common = 1)
@@ -553,15 +769,25 @@ actor DictionarySQLiteStore {
         }
         sqlite3_bind_int(stmt, 2, Int32(max(1, limit)))
 
-        var rows: [RawDictionaryRow] = []
+        var out: [DictionaryEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = sqlite3_column_int64(stmt, 0)
             let kanji = String(cString: sqlite3_column_text(stmt, 1))
+            let kanaText = String(cString: sqlite3_column_text(stmt, 2))
             let gloss = String(cString: sqlite3_column_text(stmt, 3))
             let isCommon = sqlite3_column_int(stmt, 4) != 0
-            rows.append(RawDictionaryRow(entryID: id, kanji: kanji, gloss: gloss, isCommon: isCommon))
+            let trimmedKana = kanaText.trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(
+                DictionaryEntry(
+                    entryID: id,
+                    kanji: kanji,
+                    kana: trimmedKana.isEmpty ? nil : trimmedKana,
+                    gloss: gloss,
+                    isCommon: isCommon
+                )
+            )
         }
-        return try expandRows(rows)
+        return out
     }
 
     /// Debug helper for surfacing the most recent SQL used in lookups.
@@ -569,42 +795,145 @@ actor DictionarySQLiteStore {
         lastQueryDescription
     }
 
-    private func expandRows(_ rows: [RawDictionaryRow]) throws -> [DictionaryEntry] {
-        guard rows.isEmpty == false else { return [] }
-        let entryIDs = Array(Set(rows.map { $0.entryID }))
-        let kanaMap = try fetchKanaVariants(for: entryIDs)
-        var expanded: [DictionaryEntry] = []
-        expanded.reserveCapacity(rows.count)
-        for row in rows {
-            let readings = kanaMap[row.entryID] ?? []
-            if readings.isEmpty {
-                expanded.append(DictionaryEntry(entryID: row.entryID, kanji: row.kanji, kana: nil, gloss: row.gloss, isCommon: row.isCommon))
-                continue
-            }
-            var seen: Set<String> = []
-            for reading in readings {
-                guard reading.isEmpty == false else { continue }
-                if seen.insert(reading).inserted == false { continue }
-                expanded.append(DictionaryEntry(entryID: row.entryID, kanji: row.kanji, kana: reading, gloss: row.gloss, isCommon: row.isCommon))
-            }
+    // NOTE: We intentionally no longer expand a single JMdict entry into multiple
+    // `DictionaryEntry` results per kana variant. Alternate readings are handled
+    // as a property of the entry (via `fetchEntryDetailsSync(for:)`).
+
+    private func fetchEntryDetailsSync(for entryIDs: [Int64]) throws -> [DictionaryEntryDetail] {
+        let ordered = orderedUniqueEntryIDs(entryIDs)
+        guard ordered.isEmpty == false else { return [] }
+        try ensureOpen()
+        guard db != nil else { return [] }
+
+        let metadata = try fetchEntryMetadata(for: ordered)
+        guard metadata.isEmpty == false else { return [] }
+
+        let kanjiMap = try fetchFormMap(table: "kanji", entryIDs: ordered)
+        let kanaMap = try fetchFormMap(table: "kana_forms", entryIDs: ordered)
+        let sensesMap = try fetchSensesMap(for: ordered)
+
+        var details: [DictionaryEntryDetail] = []
+        details.reserveCapacity(ordered.count)
+        for entryID in ordered {
+            guard let isCommon = metadata[entryID] else { continue }
+            let detail = DictionaryEntryDetail(
+                entryID: entryID,
+                isCommon: isCommon,
+                kanjiForms: kanjiMap[entryID] ?? [],
+                kanaForms: kanaMap[entryID] ?? [],
+                senses: sensesMap[entryID] ?? []
+            )
+            details.append(detail)
         }
-        return expanded
+        return details
     }
 
-    private func fetchKanaVariants(for entryIDs: [Int64]) throws -> [Int64: [String]] {
-        guard let db, entryIDs.isEmpty == false else { return [:] }
-        var mappings: [Int64: [String]] = [:]
-        let chunkSize = 500
-        var offset = 0
-        while offset < entryIDs.count {
-            let chunk = Array(entryIDs[offset..<min(entryIDs.count, offset + chunkSize)])
+    private func fetchEntryPriorityScoresSync(for entryIDs: [Int64]) throws -> [Int64: Int] {
+        let ordered = orderedUniqueEntryIDs(entryIDs)
+        guard ordered.isEmpty == false else { return [:] }
+        try ensureOpen()
+        guard let db else { return [:] }
+
+        func tagPriority(_ tag: String) -> Int? {
+            let t = tag.lowercased()
+            switch t {
+            case "ichi1": return 0
+            case "news1": return 1
+            case "spec1": return 2
+            case "gai1": return 3
+            case "ichi2": return 10
+            case "news2": return 11
+            case "spec2": return 12
+            case "gai2": return 13
+            default:
+                break
+            }
+
+            // JMdict frequency tags sometimes appear as nf01..nf48 (lower is more frequent).
+            if t.hasPrefix("nf"), t.count == 4 {
+                let digits = t.suffix(2)
+                if let v = Int(digits) {
+                    return 20 + v
+                }
+            }
+
+            // Optional JLPT-like tags if present.
+            if t.hasPrefix("jlpt"), let last = t.last, let n = Int(String(last)) {
+                return 80 + n
+            }
+
+            return nil
+        }
+
+        func bestTagScore(from tags: [String]) -> Int {
+            var best = Int.max
+            for tag in tags {
+                if let p = tagPriority(tag) {
+                    best = min(best, p)
+                }
+            }
+            return best == Int.max ? 200 : best
+        }
+
+        // Defaults to a high score; we lower it when we find better tags/common forms.
+        var bestByEntry: [Int64: Int] = [:]
+
+        for chunk in chunkedEntryIDs(ordered) {
             let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
             let sql = """
-            SELECT entry_id, text
-            FROM kana_forms
+            SELECT entry_id, is_common, tags
+            FROM kanji
             WHERE entry_id IN (\(placeholders))
-            ORDER BY entry_id ASC, is_common DESC, id ASC;
+            UNION ALL
+            SELECT entry_id, is_common, tags
+            FROM kana_forms
+            WHERE entry_id IN (\(placeholders));
             """
+
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+                throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+
+            // Bind the chunk twice (for the UNION ALL).
+            for (index, entryID) in chunk.enumerated() {
+                sqlite3_bind_int64(stmt, Int32(index + 1), entryID)
+            }
+            for (index, entryID) in chunk.enumerated() {
+                sqlite3_bind_int64(stmt, Int32(chunk.count + index + 1), entryID)
+            }
+
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let entryID = sqlite3_column_int64(stmt, 0)
+                let isCommon = sqlite3_column_int(stmt, 1) != 0
+                let rawTags = sqlite3_column_text(stmt, 2).flatMap { String(cString: $0) }
+                let tags = decodeTags(rawTags)
+
+                // Common forms should generally win when everything else ties.
+                let commonPenalty = isCommon ? 0 : 50
+                let tagScore = bestTagScore(from: tags)
+                let score = commonPenalty + tagScore
+
+                if let existing = bestByEntry[entryID] {
+                    if score < existing {
+                        bestByEntry[entryID] = score
+                    }
+                } else {
+                    bestByEntry[entryID] = score
+                }
+            }
+        }
+
+        return bestByEntry
+    }
+
+    private func fetchEntryMetadata(for entryIDs: [Int64]) throws -> [Int64: Bool] {
+        guard let db, entryIDs.isEmpty == false else { return [:] }
+        var metadata: [Int64: Bool] = [:]
+        for chunk in chunkedEntryIDs(entryIDs) {
+            let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+            let sql = "SELECT id, is_common FROM entries WHERE id IN (\(placeholders));"
             var stmt: OpaquePointer?
             if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
                 throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
@@ -615,14 +944,198 @@ actor DictionarySQLiteStore {
             }
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let entryID = sqlite3_column_int64(stmt, 0)
-                guard let textPtr = sqlite3_column_text(stmt, 1) else { continue }
-                let reading = String(cString: textPtr)
-                guard reading.isEmpty == false else { continue }
-                mappings[entryID, default: []].append(reading)
+                let isCommon = sqlite3_column_int(stmt, 1) != 0
+                metadata[entryID] = isCommon
             }
-            offset += chunk.count
         }
-        return mappings
+        return metadata
+    }
+
+    private func fetchFormMap(table: String, entryIDs: [Int64]) throws -> [Int64: [DictionaryEntryForm]] {
+        guard let db, entryIDs.isEmpty == false else { return [:] }
+        var map: [Int64: [DictionaryEntryForm]] = [:]
+        for chunk in chunkedEntryIDs(entryIDs) {
+            let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+            let sql = "SELECT id, entry_id, text, is_common, tags FROM \(table) WHERE entry_id IN (\(placeholders)) ORDER BY entry_id ASC, is_common DESC, id ASC;"
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+                throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+            for (index, entryID) in chunk.enumerated() {
+                sqlite3_bind_int64(stmt, Int32(index + 1), entryID)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let formID = sqlite3_column_int64(stmt, 0)
+                let entryID = sqlite3_column_int64(stmt, 1)
+                guard let textPtr = sqlite3_column_text(stmt, 2) else { continue }
+                let text = String(cString: textPtr)
+                guard text.isEmpty == false else { continue }
+                let isCommon = sqlite3_column_int(stmt, 3) != 0
+                let tagsValue = sqlite3_column_text(stmt, 4).flatMap { String(cString: $0) }
+                let form = DictionaryEntryForm(id: formID, text: text, isCommon: isCommon, tags: decodeTags(tagsValue))
+                map[entryID, default: []].append(form)
+            }
+        }
+        return map
+    }
+
+    private func fetchSensesMap(for entryIDs: [Int64]) throws -> [Int64: [DictionaryEntrySense]] {
+        guard let db, entryIDs.isEmpty == false else { return [:] }
+        var builders: [Int64: DictionaryEntrySenseBuilder] = [:]
+        var entrySenseIDs: [Int64: [Int64]] = [:]
+
+        for chunk in chunkedEntryIDs(entryIDs) {
+            let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+            let sql = "SELECT id, entry_id, order_index, pos, misc, field, dialect FROM senses WHERE entry_id IN (\(placeholders)) ORDER BY entry_id ASC, order_index ASC;"
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+                throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+            for (index, entryID) in chunk.enumerated() {
+                sqlite3_bind_int64(stmt, Int32(index + 1), entryID)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let senseID = sqlite3_column_int64(stmt, 0)
+                let entryID = sqlite3_column_int64(stmt, 1)
+                let orderIndex = Int(sqlite3_column_int(stmt, 2))
+                let pos = sqlite3_column_text(stmt, 3).flatMap { String(cString: $0) }
+                let misc = sqlite3_column_text(stmt, 4).flatMap { String(cString: $0) }
+                let field = sqlite3_column_text(stmt, 5).flatMap { String(cString: $0) }
+                let dialect = sqlite3_column_text(stmt, 6).flatMap { String(cString: $0) }
+                let builder = DictionaryEntrySenseBuilder(
+                    senseID: senseID,
+                    entryID: entryID,
+                    orderIndex: orderIndex,
+                    partsOfSpeech: decodeTags(pos),
+                    miscellaneous: decodeTags(misc),
+                    fields: decodeTags(field),
+                    dialects: decodeTags(dialect)
+                )
+                builders[senseID] = builder
+                entrySenseIDs[entryID, default: []].append(senseID)
+            }
+        }
+
+        let senseIDs = Array(builders.keys)
+        guard senseIDs.isEmpty == false else { return [:] }
+
+        for chunk in chunkedEntryIDs(senseIDs) {
+            let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+            let sql = "SELECT id, sense_id, entry_id, order_index, lang, text FROM glosses WHERE sense_id IN (\(placeholders)) ORDER BY sense_id ASC, order_index ASC;"
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+                throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+            for (index, senseID) in chunk.enumerated() {
+                sqlite3_bind_int64(stmt, Int32(index + 1), senseID)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let glossID = sqlite3_column_int64(stmt, 0)
+                let senseID = sqlite3_column_int64(stmt, 1)
+                let orderIndex = Int(sqlite3_column_int(stmt, 3))
+                guard let langPtr = sqlite3_column_text(stmt, 4) else { continue }
+                let language = String(cString: langPtr).lowercased()
+                guard language == "eng" else { continue }
+                guard let textPtr = sqlite3_column_text(stmt, 5) else { continue }
+                let text = String(cString: textPtr).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard text.isEmpty == false else { continue }
+                guard let builder = builders[senseID] else { continue }
+                let gloss = DictionarySenseGloss(id: glossID, text: text, language: language, orderIndex: orderIndex)
+                builder.glosses.append(gloss)
+            }
+        }
+
+        var map: [Int64: [DictionaryEntrySense]] = [:]
+        for (entryID, senseIDsForEntry) in entrySenseIDs {
+            var senses: [DictionaryEntrySense] = []
+            senses.reserveCapacity(senseIDsForEntry.count)
+            for senseID in senseIDsForEntry {
+                guard let builder = builders[senseID] else { continue }
+                let sense = builder.makeSense()
+                guard sense.glosses.isEmpty == false else { continue }
+                senses.append(sense)
+            }
+            if senses.isEmpty == false {
+                map[entryID] = senses
+            }
+        }
+        return map
+    }
+
+    private func orderedUniqueEntryIDs(_ ids: [Int64]) -> [Int64] {
+        var seen: Set<Int64> = []
+        var ordered: [Int64] = []
+        ordered.reserveCapacity(ids.count)
+        for id in ids {
+            if seen.insert(id).inserted {
+                ordered.append(id)
+            }
+        }
+        return ordered
+    }
+
+    private func chunkedEntryIDs(_ ids: [Int64], chunkSize: Int = 400) -> [[Int64]] {
+        guard ids.isEmpty == false else { return [] }
+        var result: [[Int64]] = []
+        result.reserveCapacity(max(1, ids.count / chunkSize))
+        var offset = 0
+        while offset < ids.count {
+            let end = min(ids.count, offset + chunkSize)
+            result.append(Array(ids[offset..<end]))
+            offset = end
+        }
+        return result
+    }
+
+    private func decodeTags(_ raw: String?) -> [String] {
+        guard let raw = raw, raw.isEmpty == false else { return [] }
+        return raw
+            .split(separator: ";", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+    }
+
+    private final class DictionaryEntrySenseBuilder {
+        let senseID: Int64
+        let entryID: Int64
+        let orderIndex: Int
+        let partsOfSpeech: [String]
+        let miscellaneous: [String]
+        let fields: [String]
+        let dialects: [String]
+        var glosses: [DictionarySenseGloss]
+
+        init(senseID: Int64, entryID: Int64, orderIndex: Int, partsOfSpeech: [String], miscellaneous: [String], fields: [String], dialects: [String]) {
+            self.senseID = senseID
+            self.entryID = entryID
+            self.orderIndex = orderIndex
+            self.partsOfSpeech = partsOfSpeech
+            self.miscellaneous = miscellaneous
+            self.fields = fields
+            self.dialects = dialects
+            self.glosses = []
+        }
+
+        func makeSense() -> DictionaryEntrySense {
+            let orderedGlosses = glosses.sorted { lhs, rhs in
+                if lhs.orderIndex == rhs.orderIndex {
+                    return lhs.id < rhs.id
+                }
+                return lhs.orderIndex < rhs.orderIndex
+            }
+            return DictionaryEntrySense(
+                id: senseID,
+                orderIndex: orderIndex,
+                partsOfSpeech: partsOfSpeech,
+                miscellaneous: miscellaneous,
+                fields: fields,
+                dialects: dialects,
+                glosses: orderedGlosses
+            )
+        }
     }
 
     private func containsKanjiCharacters(_ text: String) -> Bool {

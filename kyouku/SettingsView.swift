@@ -198,7 +198,7 @@ struct SettingsView: View {
                 }
             )
 
-            Toggle("Pad headwords when furigana are wider", isOn: $readingHeadwordSpacingPadding)
+            Toggle("Pad headwords", isOn: $readingHeadwordSpacingPadding)
                 .toggleStyle(.switch)
 
         }

@@ -75,7 +75,23 @@ struct ExtractWordsView: View {
 
     var body: some View {
         NavigationStack {
+            let dictionaryPanelBottomPadding: CGFloat = 12
             ZStack(alignment: .bottom) {
+                if sheetSelection != nil {
+                    // Visual separation: keep the dictionary panel distinct from the list behind.
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.00),
+                            Color.black.opacity(0.22)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
+
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
                         Button {
@@ -100,7 +116,7 @@ struct ExtractWordsView: View {
                         isReady: isReady,
                         isEditing: isEditing,
                         selectedRange: selectedRange,
-                        bottomOverscrollHeight: (sheetSelection != nil && dictionaryPanelHeight > 0) ? (dictionaryPanelHeight + 24) : 0,
+                        bottomOverscrollHeight: (sheetSelection != nil && dictionaryPanelHeight > 0) ? (dictionaryPanelHeight + dictionaryPanelBottomPadding) : 0,
                         onSelect: onSelect,
                         onGoTo: onGoTo,
                         onAdd: onAdd,
@@ -113,12 +129,11 @@ struct ExtractWordsView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
 
                 if let selection = sheetSelection {
                     dictionaryPanel(selection)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 24)
+                        .padding(.bottom, dictionaryPanelBottomPadding)
                         .background(
                             GeometryReader { proxy in
                                 Color.clear
@@ -141,11 +156,6 @@ struct ExtractWordsView: View {
             }
             .navigationTitle("Extract Words")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { onDone() }
-                }
-            }
         }
     }
 }
@@ -258,7 +268,7 @@ struct TokenListPanel: View {
             }
         }
         .padding(.horizontal, 12)
-        .padding(.bottom, 12)
+        .padding(.bottom, 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 

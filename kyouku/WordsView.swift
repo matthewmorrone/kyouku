@@ -84,12 +84,33 @@ struct WordsView: View {
 
     private var searchBar: some View {
         HStack(spacing: 0) {
-            TextField("Search Japanese or English", text: $searchText)
-                .textInputAutocapitalization(.never)
-                .disableAutocorrection(true)
-                .submitLabel(.search)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+            ZStack(alignment: .trailing) {
+                TextField("Search Japanese or English", text: $searchText)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .submitLabel(.search)
+                    .padding(.leading, 12)
+                    .padding(.trailing, searchText.isEmpty ? 12 : 34)
+                    .padding(.vertical, 10)
+
+                if searchText.isEmpty == false {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22, height: 22)
+                            .background(
+                                Circle()
+                                    .fill(Color(uiColor: .tertiarySystemFill))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 8)
+                    .accessibilityLabel("Clear search")
+                }
+            }
 
             Divider()
                 .frame(height: 28)

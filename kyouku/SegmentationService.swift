@@ -206,7 +206,27 @@ actor SegmentationService {
             offset = s.nextOffset
         }
 
-        return results
+        // DP fallback segments are singletons; coalesce adjacent non-lex spans so Stage 1
+        // still satisfies the “maximal same-script run” contract for katakana.
+        if results.count <= 1 { return results }
+        var merged: [SegmentedRange] = []
+        merged.reserveCapacity(results.count)
+        for seg in results {
+            if let last = merged.last,
+               last.isLexiconMatch == false,
+               seg.isLexiconMatch == false,
+               NSMaxRange(last.range) == seg.range.location {
+                let combined = SegmentedRange(
+                    range: NSRange(location: last.range.location, length: last.range.length + seg.range.length),
+                    isLexiconMatch: false
+                )
+                merged[merged.count - 1] = combined
+            } else {
+                merged.append(seg)
+            }
+        }
+
+        return merged
     }
 
     private static func trimmedRange(from range: NSRange, in text: NSString) -> NSRange? {
@@ -254,6 +274,14 @@ actor SegmentationService {
             segments.append(NSRange(location: segmentStart, length: upperBound - segmentStart))
         }
         return segments
+    }
+
+    private static func isHighSurrogate(_ unit: unichar) -> Bool {
+        (0xD800...0xDBFF).contains(Int(unit))
+    }
+
+    private static func isLowSurrogate(_ unit: unichar) -> Bool {
+        (0xDC00...0xDFFF).contains(Int(unit))
     }
 
     private func getTrie() async throws -> LexiconTrie {
@@ -327,7 +355,21 @@ actor SegmentationService {
 
             let unit = currentUnit
             guard let scalar = UnicodeScalar(unit) else {
-                cursor += 1
+                // Non-BMP scalars (e.g. IVS variation selectors like U+E0100) are encoded as
+                // UTF-16 surrogate pairs. Treat them as atomic boundary spans so Stage 1 always
+                // fully covers the input and never produces invalid UTF-16 substrings.
+                _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges)
+
+                var len = 1
+                if Self.isHighSurrogate(unit), (cursor + 1) < length {
+                    let next = text.character(at: cursor + 1)
+                    if Self.isLowSurrogate(next) {
+                        len = 2
+                    }
+                }
+
+                ranges.append(SegmentedRange(range: NSRange(location: cursor, length: len), isLexiconMatch: false))
+                cursor += len
                 continue
             }
 
@@ -398,7 +440,8 @@ actor SegmentationService {
         }
         func charSnippet(at index: Int) -> String {
             guard index >= 0, index < nsSwift.length else { return "<oob>" }
-            return snippet(NSRange(location: index, length: 1))
+            let r = nsSwift.rangeOfComposedCharacterSequence(at: index)
+            return snippet(r)
         }
 
         // A) Coverage: ranges must be contiguous and cover the full string.

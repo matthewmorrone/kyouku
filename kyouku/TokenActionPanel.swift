@@ -29,8 +29,7 @@ struct TokenActionPanel: View {
     @State private var leftBucketCount = 0
     @State private var dictionaryContentHeight: CGFloat = 0
 
-    @State private var surfaceReadingSuggestions: [String] = []
-    @State private var surfaceReadingSuggestionTask: Task<Void, Never>? = nil
+    @Environment(\.colorScheme) private var colorScheme
 
     private let dismissTranslationThreshold: CGFloat = 80
     private let outerPanelCornerRadius: CGFloat = 34
@@ -94,17 +93,37 @@ struct TokenActionPanel: View {
                 panelSurface
                     .background(
                         RoundedRectangle(cornerRadius: outerPanelCornerRadius, style: .continuous)
-                            .fill(.ultraThinMaterial)
+                            .fill(.ultraThickMaterial)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: outerPanelCornerRadius, style: .continuous)
+                                    .stroke(
+                                        (colorScheme == .dark) ? Color.white.opacity(0.10) : Color.black.opacity(0.10),
+                                        lineWidth: 1
+                                    )
+                            )
+                    )
+                    .shadow(
+                        color: Color.black.opacity((colorScheme == .dark) ? 0.55 : 0.18),
+                        radius: 18,
+                        x: 0,
+                        y: 8
                     )
             } else {
                 panelSurface
             }
         }
+        // Apply drag offset to the *entire* panel, including its material background.
+        // Applying offset inside `panelSurface` causes the background to feel like a separate
+        // panel because `offset` doesn't move layout.
+        .offset(y: max(0, dragOffset))
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: dragOffset)
     }
 
     private var panelSurface: some View {
         VStack(spacing: 12) {
+            // Let entry cards run edge-to-edge; keep padding for action controls.
             dictionaryScrollContainer
+                .padding(.horizontal, -20)
 
             actionRow
             if isSplitMenuVisible {
@@ -126,12 +145,10 @@ struct TokenActionPanel: View {
             resetSplitControls()
             resetHighlightedResult()
             focusSplitMenuIfNeeded(focusSplitMenu)
-            refreshSurfaceReadingSuggestions()
         }
         .onChange(of: selection) { _, _ in
             resetSplitControls()
             resetHighlightedResult()
-            refreshSurfaceReadingSuggestions()
         }
         .onChange(of: lookup.results) { _, _ in
             resetHighlightedResult()
@@ -140,61 +157,6 @@ struct TokenActionPanel: View {
             focusSplitMenuIfNeeded(newValue)
         }
         .contentShape(Rectangle())
-        .offset(y: max(0, dragOffset))
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: dragOffset)
-    }
-
-    private func refreshSurfaceReadingSuggestions() {
-        surfaceReadingSuggestionTask?.cancel()
-        surfaceReadingSuggestions = []
-
-        // Only useful when the caller supports applying custom readings.
-        guard onApplyCustomReading != nil else { return }
-
-        let surface = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard surface.isEmpty == false else { return }
-
-        surfaceReadingSuggestionTask = Task {
-            // Querying the DB can be slow; keep it off the main actor.
-            let readings: [String] = (try? await Task.detached(priority: .userInitiated) {
-                try await DictionarySQLiteStore.shared.listKanaReadings(forSurface: surface, limit: 8)
-            }.value) ?? []
-            if Task.isCancelled { return }
-
-            func foldToHiragana(_ value: String) -> String {
-                value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
-            }
-
-            let deduped: [String] = {
-                var seen: Set<String> = []
-                var out: [String] = []
-                for r in readings {
-                    let trimmed = r.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard trimmed.isEmpty == false else { continue }
-                    let key = foldToHiragana(trimmed)
-                    if seen.contains(key) { continue }
-                    seen.insert(key)
-                    out.append(trimmed)
-                }
-                return out
-            }()
-
-            await MainActor.run {
-                // Prefer the token's current reading (if any) by moving it to the front.
-                if let rawPreferred = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines), rawPreferred.isEmpty == false {
-                    let preferredKey = foldToHiragana(rawPreferred)
-                    if let idx = deduped.firstIndex(where: { foldToHiragana($0) == preferredKey }) {
-                        var reordered = deduped
-                        let value = reordered.remove(at: idx)
-                        reordered.insert(value, at: 0)
-                        surfaceReadingSuggestions = reordered
-                        return
-                    }
-                }
-
-                surfaceReadingSuggestions = deduped
-            }
-        }
     }
 
     private var actionRow: some View {
@@ -203,16 +165,16 @@ struct TokenActionPanel: View {
 
             actionIconButton(label: "Merge with next token", systemImage: "arrow.right.to.line.square", enabled: canMergeNext, action: onMergeNext)
 
-            if let onShowDefinitions {
-                actionIconButton(label: "Show all definitions", systemImage: "book", enabled: true, action: onShowDefinitions)
+            // Split controls should not appear for single-character selections.
+            if selection.range.length > 1 {
+                actionIconButton(
+                    label: "Adjust split",
+                    systemImage: "scissors",
+                    enabled: true,
+                    isActive: isSplitMenuVisible,
+                    action: toggleSplitMenu
+                )
             }
-            actionIconButton(
-                label: "Adjust split",
-                systemImage: "scissors",
-                enabled: selection.range.length > 1,
-                isActive: isSplitMenuVisible,
-                action: toggleSplitMenu
-            )
 
             if isSelectionCustomized {
                 actionIconButton(label: "Reset overrides", systemImage: "gobackward", enabled: true, action: onReset)
@@ -333,12 +295,12 @@ struct TokenActionPanel: View {
             lookup: lookup,
             selection: selection,
             preferredReading: preferredReading,
-            surfaceReadingSuggestions: surfaceReadingSuggestions,
             highlightedResultIndex: $highlightedResultIndex,
             onApplyReading: onApplyReading,
             onApplyCustomReading: onApplyCustomReading,
             onSaveWord: onSaveWord,
-            isWordSaved: isWordSaved
+            isWordSaved: isWordSaved,
+            onShowDefinitions: onShowDefinitions
         )
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
@@ -513,58 +475,90 @@ private struct LookupResultsView: View {
     @ObservedObject var lookup: DictionaryLookupViewModel
     let selection: TokenSelectionContext
     let preferredReading: String?
-    let surfaceReadingSuggestions: [String]
     @Binding var highlightedResultIndex: Int
     let onApplyReading: (DictionaryEntry) -> Void
     let onApplyCustomReading: ((String) -> Void)?
     let onSaveWord: (DictionaryEntry) -> Void
     let isWordSaved: ((DictionaryEntry) -> Bool)?
+    let onShowDefinitions: (() -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var isCustomReadingPromptPresented = false
     @State private var customReadingText = ""
 
+    @State private var highlightedEntryDetail: DictionaryEntryDetail? = nil
+    @State private var highlightedEntryDetailTask: Task<Void, Never>? = nil
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if lookup.isLoading {
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text("Searching…")
-                        .foregroundStyle(.secondary)
+                statusCard {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Searching…")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             } else if let error = lookup.errorMessage, error.isEmpty == false {
-                Text(error)
-                    .foregroundStyle(.secondary)
+                statusCard {
+                    Text(error)
+                        .foregroundStyle(.secondary)
+                        .font(.subheadline)
+                        .multilineTextAlignment(.leading)
+                }
             } else if lookup.results.isEmpty {
-                Text("No matches for \(selection.surface). Try editing the selection or typing a different term in the Dictionary tab.")
-                    .foregroundStyle(.secondary)
-                    .font(.subheadline)
-                    .multilineTextAlignment(.leading)
+                statusCard {
+                    Text("No matches for \(selection.surface). Try editing the selection or typing a different term in the Dictionary tab.")
+                        .foregroundStyle(.secondary)
+                        .font(.subheadline)
+                        .multilineTextAlignment(.leading)
+                }
             } else if let highlighted = highlightedEntry {
-                if lookup.results.count > 1 {
-                    HStack(alignment: .center, spacing: 0) {
-                        pagerButton(systemImage: "chevron.left", isDisabled: highlighted.index == 0) {
-                            goToPreviousResult()
-                        }
+                let hasPaging = lookup.results.count > 1
+                let positionText = hasPaging ? "\(highlighted.index + 1)/\(lookup.results.count)" : ""
+                let slotWidth: CGFloat = 18
+                let slotVerticalPadding: CGFloat = 48
 
-                        dictionaryCard(
-                            entry: highlighted.entry,
-                            positionText: "\(highlighted.index + 1)/\(lookup.results.count)"
-                        )
-                        .highPriorityGesture(horizontalSwipeGesture)
-
-                        pagerButton(systemImage: "chevron.right", isDisabled: highlighted.index >= lookup.results.count - 1) {
-                            goToNextResult()
+                dictionaryCard(entry: highlighted.entry, positionText: positionText)
+                    // Always reserve left/right space so single-result cards match the
+                    // multi-result layout, but without drawing arrows.
+                    .padding(.horizontal, slotWidth)
+                    .highPriorityGesture(horizontalSwipeGesture)
+                    // IMPORTANT: use overlays so the large hit-target padding does NOT
+                    // inflate the measured panel size.
+                    .overlay(alignment: .leading) {
+                        if hasPaging {
+                            pagerChevronOverlay(
+                                systemImage: "chevron.left",
+                                isDisabled: highlighted.index == 0,
+                                verticalPadding: slotVerticalPadding,
+                                action: goToPreviousResult
+                            )
+                            .frame(width: slotWidth)
                         }
                     }
-                } else {
-                    dictionaryCard(
-                        entry: highlighted.entry,
-                        positionText: ""
-                    )
-                }
+                    .overlay(alignment: .trailing) {
+                        if hasPaging {
+                            pagerChevronOverlay(
+                                systemImage: "chevron.right",
+                                isDisabled: highlighted.index >= lookup.results.count - 1,
+                                verticalPadding: slotVerticalPadding,
+                                action: goToNextResult
+                            )
+                            .frame(width: slotWidth)
+                        }
+                    }
             }
+        }
+        .onAppear {
+            refreshHighlightedEntryDetail()
+        }
+        .onChange(of: highlightedResultIndex) { _, _ in
+            refreshHighlightedEntryDetail()
+        }
+        .onChange(of: lookup.results) { _, _ in
+            refreshHighlightedEntryDetail()
         }
 
         .alert("Custom reading", isPresented: $isCustomReadingPromptPresented) {
@@ -583,17 +577,35 @@ private struct LookupResultsView: View {
         }
     }
 
-    private func pagerButton(systemImage: String, isDisabled: Bool, action: @escaping () -> Void) -> some View {
+    private func statusCard(@ViewBuilder content: () -> some View) -> some View {
+        // Match the result-card layout so status states feel like they belong to the inner panel.
+        // Also reserve the left/right pager slots so single-result + status states align.
+        let slotWidth: CGFloat = 18
+
+        return content()
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(DictionaryCardBackground(colorScheme: colorScheme))
+            .padding(.horizontal, slotWidth)
+    }
+
+    private func pagerChevronOverlay(
+        systemImage: String,
+        isDisabled: Bool,
+        verticalPadding: CGFloat,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.callout.weight(.semibold))
                 .frame(width: 18)
-                .padding(.vertical, 48)
+                .padding(.vertical, verticalPadding)
         }
         .buttonStyle(.plain)
         .foregroundColor(isDisabled ? Color.secondary.opacity(0.4) : .accentColor)
         .contentShape(Rectangle())
         .disabled(isDisabled)
+        .accessibilityLabel(systemImage == "chevron.left" ? "Previous result" : "Next result")
     }
 
     private var horizontalSwipeGesture: some Gesture {
@@ -624,17 +636,32 @@ private struct LookupResultsView: View {
         return (lookup.results[safeIndex], safeIndex)
     }
 
+    private func refreshHighlightedEntryDetail() {
+        highlightedEntryDetailTask?.cancel()
+        highlightedEntryDetail = nil
+
+        guard let entry = highlightedEntry?.entry else { return }
+        let entryID = entry.entryID
+
+        highlightedEntryDetailTask = Task {
+            let details: [DictionaryEntryDetail] = (try? await Task.detached(priority: .userInitiated) {
+                try await DictionarySQLiteStore.shared.fetchEntryDetails(for: [entryID])
+            }.value) ?? []
+            if Task.isCancelled { return }
+
+            await MainActor.run {
+                highlightedEntryDetail = details.first
+            }
+        }
+    }
+
     private func dictionaryCard(entry: DictionaryEntry, positionText: String) -> some View {
         let isSaved = isWordSaved?(entry) ?? false
         let activeReading = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let entryReading = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
         let isActiveDictionaryReading = activeReading.isEmpty == false && entryReading.isEmpty == false && activeReading == entryReading
-        let hasAnyDictionaryReadingMatch = activeReading.isEmpty == false && lookup.results.contains {
-            let candidate = ($0.kana ?? $0.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
-            return candidate.isEmpty == false && candidate == activeReading
-        }
-        let isActiveCustomReading = activeReading.isEmpty == false && hasAnyDictionaryReadingMatch == false
-        let shouldShowApplyReadingButton = lookup.results.count > 1
+        let isActiveCustomReading = activeReading.isEmpty == false && (activeReading != entryReading)
+        let shouldShowApplyReadingButton = true
 
         let tokenSurface = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokenReading = (selection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -724,11 +751,7 @@ private struct LookupResultsView: View {
         let showLemmaLine = lemmaSurface.isEmpty == false && lemmaSurface != tokenSurface
         let showLemmaReading = lemmaReading.isEmpty == false && lemmaReading != lemmaSurface
 
-        let foldedSurfaceReading = surfaceReading.applyingTransform(StringTransform.hiraganaToKatakana, reverse: true) ?? surfaceReading
-        let suggestedReadings: [String] = surfaceReadingSuggestions.filter { cand in
-            let folded = cand.applyingTransform(StringTransform.hiraganaToKatakana, reverse: true) ?? cand
-            return folded.isEmpty == false && folded != foldedSurfaceReading
-        }
+        let detail = (highlightedEntryDetail?.entryID == entry.entryID) ? highlightedEntryDetail : nil
 
         return VStack(alignment: .leading, spacing: 6) {
             // Surface (reading in parentheses)
@@ -749,21 +772,6 @@ private struct LookupResultsView: View {
                             isCustomReadingPromptPresented = true
                         }
                     }
-                }
-            }
-
-            if onApplyCustomReading != nil, suggestedReadings.isEmpty == false {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(suggestedReadings, id: \.self) { reading in
-                            Button(reading) {
-                                onApplyCustomReading?(reading)
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 2)
                 }
             }
 
@@ -789,7 +797,31 @@ private struct LookupResultsView: View {
                     .italic()
             }
 
-            if entry.gloss.isEmpty == false {
+            if let detail, detail.senses.isEmpty == false {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(detail.senses.prefix(2).enumerated()), id: \.element.id) { index, sense in
+                        let senseNumber = index + 1
+                        if let posLine = formattedTagsLine(from: sense.partsOfSpeech), posLine.isEmpty == false {
+                            Text(posLine)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .italic()
+                        }
+
+                        let glossText = sense.glosses
+                            .sorted(by: { $0.orderIndex < $1.orderIndex })
+                            .prefix(3)
+                            .map { $0.text }
+                            .joined(separator: "; ")
+                        if glossText.isEmpty == false {
+                            Text("\(senseNumber). \(glossText)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
+                    }
+                }
+            } else if entry.gloss.isEmpty == false {
                 Text(entry.gloss)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -806,6 +838,16 @@ private struct LookupResultsView: View {
                         onApplyReading(entry)
                     }
                     .disabled(canUseReading(entry) == false)
+                }
+
+                if let onShowDefinitions {
+                    iconActionButton(
+                        systemImage: "book",
+                        tint: .secondary,
+                        accessibilityLabel: "Show details"
+                    ) {
+                        onShowDefinitions()
+                    }
                 }
 
                 iconActionButton(
@@ -878,6 +920,20 @@ private struct LookupResultsView: View {
     private func canUseReading(_ entry: DictionaryEntry) -> Bool {
         let candidate = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
         return candidate.isEmpty == false
+    }
+
+    private func formattedTagsLine(from tags: [String]) -> String? {
+        guard tags.isEmpty == false else { return nil }
+        return tags.joined(separator: " · ")
+    }
+
+    private func formattedSenseMetadata(for sense: DictionaryEntrySense) -> String? {
+        var components: [String] = []
+        components.append(contentsOf: sense.miscellaneous)
+        components.append(contentsOf: sense.fields)
+        components.append(contentsOf: sense.dialects)
+        guard components.isEmpty == false else { return nil }
+        return components.joined(separator: " · ")
     }
 }
 

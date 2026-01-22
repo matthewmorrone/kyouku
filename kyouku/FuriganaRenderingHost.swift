@@ -209,8 +209,20 @@ struct FuriganaRenderingHost: View {
             if palette.isEmpty == false {
                 let coverageRanges = Self.coverageRanges(from: semanticSpans, textStorage: textStorage)
                 overlays.reserveCapacity(coverageRanges.count)
-                for (index, range) in coverageRanges.enumerated() {
-                    let color = palette[index % palette.count]
+                var alternationIndex = 0
+                for range in coverageRanges {
+                    let surface = textStorage.substring(with: range)
+                    let isHardBoundary = Self.isHardBoundaryOnlySurface(surface)
+
+                    let color: UIColor
+                    if isHardBoundary {
+                        let inheritedIndex = (alternationIndex == 0) ? 0 : (alternationIndex - 1)
+                        color = palette[inheritedIndex % palette.count]
+                    } else {
+                        color = palette[alternationIndex % palette.count]
+                        alternationIndex += 1
+                    }
+
                     overlays.append(RubyText.TokenOverlay(range: range, color: color))
                 }
             }
@@ -263,7 +275,50 @@ struct FuriganaRenderingHost: View {
     private static func containsNonWhitespace(in range: NSRange, textStorage: NSString) -> Bool {
         guard range.length > 0 else { return false }
         let substring = textStorage.substring(with: range)
-        return substring.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        // IMPORTANT: alternate-token-colors intentionally also colors “gaps” between
+        // semantic spans, to make unknown surfaces readable.
+        // However, copied Japanese text can include IVS/variation selectors and other
+        // zero-width/invisible scalars that should NOT produce standalone “tokens”.
+        return substring.unicodeScalars.contains { Self.isIgnorableTokenSurfaceScalar($0) == false }
+    }
+
+    private static func isHardBoundaryOnlySurface(_ surface: String) -> Bool {
+        if surface.isEmpty { return true }
+        let hardBoundary = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+        for scalar in surface.unicodeScalars {
+            if hardBoundary.contains(scalar) == false {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func isIgnorableTokenSurfaceScalar(_ scalar: UnicodeScalar) -> Bool {
+        // Regular whitespace/newlines.
+        if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
+
+        // Common invisible separators that can appear in copied text.
+        switch scalar.value {
+        case 0x00AD: return true // soft hyphen
+        case 0x034F: return true // combining grapheme joiner
+        case 0x061C: return true // arabic letter mark
+        case 0x180E: return true // mongolian vowel separator (deprecated but seen in the wild)
+        case 0x200B: return true // zero width space
+        case 0x200C: return true // zero width non-joiner
+        case 0x200D: return true // zero width joiner
+        case 0x2060: return true // word joiner
+        case 0xFEFF: return true // zero width no-break space / BOM
+        default: break
+        }
+
+        // Variation selectors (VS1..VS16) and IVS (Variation Selector Supplement).
+        // These can appear in Japanese text like 朕󠄂 / 通󠄁 and render “invisible” on their own.
+        if (0xFE00...0xFE0F).contains(scalar.value) { return true }
+        if (0xE0100...0xE01EF).contains(scalar.value) { return true }
+
+        return false
     }
 
     private static func clampRange(_ range: NSRange, length: Int) -> NSRange? {
@@ -313,7 +368,8 @@ private struct EditingTextView: UIViewRepresentable {
     let scrollSyncGroupID: String
     let insets: UIEdgeInsets
 
-    private static let noWrapContainerWidth: CGFloat = 20000
+    // Keep this large enough for real-world long lines when wrapping is disabled.
+    private static let noWrapContainerWidth: CGFloat = 200_000
 
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
@@ -588,10 +644,10 @@ private struct EditingTextView: UIViewRepresentable {
                     object: nil,
                     queue: .main
                 ) { [weak self] note in
-                    Task { [weak self, note] in
-                        await MainActor.run {
-                            self?.handleScrollSyncNotification(note)
-                        }
+                    guard let info = note.userInfo else { return }
+                    guard let payload = ScrollSyncPayload(userInfo: info) else { return }
+                    Task { @MainActor [weak self] in
+                        self?.handleScrollSyncPayload(payload)
                     }
                 }
             }
@@ -606,9 +662,14 @@ private struct EditingTextView: UIViewRepresentable {
             guard scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating else { return }
 
             let inset = scrollView.adjustedContentInset
-            let normalizedX = scrollView.contentOffset.x + inset.left
+
+            // When wrapping is enabled, horizontal scrolling isn't meaningful. Avoid emitting
+            // X snapshots (otherwise the other pane can get dragged around by tiny inset-only ranges).
+            let allowHorizontal = (tv.textContainer.widthTracksTextView == false)
+
+            let normalizedX = allowHorizontal ? (scrollView.contentOffset.x + inset.left) : 0
             let normalizedY = scrollView.contentOffset.y + inset.top
-            let maxX = max(0, scrollView.contentSize.width - scrollView.bounds.width + inset.left + inset.right)
+            let maxX = allowHorizontal ? max(0, scrollView.contentSize.width - scrollView.bounds.width + inset.left + inset.right) : 0
             let maxY = max(0, scrollView.contentSize.height - scrollView.bounds.height + inset.top + inset.bottom)
 
             let inRangeX = min(max(normalizedX, 0), maxX)
@@ -617,6 +678,7 @@ private struct EditingTextView: UIViewRepresentable {
             let fracY: CGFloat = (maxY > 0) ? (inRangeY / maxY) : 0
 
             let overscrollX: CGFloat = {
+                guard allowHorizontal else { return 0 }
                 if normalizedX < 0 { return normalizedX }
                 if normalizedX > maxX { return normalizedX - maxX }
                 return 0
@@ -678,19 +740,58 @@ private struct EditingTextView: UIViewRepresentable {
             handleScrollSyncNotification(Notification(name: .kyoukuSplitPaneScrollSync, object: nil, userInfo: info))
         }
 
+        private struct ScrollSyncPayload: Sendable {
+            let group: String
+            let source: String
+            let fx: Double
+            let fy: Double
+            let ox: Double
+            let oy: Double
+            let sx: Double
+            let sy: Double
+
+            init?(userInfo: [AnyHashable: Any]) {
+                guard let group = userInfo["group"] as? String, group.isEmpty == false else { return nil }
+                guard let source = userInfo["source"] as? String, source.isEmpty == false else { return nil }
+
+                func readDouble(_ key: String) -> Double {
+                    if let v = userInfo[key] as? Double { return v }
+                    if let v = userInfo[key] as? CGFloat { return Double(v) }
+                    if let v = userInfo[key] as? NSNumber { return v.doubleValue }
+                    return 0
+                }
+
+                self.group = group
+                self.source = source
+                self.fx = readDouble("fx")
+                self.fy = readDouble("fy")
+                self.ox = readDouble("ox")
+                self.oy = readDouble("oy")
+                self.sx = readDouble("sx")
+                self.sy = readDouble("sy")
+            }
+        }
+
         private func handleScrollSyncNotification(_ note: Notification) {
-            guard let tv = textView else { return }
+            guard textView != nil else { return }
             guard let group = scrollSyncGroupID, group.isEmpty == false else { return }
             guard let info = note.userInfo else { return }
-            guard let noteGroup = info["group"] as? String, noteGroup == group else { return }
-            guard let source = info["source"] as? String, source != scrollSyncSourceID else { return }
+            guard let payload = ScrollSyncPayload(userInfo: info) else { return }
+            handleScrollSyncPayload(payload)
+        }
 
-            let fx = (info["fx"] as? CGFloat) ?? CGFloat((info["fx"] as? Double) ?? 0)
-            let fy = (info["fy"] as? CGFloat) ?? CGFloat((info["fy"] as? Double) ?? 0)
-            let ox = (info["ox"] as? CGFloat) ?? CGFloat((info["ox"] as? Double) ?? 0)
-            let oy = (info["oy"] as? CGFloat) ?? CGFloat((info["oy"] as? Double) ?? 0)
-            let sx = (info["sx"] as? CGFloat) ?? CGFloat((info["sx"] as? Double) ?? 0)
-            let sy = (info["sy"] as? CGFloat) ?? CGFloat((info["sy"] as? Double) ?? 0)
+        private func handleScrollSyncPayload(_ payload: ScrollSyncPayload) {
+            guard let tv = textView else { return }
+            guard let group = scrollSyncGroupID, group.isEmpty == false else { return }
+            guard payload.group == group else { return }
+            guard payload.source != scrollSyncSourceID else { return }
+
+            let fx = CGFloat(payload.fx)
+            let fy = CGFloat(payload.fy)
+            let ox = CGFloat(payload.ox)
+            let oy = CGFloat(payload.oy)
+            let sx = CGFloat(payload.sx)
+            let sy = CGFloat(payload.sy)
 
             tv.layoutIfNeeded()
 
@@ -700,12 +801,18 @@ private struct EditingTextView: UIViewRepresentable {
 
             let clampedFX: CGFloat = min(max(fx, 0), 1)
             let clampedFY: CGFloat = min(max(fy, 0), 1)
-            let effectiveFX: CGFloat = (sx > 0) ? clampedFX : 0
-            let effectiveFY: CGFloat = (sy > 0) ? clampedFY : 0
+            let currentNormalizedX = tv.contentOffset.x + inset.left
+            let currentNormalizedY = tv.contentOffset.y + inset.top
+
+            let shouldSyncX = (sx > 0) && (maxX > 0)
+            let shouldSyncY = (sy > 0) && (maxY > 0)
+
+            let effectiveFX: CGFloat = shouldSyncX ? clampedFX : 0
+            let effectiveFY: CGFloat = shouldSyncY ? clampedFY : 0
 
             let desiredNormalized = CGPoint(
-                x: (maxX * effectiveFX) + ox,
-                y: (maxY * effectiveFY) + oy
+                x: shouldSyncX ? ((maxX * effectiveFX) + ox) : currentNormalizedX,
+                y: shouldSyncY ? ((maxY * effectiveFY) + oy) : currentNormalizedY
             )
 
             let desired = CGPoint(

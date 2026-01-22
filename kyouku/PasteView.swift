@@ -39,6 +39,8 @@ struct PasteView: View {
     @State private var currentNote: Note? = nil
     @State private var noteTitleInput: String = ""
     @State private var hasManuallyEditedTitle: Bool = false
+    @State private var isTitleEditAlertPresented: Bool = false
+    @State private var titleEditDraft: String = ""
     @State private var hasInitialized: Bool = false
     @State private var isEditing: Bool = false
     @State private var furiganaAttributedText: NSAttributedString? = nil
@@ -127,6 +129,8 @@ struct PasteView: View {
     @AppStorage("readingHighlightUnknownTokens") private var highlightUnknownTokens: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
+
+    @State private var showingFuriganaOptions: Bool = false
     @AppStorage("pasteViewScratchNoteID") private var scratchNoteIDRaw: String = ""
     @AppStorage("pasteViewLastOpenedNoteID") private var lastOpenedNoteIDRaw: String = ""
     @AppStorage("extractHideDuplicateTokens") private var hideDuplicateTokens: Bool = false
@@ -248,6 +252,18 @@ struct PasteView: View {
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { coreToolbar }
+            .alert("Set Title", isPresented: $isTitleEditAlertPresented) {
+                TextField("Title", text: $titleEditDraft)
+
+                Button("Cancel", role: .cancel) {
+                    // no-op
+                }
+                Button("Set") {
+                    applyTitleEditDraft()
+                }
+            } message: {
+                Text("Set a custom title for this note.")
+            }
             .safeAreaInset(edge: .bottom) { coreBottomInset }
             .onAppear { onAppearHandler() }
             .onDisappear {
@@ -601,10 +617,6 @@ struct PasteView: View {
             )
             .padding(.vertical, 16)
 
-            Divider()
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
-
             HStack(alignment: .center, spacing: 0) {
                 ControlCell {
                     Button {
@@ -633,16 +645,6 @@ struct PasteView: View {
                 }
 
                 ControlCell {
-                Button {
-                    guard isEditing == false else { return }
-                    showFurigana.toggle()
-                    if showFurigana {
-                        // Manual toggle should not force a fresh segmentation pass; reuse
-                        // existing spans and just rebuild the ruby text.
-                        triggerFuriganaRefreshIfNeeded(reason: "manual toggle button", recomputeSpans: false)
-                    }
-                    showToast(showFurigana ? "Furigana enabled" : "Furigana disabled")
-                } label: {
                     ZStack {
                         Color.clear.frame(width: 28, height: 28)
                         Image(showFurigana ? "furigana.on" : "furigana.off")
@@ -650,23 +652,42 @@ struct PasteView: View {
                             .foregroundColor(.accentColor)
                             .font(.system(size: 22))
                     }
+                    .contentShape(Rectangle())
+                    .opacity(isEditing ? 0.45 : 1.0)
+                    .onTapGesture {
+                        guard isEditing == false else { return }
+                        showFurigana.toggle()
+                        if showFurigana {
+                            // Manual toggle should not force a fresh segmentation pass; reuse
+                            // existing spans and just rebuild the ruby text.
+                            triggerFuriganaRefreshIfNeeded(reason: "manual toggle button", recomputeSpans: false)
+                        }
+                        showToast(showFurigana ? "Furigana enabled" : "Furigana disabled")
+                    }
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 0.35)
+                            .onEnded { _ in
+                                fireContextMenuHaptic()
+                                showingFuriganaOptions = true
+                            }
+                    )
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
+                    .accessibilityHint("Double tap to toggle. Press and hold for options.")
+                    .popover(
+                        isPresented: $showingFuriganaOptions,
+                        attachmentAnchor: .rect(.bounds),
+                        arrowEdge: .bottom
+                    ) {
+                        FuriganaOptionsPopover(
+                            wrapLines: $wrapLines,
+                            alternateTokenColors: $alternateTokenColors,
+                            highlightUnknownTokens: $highlightUnknownTokens,
+                            padHeadwords: $readingHeadwordSpacingPadding
+                        )
+                        .presentationCompactAdaptation(.popover)
+                    }
                 }
-                .tint(.accentColor)
-                .buttonStyle(.plain)
-                .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
-                .opacity(isEditing ? 0.45 : 1.0)
-                .contextMenu {
-                    Toggle(isOn: $wrapLines) {
-                        Label("Wrap Lines", systemImage: "text.justify")
-                    }
-                    Toggle(isOn: $alternateTokenColors) {
-                        Label("Alternate Token Colors", systemImage: "textformat.alt")
-                    }
-                    Toggle(isOn: $highlightUnknownTokens) {
-                        Label("Highlight Unknown Words", systemImage: "questionmark.square.dashed")
-                    }
-                }
-            }
 
             ControlCell {
                 Toggle(isOn: $isEditing) {
@@ -710,6 +731,39 @@ struct PasteView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func fireContextMenuHaptic() {
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    private struct FuriganaOptionsPopover: View {
+        @Binding var wrapLines: Bool
+        @Binding var alternateTokenColors: Bool
+        @Binding var highlightUnknownTokens: Bool
+        @Binding var padHeadwords: Bool
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: $wrapLines) {
+                    Label("Wrap Lines", systemImage: "text.justify")
+                }
+                Toggle(isOn: $padHeadwords) {
+                    Label("Pad headwords", systemImage: "textformat.size")
+                }
+                Toggle(isOn: $alternateTokenColors) {
+                    Label("Alternate Token Colors", systemImage: "textformat.alt")
+                }
+                Toggle(isOn: $highlightUnknownTokens) {
+                    Label("Highlight Unknown Words", systemImage: "questionmark.square.dashed")
+                }
+            }
+            .toggleStyle(.switch)
+            .padding(14)
+            .frame(maxWidth: 320)
         }
     }
 
@@ -843,6 +897,19 @@ struct PasteView: View {
 
     @ToolbarContentBuilder
     private var coreToolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            Button {
+                presentTitleEditAlert()
+            } label: {
+                Text(navigationTitleText)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Edit Title")
+            .accessibilityHint("Shows an alert to set the note title")
+        }
         ToolbarItem(placement: .topBarLeading) {
             adjustedSpansButton
         }
@@ -910,6 +977,9 @@ struct PasteView: View {
                 preferredReading: preferred,
                 canMergePrevious: canMergeSelection(.previous),
                 canMergeNext: canMergeSelection(.next),
+                onShowDefinitions: {
+                    presentWordDefinitions(for: selection)
+                },
                 onDismiss: { clearSelection(resetPersistent: true) },
                 onSaveWord: { entry in
                     toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
@@ -1146,6 +1216,49 @@ struct PasteView: View {
     private func normalizedTitle(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func isHardBoundaryOnly(_ surface: String) -> Bool {
+        if surface.isEmpty { return true }
+        let hardBoundary = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+        for scalar in surface.unicodeScalars {
+            if hardBoundary.contains(scalar) == false {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func presentTitleEditAlert() {
+        titleEditDraft = noteTitleInput
+        isTitleEditAlertPresented = true
+    }
+
+    private func applyTitleEditDraft() {
+        let normalized = normalizedTitle(titleEditDraft)
+
+        if normalized == nil {
+            hasManuallyEditedTitle = false
+            let fallback = inferredTitle(from: inputText)
+            noteTitleInput = fallback ?? ""
+            if var existing = currentNote {
+                existing.title = fallback
+                notes.updateNote(existing)
+                currentNote = existing
+            }
+            return
+        }
+
+        hasManuallyEditedTitle = true
+        noteTitleInput = normalized ?? ""
+
+        if var existing = currentNote {
+            existing.title = normalized
+            notes.updateNote(existing)
+            currentNote = existing
+        }
     }
 
     private func inferredTitle(from text: String) -> String? {
@@ -1627,6 +1740,9 @@ struct PasteView: View {
         guard furiganaSemanticSpans.indices.contains(index) else { return nil }
         let semantic = furiganaSemanticSpans[index]
         guard let trimmed = trimmedRangeAndSurface(for: semantic.range) else { return nil }
+        // Ignore punctuation/whitespace selections (e.g. "," "、" "。"),
+        // which are useful as hard boundaries but not meaningful lookup terms.
+        guard isHardBoundaryOnly(trimmed.surface) == false else { return nil }
         return TokenSelectionContext(
             tokenIndex: index,
             range: trimmed.range,
@@ -1639,6 +1755,7 @@ struct PasteView: View {
 
     private func presentDictionaryForSpan(at index: Int, focusSplitMenu: Bool) {
         guard let context = selectionContext(forSpanAt: index) else {
+            clearSelection(resetPersistent: true)
             return
         }
         pendingSelectionRange = nil
@@ -1706,7 +1823,11 @@ struct PasteView: View {
         }
 
         Task {
-            let entry = await lookupPreferredDictionaryEntry(surface: surface, reading: reading)
+            let entry = await lookupPreferredDictionaryEntry(
+                surface: surface,
+                reading: reading,
+                lemmaCandidates: context.annotatedSpan.lemmaCandidates
+            )
 
             await MainActor.run {
                 guard let entry else {
@@ -1728,19 +1849,35 @@ struct PasteView: View {
 
     private func addAllTokensToWordList() {
         let items = tokenListItems
-        guard items.isEmpty == false else { return }
+        guard items.isEmpty == false else {
+            showToast("No tokens to add")
+            return
+        }
+
+        let candidates = items.filter { $0.isAlreadySaved == false }
+        guard candidates.isEmpty == false else {
+            showToast("All words already saved")
+            return
+        }
+
+        showToast("Saving…")
         let noteID = currentNote?.id
 
         Task {
             var batch: [WordsStore.WordToAdd] = []
-            batch.reserveCapacity(items.count)
+            batch.reserveCapacity(candidates.count)
 
-            for item in items where item.isAlreadySaved == false {
+            for item in candidates {
                 let surface = item.surface.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard surface.isEmpty == false else { continue }
 
                 let reading = normalizedReading(item.reading)
-                let entry = await lookupPreferredDictionaryEntry(surface: surface, reading: reading)
+                let lemmaCandidates = selectionContext(forSpanAt: item.spanIndex)?.annotatedSpan.lemmaCandidates ?? []
+                let entry = await lookupPreferredDictionaryEntry(
+                    surface: surface,
+                    reading: reading,
+                    lemmaCandidates: lemmaCandidates
+                )
                 guard let entry else { continue }
 
                 let meaning = normalizedMeaning(from: entry.gloss)
@@ -1758,33 +1895,73 @@ struct PasteView: View {
                 batch.append(payload)
             }
 
-            guard batch.isEmpty == false else { return }
-
             await MainActor.run {
-                words.addMany(batch, sourceNoteID: noteID)
-                showToast("Saved \(batch.count) words")
+                if batch.isEmpty {
+                    showToast("No dictionary matches")
+                } else {
+                    words.addMany(batch, sourceNoteID: noteID)
+                    showToast("Saved \(batch.count) words")
+                }
             }
         }
     }
 
-    private func lookupPreferredDictionaryEntry(surface: String, reading: String?) async -> DictionaryEntry? {
+    private func lookupPreferredDictionaryEntry(surface: String, reading: String?, lemmaCandidates: [String] = []) async -> DictionaryEntry? {
         let normalizedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedReading = normalizedReading(reading)
-        let limit = 8
-        if normalizedSurface.isEmpty == false {
-            if let entries = try? await DictionarySQLiteStore.shared.lookup(term: normalizedSurface, limit: limit), entries.isEmpty == false {
-                if let desired = normalizedReading, let match = entries.first(where: { entryMatchesReading($0, reading: desired) }) {
-                    return match
+        let normalizedLemmas = lemmaCandidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+
+        let store = DictionarySQLiteStore.shared
+        let lookupLimit = 30
+
+        var terms: [String] = []
+        if normalizedSurface.isEmpty == false { terms.append(normalizedSurface) }
+        for lemma in normalizedLemmas where terms.contains(lemma) == false {
+            terms.append(lemma)
+        }
+        if let desired = normalizedReading, desired.isEmpty == false, terms.contains(desired) == false {
+            // Reading-only fallback (useful when the surface is inflected or otherwise not in JMdict).
+            terms.append(desired)
+        }
+
+        guard terms.isEmpty == false else { return nil }
+
+        var candidatesByID: [Int64: DictionaryEntry] = [:]
+        for term in terms {
+            if let rows = try? await store.lookup(term: term, limit: lookupLimit), rows.isEmpty == false {
+                for row in rows {
+                    candidatesByID[row.entryID] = row
                 }
-                return entries.first
             }
         }
-        if let desired = normalizedReading, desired.isEmpty == false {
-            if let readingHits = try? await DictionarySQLiteStore.shared.lookup(term: desired, limit: limit), readingHits.isEmpty == false {
-                return readingHits.first
+
+        var candidates = Array(candidatesByID.values)
+        guard candidates.isEmpty == false else { return nil }
+
+        // If we know the token's reading, require it for auto-picks.
+        if let desired = normalizedReading {
+            let filtered = candidates.filter { entryMatchesReading($0, reading: desired) }
+            if filtered.isEmpty == false {
+                candidates = filtered
             }
         }
-        return nil
+
+        let entryIDs = Array(Set(candidates.map { $0.entryID }))
+        let priority = (try? await store.fetchEntryPriorityScores(for: entryIDs)) ?? [:]
+        let details = (try? await store.fetchEntryDetails(for: entryIDs)) ?? []
+        let detailsByID: [Int64: DictionaryEntryDetail] = details.reduce(into: [:]) { partialResult, detail in
+            partialResult[detail.entryID] = detail
+        }
+
+        return DictionaryEntryResolver.chooseBest(
+            surface: normalizedSurface,
+            reading: normalizedReading,
+            candidates: candidates,
+            detailsByEntryID: detailsByID,
+            entryPriority: priority
+        )
     }
 
     private func entryMatchesReading(_ entry: DictionaryEntry, reading: String) -> Bool {

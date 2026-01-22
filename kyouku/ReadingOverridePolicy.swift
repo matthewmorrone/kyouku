@@ -71,6 +71,13 @@ actor ReadingOverridePolicy {
         let mutable = NSMutableString(string: trimmed) as CFMutableString
         CFStringTransform(mutable, nil, kCFStringTransformHiraganaKatakana, true)
         let normalized = (mutable as String).precomposedStringWithCanonicalMapping
-        return normalized.isEmpty ? nil : normalized
+        guard normalized.isEmpty == false else { return nil }
+        // Readings must be kana. If the DB contains an unexpected glyph (e.g. kanji),
+        // ignore it rather than propagating it into ruby rendering.
+        let containsKanji = normalized.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+        if containsKanji { return nil }
+        let containsKana = normalized.unicodeScalars.contains { (0x3040...0x309F).contains($0.value) || (0x30A0...0x30FF).contains($0.value) }
+        if containsKana == false { return nil }
+        return normalized
     }
 }
