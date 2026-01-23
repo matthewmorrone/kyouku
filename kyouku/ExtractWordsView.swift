@@ -146,7 +146,10 @@ struct ExtractWordsView: View {
             .onPreferenceChange(DictionaryPanelHeightPreferenceKey.self) { newValue in
                 let clamped = max(0, newValue)
                 if abs(dictionaryPanelHeight - clamped) > 0.5 {
-                    dictionaryPanelHeight = clamped
+                    // Avoid AttributeGraph cycles by deferring measurement-driven state writes.
+                    DispatchQueue.main.async {
+                        dictionaryPanelHeight = clamped
+                    }
                 }
             }
             .onChange(of: sheetSelection) { _, newValue in

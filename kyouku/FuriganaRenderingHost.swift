@@ -13,6 +13,8 @@ struct FuriganaRenderingHost: View {
     var isEditing: Bool
     var showFurigana: Bool
     var lineSpacing: Double
+    var globalKerningPixels: Double = 0
+    var padHeadwordSpacing: Bool = false
     var wrapLines: Bool = false
     var alternateTokenColors: Bool
     var highlightUnknownTokens: Bool
@@ -105,15 +107,21 @@ struct FuriganaRenderingHost: View {
 
         // Compute symmetric horizontal overhang to match view mode ruby behavior.
         // Use the same helper RubyText uses so edit/view modes align.
-        let attributed = furiganaText ?? NSAttributedString(string: text)
-        let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
-        let defaultRubyFontSize = max(1.0, CGFloat(textSize) * 0.6)
-        let rawOverhang = RubyText.requiredHorizontalInsetForRubyOverhang(
-            in: attributed,
-            baseFont: baseFont,
-            defaultRubyFontSize: defaultRubyFontSize
-        )
-        let insetOverhang = max(ceil(rawOverhang), 2)
+        let insetOverhang: CGFloat = {
+            guard padHeadwordSpacing else {
+                // When headword padding is disabled, allow ruby to overhang/clamp naturally.
+                return 0
+            }
+            let attributed = furiganaText ?? NSAttributedString(string: text)
+            let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
+            let defaultRubyFontSize = max(1.0, CGFloat(textSize) * 0.6)
+            let rawOverhang = RubyText.requiredHorizontalInsetForRubyOverhang(
+                in: attributed,
+                baseFont: baseFont,
+                defaultRubyFontSize: defaultRubyFontSize
+            )
+            return max(ceil(rawOverhang), 2)
+        }()
         let left = 12 + insetOverhang
         let right = 12 + insetOverhang
         return EdgeInsets(
@@ -130,14 +138,20 @@ struct FuriganaRenderingHost: View {
         viewMetricsContext: RubyText.ViewMetricsContext?
     ) -> some View {
         let attributed = resolvedAttributedText
-        let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
-        let defaultRubyFontSize = max(1, CGFloat(textSize) * 0.6)
-        let rawOverhang = RubyText.requiredHorizontalInsetForRubyOverhang(
-            in: attributed,
-            baseFont: baseFont,
-            defaultRubyFontSize: defaultRubyFontSize
-        )
-        let insetOverhang = max(ceil(rawOverhang), 2)
+        let insetOverhang: CGFloat = {
+            guard padHeadwordSpacing else {
+                // When headword padding is disabled, allow ruby to overhang/clamp naturally.
+                return 0
+            }
+            let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
+            let defaultRubyFontSize = max(1, CGFloat(textSize) * 0.6)
+            let rawOverhang = RubyText.requiredHorizontalInsetForRubyOverhang(
+                in: attributed,
+                baseFont: baseFont,
+                defaultRubyFontSize: defaultRubyFontSize
+            )
+            return max(ceil(rawOverhang), 2)
+        }()
         let insets = UIEdgeInsets(
             top: 8,
             left: 12 + insetOverhang,
@@ -155,6 +169,9 @@ struct FuriganaRenderingHost: View {
             annotationVisibility: annotationVisibility,
             isScrollEnabled: true,
             allowSystemTextSelection: false,
+            globalKerning: CGFloat(globalKerningPixels),
+            padHeadwordSpacing: padHeadwordSpacing,
+            rubyHorizontalAlignment: .center,
             wrapLines: wrapLines,
             horizontalScrollEnabled: wrapLines == false,
             scrollSyncGroupID: scrollSyncGroupID,

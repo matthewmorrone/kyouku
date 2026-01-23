@@ -4,6 +4,7 @@ struct WordDefinitionsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var notesStore: NotesStore
+    @Environment(\.dismiss) private var dismiss
 
     let surface: String
     let kana: String?
@@ -14,6 +15,7 @@ struct WordDefinitionsView: View {
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
     @State private var debugSQL: String = ""
+    @State private var expandedDefinitionRowIDs: Set<String> = []
 
     private struct DefinitionRow: Identifiable, Hashable {
         let headword: String
@@ -51,6 +53,9 @@ struct WordDefinitionsView: View {
                         Button {
                             router.noteToOpen = note
                             router.selectedTab = .paste
+                            // This view is presented inside a sheet; switching tabs alone does not
+                            // reveal the paste view while the sheet is still covering the UI.
+                            dismiss()
                         } label: {
                             Image(systemName: "arrowshape.turn.up.right")
                                 .font(.body.weight(.semibold))
@@ -244,6 +249,7 @@ struct WordDefinitionsView: View {
 
         let primaryGloss = row.pages.first?.gloss ?? ""
         let extraCount = max(0, row.pages.count - 1)
+        let isExpanded = expandedDefinitionRowIDs.contains(row.id)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -286,11 +292,31 @@ struct WordDefinitionsView: View {
                     // .modifier(dbgBG(LayoutDebugColor.DBG_ORANGE__DefinitionGloss))
             }
 
+            if isExpanded, row.pages.count > 1 {
+                ForEach(Array(row.pages.dropFirst().prefix(12))) { page in
+                    Text(page.gloss)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+            }
+
             if extraCount > 0 {
-                Text("+\(extraCount) more")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    // .modifier(dbgBG(LayoutDebugColor.DBG_GRAY__DefinitionMore))
+                Button {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                        if isExpanded {
+                            expandedDefinitionRowIDs.remove(row.id)
+                        } else {
+                            expandedDefinitionRowIDs.insert(row.id)
+                        }
+                    }
+                } label: {
+                    Text(isExpanded ? "Hide" : "+\(extraCount) more")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                // .modifier(dbgBG(LayoutDebugColor.DBG_GRAY__DefinitionMore))
             }
         }
         .padding(.vertical, 4)

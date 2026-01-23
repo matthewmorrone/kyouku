@@ -312,7 +312,11 @@ struct TokenActionPanel: View {
             .onPreferenceChange(DictionaryContentHeightPreferenceKey.self) { newValue in
                 let clamped = max(0, newValue)
                 if abs(dictionaryContentHeight - clamped) > 0.5 {
-                    dictionaryContentHeight = clamped
+                    // Avoid AttributeGraph cycles by deferring state writes triggered
+                    // during measurement/layout.
+                    DispatchQueue.main.async {
+                        dictionaryContentHeight = clamped
+                    }
                 }
             }
 

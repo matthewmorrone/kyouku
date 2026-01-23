@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
+    @AppStorage("readingGlobalKerningPixels") private var readingGlobalKerningPixels: Double = 0
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
@@ -139,6 +140,9 @@ struct SettingsView: View {
                 lineHeightMultiple: 1.0,
                 extraGap: CGFloat(pendingReadingLineSpacing),
                 isScrollEnabled: true,
+                globalKerning: CGFloat(readingGlobalKerningPixels),
+                padHeadwordSpacing: readingHeadwordSpacingPadding,
+                rubyHorizontalAlignment: .center,
                 enableTapInspection: false
             )
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -196,6 +200,18 @@ struct SettingsView: View {
                 onEditingChanged: { editing in
                     if editing == false { readingLineSpacing = pendingReadingLineSpacing }
                 }
+            )
+
+            HStack {
+                Text("Kerning")
+                Spacer()
+                Text(String(format: "%.2f px", readingGlobalKerningPixels))
+                    .foregroundStyle(.secondary)
+            }
+            Slider(
+                value: $readingGlobalKerningPixels,
+                in: -2.0...10.0,
+                step: 0.25
             )
 
             Toggle("Pad headwords", isOn: $readingHeadwordSpacingPadding)

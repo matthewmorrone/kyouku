@@ -122,6 +122,7 @@ struct PasteView: View {
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
+    @AppStorage("readingGlobalKerningPixels") private var readingGlobalKerningPixels: Double = 0
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingShowFurigana") private var showFurigana: Bool = true
     @AppStorage("readingWrapLines") private var wrapLines: Bool = false
@@ -157,12 +158,14 @@ struct PasteView: View {
     private static let coordinateSpaceName = "PasteViewRootSpace"
     private static let inlineDictionaryPanelEnabledFlag = true
     private static let dictionaryPopupEnabledFlag = true // Tap in paste area shows popup + highlight.
+    private static let dictionaryPopupLoggingEnabledFlag = false
     private static let incrementalLookupEnabledFlag = false
     private static let sheetMaxHeightFraction: CGFloat = 0.8
     private static let sheetExtraPadding: CGFloat = 36
     private let furiganaPipeline = FuriganaPipelineService()
     private var incrementalLookupEnabled: Bool { Self.incrementalLookupEnabledFlag }
     private var dictionaryPopupEnabled: Bool { Self.dictionaryPopupEnabledFlag && incrementalLookupEnabled == false && debugDisableDictionaryPopup == false }
+    private var dictionaryPopupLoggingEnabled: Bool { Self.dictionaryPopupLoggingEnabledFlag }
     private var inlineDictionaryPanelEnabled: Bool { Self.inlineDictionaryPanelEnabledFlag && dictionaryPopupEnabled }
     private var sheetDictionaryPanelEnabled: Bool { dictionaryPopupEnabled && inlineDictionaryPanelEnabled == false }
     private var pasteAreaDictionaryEnabled: Bool { false }
@@ -356,12 +359,20 @@ struct PasteView: View {
                     if let _ = newID {
                         if let ctx = newSelection {
                             let r = ctx.range
-                            CustomLogger.shared.debug("Dictionary popup shown (selection change) tokenIndex=\(ctx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
+                            if dictionaryPopupLoggingEnabled {
+                                CustomLogger.shared.debug(
+                                    "DICT show (selection) t=\(ctx.tokenIndex) r=\(r.location)..\(NSMaxRange(r)) s=\(ctx.surface) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)"
+                                )
+                            }
                         } else {
-                            CustomLogger.shared.debug("Dictionary popup shown (selection change)")
+                            if dictionaryPopupLoggingEnabled {
+                                CustomLogger.shared.debug("DICT show (selection)")
+                            }
                         }
                     } else {
-                        CustomLogger.shared.debug("Dictionary popup hidden (selection cleared)")
+                        if dictionaryPopupLoggingEnabled {
+                            CustomLogger.shared.debug("DICT hide (selection cleared)")
+                        }
                     }
                 }
                 handleSelectionLookup(for: newSelection?.surface ?? "")
@@ -371,12 +382,20 @@ struct PasteView: View {
                 if let _ = newID {
                     if let ctx = sheetSelection {
                         let r = ctx.range
-                        CustomLogger.shared.debug("Dictionary popup shown (sheet binding) tokenIndex=\(ctx.tokenIndex) range=\(r.location)-\(NSMaxRange(r)) surface=\(ctx.surface)")
+                        if dictionaryPopupLoggingEnabled {
+                            CustomLogger.shared.debug(
+                                "DICT show (sheet) t=\(ctx.tokenIndex) r=\(r.location)..\(NSMaxRange(r)) s=\(ctx.surface)"
+                            )
+                        }
                     } else {
-                        CustomLogger.shared.debug("Dictionary popup shown (sheet binding)")
+                        if dictionaryPopupLoggingEnabled {
+                            CustomLogger.shared.debug("DICT show (sheet)")
+                        }
                     }
                 } else {
-                    CustomLogger.shared.debug("Dictionary popup hidden (sheet binding cleared)")
+                    if dictionaryPopupLoggingEnabled {
+                        CustomLogger.shared.debug("DICT hide (sheet cleared)")
+                    }
                 }
             }
 
@@ -534,6 +553,8 @@ struct PasteView: View {
                 isEditing: isEditing,
                 showFurigana: incrementalLookupEnabled ? false : showFurigana,
                 lineSpacing: readingLineSpacing,
+                globalKerningPixels: readingGlobalKerningPixels,
+                padHeadwordSpacing: readingHeadwordSpacingPadding,
                 wrapLines: wrapLines,
                 alternateTokenColors: incrementalLookupEnabled ? false : alternateTokenColors,
                 highlightUnknownTokens: incrementalLookupEnabled ? false : highlightUnknownTokens,
@@ -866,6 +887,9 @@ struct PasteView: View {
             guard let trimmed = trimmedRangeAndSurface(for: semantic.range) else { continue }
             let surface = trimmed.surface.trimmingCharacters(in: .whitespacesAndNewlines)
             guard surface.isEmpty == false else { continue }
+            // Punctuation/whitespace-only spans are useful hard boundaries for segmentation,
+            // but not meaningful “words” to extract.
+            guard isHardBoundaryOnly(surface) == false else { continue }
 
             if hideCommonParticles, commonParticleSet.contains(surface) {
                 continue
@@ -1561,8 +1585,15 @@ struct PasteView: View {
                             )
                             .onPreferenceChange(SheetPanelHeightPreferenceKey.self) { newValue in
                                 let sanitized = sanitizeLength(newValue)
-                                sheetPanelHeight = sanitized
-                                measuredSheetHeight = sanitized
+                                // Updating state synchronously from a size preference can create
+                                // SwiftUI AttributeGraph cycles (layout -> preference -> state -> layout).
+                                // Defer to the next run loop to break the cycle.
+                                if abs(measuredSheetHeight - sanitized) > 0.5 {
+                                    DispatchQueue.main.async {
+                                        sheetPanelHeight = sanitized
+                                        measuredSheetHeight = sanitized
+                                    }
+                                }
                             }
                             .presentationDragIndicator(.visible)
                             .presentationDetents(Set([.height(max(sheetPanelHeight + 50, 300))]))
@@ -1758,6 +1789,7 @@ struct PasteView: View {
             clearSelection(resetPersistent: true)
             return
         }
+
         pendingSelectionRange = nil
         persistentSelectionRange = context.range
         tokenSelection = context
@@ -1776,8 +1808,12 @@ struct PasteView: View {
             }
         }
         if dictionaryPopupEnabled {
-            let r = context.range
-            CustomLogger.shared.debug("Dictionary popup shown tokenIndex=\(index) range=\(r.location)-\(NSMaxRange(r)) surface=\(context.surface) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)")
+            if dictionaryPopupLoggingEnabled {
+                let r = context.range
+                CustomLogger.shared.debug(
+                    "DICT show (tap) t=\(index) r=\(r.location)..\(NSMaxRange(r)) s=\(context.surface) inline=\(self.inlineDictionaryPanelEnabled) sheet=\(self.sheetDictionaryPanelEnabled)"
+                )
+            }
         }
         pendingSplitFocusSelectionID = focusSplitMenu ? context.id : nil
     }

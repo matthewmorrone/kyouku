@@ -574,15 +574,14 @@ private extension FuriganaAttributedTextBuilder {
         guard baseWidth.isFinite, rubyWidth.isFinite else { return [] }
 
         let overhang = rubyWidth - baseWidth
-        let trigger = max(0.5, rubyFont.pointSize * 0.1)
-        guard overhang > trigger else { return [] }
+        // Requirement: when headword spacing is enabled and ruby is wider than the base,
+        // expand the base so widths match (even if alignment isn't perfectly centered yet).
+        // Use a tiny epsilon to avoid micro-adjustments from measurement noise.
+        let epsilon: CGFloat = 0.01
+        guard overhang > epsilon else { return [] }
 
-        // Cap padding so we don't explode tracking on very long readings.
-        // This is intentionally generous; the wrap delegate will prefer breaking at span boundaries.
-        let maxPad = max(1.0, baseFont.pointSize * 1.25)
-        let totalPad = min(overhang, maxPad)
-        let perSide = max(0.5, totalPad / 2.0)
-        guard perSide > 0 else { return [] }
+        let totalPad = overhang
+        guard totalPad > 0 else { return [] }
 
         var adjustments: [HeadwordSpacingAdjustment] = []
 
@@ -607,7 +606,7 @@ private extension FuriganaAttributedTextBuilder {
 
         if glyphRanges.count >= 2 {
             // Distribute padding across inter-glyph gaps.
-            let perGap = max(0.25, totalPad / CGFloat(max(1, glyphRanges.count - 1)))
+            let perGap = totalPad / CGFloat(max(1, glyphRanges.count - 1))
             for r in glyphRanges.dropLast() {
                 adjustments.append(HeadwordSpacingAdjustment(range: r, kern: perGap))
             }
