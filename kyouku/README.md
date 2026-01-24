@@ -34,6 +34,10 @@ Kyouku is an iOS app for light-weight Japanese study. It lets users paste arbitr
 - Environment data flows through `@StateObject` stores placed at the root of each tab.
 - No background parsing services or automation loops remain; the user performs every dictionary lookup manually.
 
+## Release goals
+
+Use `docs/ReleaseGoals.md` as the stop-iterating checklist for deciding when an iteration is complete.
+
 ## Typical Workflow
 
 1. Paste or type Japanese text in the Paste tab.
