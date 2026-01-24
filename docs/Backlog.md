@@ -1,5 +1,9 @@
 # Backlog
 
+## Release goals linkage
+- Before closing an iteration, review `docs/ReleaseGoals.md` and mark each goal as Done, Deferred, or Won’t fix.
+- When deferring backlog items, note the rationale alongside the release goal.
+
 ## Known bugs
 - [ ] wrapping for long lines just cuts off all text below the first line
 - [ ] Bring back longest run search

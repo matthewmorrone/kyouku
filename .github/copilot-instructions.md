@@ -32,6 +32,10 @@
 
 **Copilot must not invoke build, run, or test workflows.** All build/run/test workflows are for humans only and must be performed manually. The following information is provided for documentation and human reference only.
 
+## Release goals
+- Use `docs/ReleaseGoals.md` as the stop-iterating checklist.
+- Keep backlog items aligned with the current goal statuses.
+
 ### ⚠️ Command execution rules (STRICT)
 
 - **Copilot MAY:**
