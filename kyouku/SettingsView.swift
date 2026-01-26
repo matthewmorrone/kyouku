@@ -14,6 +14,9 @@ struct SettingsView: View {
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
+    @AppStorage(FuriganaKnownWordSettings.modeKey) private var knownWordFuriganaModeRaw: String = FuriganaKnownWordSettings.defaultModeRawValue
+    @AppStorage(FuriganaKnownWordSettings.scoreThresholdKey) private var knownWordFuriganaScoreThreshold: Double = FuriganaKnownWordSettings.defaultScoreThreshold
+    @AppStorage(FuriganaKnownWordSettings.minimumReviewsKey) private var knownWordFuriganaMinimumReviews: Int = FuriganaKnownWordSettings.defaultMinimumReviews
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
 
     @AppStorage("notesPreviewLineCount") private var notesPreviewLineCount: Int = 3
@@ -79,6 +82,7 @@ struct SettingsView: View {
                     SQLPlaygroundView()
                 }
                 textAppearanceSection
+                furiganaBehaviorSection
                 tokenHighlightSection
                 notesSection
                 extractFilterSection
@@ -224,6 +228,50 @@ struct SettingsView: View {
         Section("Token Highlighting") {
             ColorPicker("Primary Token Color", selection: alternateTokenColorABinding, supportsOpacity: false)
             ColorPicker("Secondary Token Color", selection: alternateTokenColorBBinding, supportsOpacity: false)
+        }
+    }
+
+    private var furiganaBehaviorSection: some View {
+        let mode = FuriganaKnownWordMode(rawValue: knownWordFuriganaModeRaw) ?? .off
+
+        return Section("Furigana") {
+            Picker("Hide furigana", selection: $knownWordFuriganaModeRaw) {
+                ForEach(FuriganaKnownWordMode.allCases) { m in
+                    Text(m.title).tag(m.rawValue)
+                }
+            }
+
+            Text(mode.detail + " (Applies to Paste view.)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            if mode == .learned {
+                Stepper(
+                    value: $knownWordFuriganaMinimumReviews,
+                    in: 1...50,
+                    step: 1
+                ) {
+                    HStack {
+                        Text("Minimum reviews")
+                        Spacer()
+                        Text("\(knownWordFuriganaMinimumReviews)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                let pct = Int((max(0.0, min(1.0, knownWordFuriganaScoreThreshold)) * 100).rounded())
+                HStack {
+                    Text("Required Flashcards score")
+                    Spacer()
+                    Text("\(pct)%")
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $knownWordFuriganaScoreThreshold, in: 0.5...1.0, step: 0.05)
+
+                Text("A word is considered learned only after at least \(max(1, knownWordFuriganaMinimumReviews)) reviews.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

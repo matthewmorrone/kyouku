@@ -15,6 +15,8 @@ struct KyoukuApp: App {
     @StateObject private var notes: NotesStore
     @StateObject private var store: WordsStore
     @StateObject private var router: AppRouter
+    @StateObject private var themes: ThemeDiscoveryStore
+    @StateObject private var notificationDeepLinkHandler: NotificationDeepLinkHandlerHolder
 
     init() {
         let overrides = ReadingOverridesStore()
@@ -22,7 +24,12 @@ struct KyoukuApp: App {
         _tokenBoundaries = StateObject(wrappedValue: TokenBoundariesStore())
         _notes = StateObject(wrappedValue: NotesStore(readingOverrides: overrides))
         _store = StateObject(wrappedValue: WordsStore())
-        _router = StateObject(wrappedValue: AppRouter())
+        let router = AppRouter()
+        _router = StateObject(wrappedValue: router)
+        _themes = StateObject(wrappedValue: ThemeDiscoveryStore())
+
+        // Retain a UNUserNotificationCenter delegate that can deep-link into the app.
+        _notificationDeepLinkHandler = StateObject(wrappedValue: NotificationDeepLinkHandlerHolder(router: router))
     }
 
     var body: some Scene {
@@ -33,6 +40,7 @@ struct KyoukuApp: App {
                 .environmentObject(router)
                 .environmentObject(readingOverrides)
                 .environmentObject(tokenBoundaries)
+                .environmentObject(themes)
                 .onOpenURL { url in
                     // Expect kyouku://inbox to route to Paste tab; PasteView will ingest on appear/activation
                     if url.scheme == "kyouku" && url.host == "inbox" {
@@ -40,6 +48,8 @@ struct KyoukuApp: App {
                     }
                 }
                 .task {
+                    // Ensure the handler is retained for the app lifetime.
+                    _ = notificationDeepLinkHandler
                     await ReadingOverridePolicy.shared.warmUp()
                     await LegacyNotificationCleanup.runIfNeeded()
 
@@ -51,5 +61,14 @@ struct KyoukuApp: App {
                     await WordOfTheDayScheduler.refreshScheduleIfEnabled(words: words, hour: hour, minute: minute, enabled: enabled)
                 }
         }
+    }
+}
+
+@MainActor
+final class NotificationDeepLinkHandlerHolder: ObservableObject {
+    let handler: NotificationDeepLinkHandler
+
+    init(router: AppRouter) {
+        self.handler = NotificationDeepLinkHandler(router: router)
     }
 }

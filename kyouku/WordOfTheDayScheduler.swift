@@ -73,6 +73,11 @@ enum WordOfTheDayScheduler {
         await clearPendingWordOfTheDayRequests()
         guard words.isEmpty == false else { return }
 
+        // Randomize selection across the full saved word list.
+        // We shuffle once per scheduling run to keep the upcoming batch varied while
+        // still avoiding accidental bias toward earlier items.
+        let shuffled = words.shuffled()
+
         let calendar = Calendar.current
         let now = Date()
 
@@ -85,7 +90,7 @@ enum WordOfTheDayScheduler {
             comps.hour = max(0, min(23, hour))
             comps.minute = max(0, min(59, minute))
 
-            let word = pickWord(forDayOffset: dayOffset, from: words)
+            let word = pickWord(forDayOffset: dayOffset, from: shuffled)
             let content = makeContent(for: word)
             let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
             let id = requestPrefix + identifierDateString(from: comps)
@@ -98,7 +103,8 @@ enum WordOfTheDayScheduler {
         guard words.isEmpty == false else {
             return Word(surface: "", kana: nil, meaning: "")
         }
-        // Deterministic-ish rotation to avoid duplicates when scheduling a batch.
+        // Randomized upstream; rotate through shuffled order to reduce duplicates
+        // within the scheduled batch.
         let idx = abs(dayOffset) % words.count
         return words[idx]
     }
@@ -121,6 +127,7 @@ enum WordOfTheDayScheduler {
         content.userInfo["surface"] = word.surface
         if let kana { content.userInfo["kana"] = kana }
         content.userInfo["meaning"] = word.meaning
+        content.userInfo["wordID"] = word.id.uuidString
 
         return content
     }

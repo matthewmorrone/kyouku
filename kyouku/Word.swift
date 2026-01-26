@@ -24,6 +24,9 @@ struct Word: Identifiable, Codable, Hashable {
     var meaning: String
     var note: String?
     var sourceNoteID: UUID? = nil
+    /// IDs of user-defined lists this word belongs to.
+    /// Optional/backward-compatible: older saved files won’t include this key.
+    var listIDs: [UUID] = []
     var createdAt: Date
     
     init(
@@ -34,6 +37,7 @@ struct Word: Identifiable, Codable, Hashable {
         meaning: String,
         note: String? = nil,
         sourceNoteID: UUID? = nil,
+        listIDs: [UUID] = [],
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -43,7 +47,36 @@ struct Word: Identifiable, Codable, Hashable {
         self.meaning = meaning
         self.note = note
         self.sourceNoteID = sourceNoteID
+        self.listIDs = listIDs
         self.createdAt = createdAt
+    }
+}
+
+// MARK: - Backward-compatible Codable
+extension Word {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case surface
+        case dictionarySurface
+        case kana
+        case meaning
+        case note
+        case sourceNoteID
+        case listIDs
+        case createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        surface = try container.decode(String.self, forKey: .surface)
+        dictionarySurface = try container.decodeIfPresent(String.self, forKey: .dictionarySurface)
+        kana = try container.decodeIfPresent(String.self, forKey: .kana)
+        meaning = try container.decode(String.self, forKey: .meaning)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+        sourceNoteID = try container.decodeIfPresent(UUID.self, forKey: .sourceNoteID)
+        listIDs = try container.decodeIfPresent([UUID].self, forKey: .listIDs) ?? []
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
     }
 }
 

@@ -8,7 +8,23 @@ struct WordDefinitionsView: View {
 
     let surface: String
     let kana: String?
+    let contextSentence: String?
+    let lemmaCandidates: [String]
+    let tokenPartOfSpeech: String?
     let sourceNoteID: UUID?
+    let tokenParts: [TokenPart]
+
+    struct TokenPart: Identifiable, Hashable {
+        let id: String
+        let surface: String
+        let kana: String?
+
+        init(id: String, surface: String, kana: String?) {
+            self.id = id
+            self.surface = surface
+            self.kana = kana
+        }
+    }
 
     @State private var entries: [DictionaryEntry] = []
     @State private var entryDetails: [DictionaryEntryDetail] = []
@@ -16,6 +32,22 @@ struct WordDefinitionsView: View {
     @State private var errorMessage: String? = nil
     @State private var debugSQL: String = ""
     @State private var expandedDefinitionRowIDs: Set<String> = []
+
+    @State private var exampleSentences: [ExampleSentence] = []
+    @State private var isLoadingExampleSentences: Bool = false
+    @State private var showAllExampleSentences: Bool = false
+
+    @State private var detectedGrammar: [DetectedGrammarPattern] = []
+    @State private var similarWords: [String] = []
+
+    private struct ListAssignmentTarget: Identifiable, Hashable {
+        let id = UUID()
+        let surface: String
+        let kana: String?
+        let meaning: String
+    }
+
+    @State private var listAssignmentTarget: ListAssignmentTarget? = nil
 
     private struct DefinitionRow: Identifiable, Hashable {
         let headword: String
@@ -74,6 +106,24 @@ struct WordDefinitionsView: View {
             }
             // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
 
+            if tokenParts.count > 1 {
+                Section("Parts") {
+                    ForEach(tokenParts) { part in
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(part.surface)
+                                .font(.body.weight(.semibold))
+                            if let kana = part.kana?.trimmingCharacters(in: .whitespacesAndNewlines), kana.isEmpty == false, kana != part.surface {
+                                Text("(\(kana))")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .textSelection(.enabled)
+                    }
+                }
+            }
+
             // Definitions list
             Section {
                 if isLoading {
@@ -100,6 +150,35 @@ struct WordDefinitionsView: View {
                     }
                 }
             }
+
+            if detectedGrammar.isEmpty == false {
+                Section("Grammar (in context)") {
+                    ForEach(detectedGrammar) { item in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(item.title)
+                                .font(.body.weight(.semibold))
+                            Text(item.explanation)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            if item.matchText.isEmpty == false {
+                                Text("Matched: \(item.matchText)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+
+            if similarWords.isEmpty == false {
+                Section("Similar words") {
+                    Text(similarWords.joined(separator: " · "))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
             // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
 
             // Full entries
@@ -110,6 +189,38 @@ struct WordDefinitionsView: View {
                     }
                 }
                 // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
+            }
+
+            Section("Example sentences") {
+                if isLoadingExampleSentences {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading…")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if exampleSentences.isEmpty {
+                    Text("No example sentences found.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    let maxVisible = 3
+                    let visible = showAllExampleSentences ? exampleSentences : Array(exampleSentences.prefix(maxVisible))
+
+                    ForEach(visible) { sentence in
+                        exampleSentenceRow(sentence)
+                    }
+
+                    if exampleSentences.count > maxVisible {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showAllExampleSentences.toggle()
+                            }
+                        } label: {
+                            Text(showAllExampleSentences ? "Show fewer" : "Show more")
+                                .font(.callout.weight(.semibold))
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
             }
 
             // // SQL debug
@@ -132,7 +243,21 @@ struct WordDefinitionsView: View {
         // .modifier(dbgBG(LayoutDebugColor.DBG_GRAY__List))
         .navigationTitle("Details")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
+        .task {
+            await load()
+            refreshContextInsights()
+        }
+        .sheet(item: $listAssignmentTarget) { target in
+            NavigationStack {
+                if let wordID = ensureSavedWordID(surface: target.surface, kana: target.kana, meaning: target.meaning) {
+                    WordListAssignmentSheet(wordID: wordID, title: target.surface)
+                } else {
+                    Text("Save this word first to assign lists.")
+                        .foregroundStyle(.secondary)
+                        .padding()
+                }
+            }
+        }
     }
 
     // MARK: Header
@@ -228,7 +353,24 @@ struct WordDefinitionsView: View {
         var buckets: [String: DictionaryEntry] = [:]
 
         for entry in entries {
-            for gloss in glossParts(entry.gloss) {
+            let detail = entryDetails.first(where: { $0.entryID == entry.entryID })
+            let glossCandidates: [String] = {
+                guard let detail else {
+                    return glossParts(entry.gloss)
+                }
+
+                let orderedSenses = orderedSensesForDisplay(detail)
+                var out: [String] = []
+                out.reserveCapacity(min(12, orderedSenses.count))
+                for sense in orderedSenses {
+                    if let line = joinedGlossLine(for: sense)?.trimmingCharacters(in: .whitespacesAndNewlines), line.isEmpty == false {
+                        out.append(line)
+                    }
+                }
+                return out.isEmpty ? glossParts(entry.gloss) : out
+            }()
+
+            for gloss in glossCandidates {
                 if buckets[gloss] == nil {
                     order.append(gloss)
                     buckets[gloss] = entry
@@ -246,6 +388,7 @@ struct WordDefinitionsView: View {
         let reading = row.reading?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedReading = (reading?.isEmpty == false) ? reading : nil
         let isSaved = isSaved(surface: row.headword, kana: normalizedReading)
+        let createdAt = isSaved ? savedWordCreatedAt(surface: row.headword, kana: normalizedReading) : nil
 
         let primaryGloss = row.pages.first?.gloss ?? ""
         let extraCount = max(0, row.pages.count - 1)
@@ -264,23 +407,45 @@ struct WordDefinitionsView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
+
+                    if let createdAt {
+                        Text(createdAt, format: .dateTime.year().month().day().hour().minute())
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer(minLength: 0)
 
-                Button {
-                    // Store meaning as the first page (best available summary).
-                    toggleSaved(surface: row.headword, kana: normalizedReading, meaning: primaryGloss)
-                } label: {
-                    Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
-                        .symbolRenderingMode(.hierarchical)
-                        .font(.subheadline.weight(.semibold))
-                        .frame(width: 32, height: 32)
-                        .background(.thinMaterial, in: Circle())
-                        .foregroundStyle(isSaved ? Color.accentColor : .secondary)
+                HStack(spacing: 10) {
+                    Button {
+                        // Store meaning as the first page (best available summary).
+                        toggleSaved(surface: row.headword, kana: normalizedReading, meaning: primaryGloss)
+                    } label: {
+                        Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
+                            .symbolRenderingMode(.hierarchical)
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                            .background(.thinMaterial, in: Circle())
+                            .foregroundStyle(isSaved ? Color.accentColor : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isSaved ? "Saved" : "Save")
+
+                    Button {
+                        listAssignmentTarget = ListAssignmentTarget(surface: row.headword, kana: normalizedReading, meaning: primaryGloss)
+                    } label: {
+                        Image(systemName: "folder")
+                            .symbolRenderingMode(.hierarchical)
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                            .background(.thinMaterial, in: Circle())
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Lists")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isSaved ? "Saved" : "Save")
             }
             // .modifier(dbgBG(LayoutDebugColor.DBG_PURPLE__DefinitionRowHeader))
 
@@ -335,9 +500,11 @@ struct WordDefinitionsView: View {
                 Divider()
                     .padding(.vertical, 2)
 
-                ForEach(Array(detail.senses.enumerated()), id: \.element.id) { index, sense in
-                    senseView(sense, index: index + 1)
-                    if index < detail.senses.count - 1 {
+                let senses = orderedSensesForDisplay(detail)
+                let showSenseNumbers = senses.count > 1
+                ForEach(Array(senses.enumerated()), id: \.element.id) { index, sense in
+                    senseView(sense, index: index + 1, showIndex: showSenseNumbers)
+                    if index < senses.count - 1 {
                         Divider()
                             .padding(.vertical, 6)
                     }
@@ -402,18 +569,28 @@ struct WordDefinitionsView: View {
         }
     }
 
-    private func senseView(_ sense: DictionaryEntrySense, index: Int) -> some View {
+    private func senseView(_ sense: DictionaryEntrySense, index: Int, showIndex: Bool) -> some View {
         let glossLine = joinedGlossLine(for: sense)
         let noteLine = formattedSenseNotes(for: sense)
 
         return VStack(alignment: .leading, spacing: 6) {
             if let glossLine {
-                Text(numberedGlossText(index: index, gloss: glossLine, notes: noteLine))
-                    .fixedSize(horizontal: false, vertical: true)
+                if showIndex {
+                    Text(numberedGlossText(index: index, gloss: glossLine, notes: noteLine))
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(plainGlossText(gloss: glossLine, notes: noteLine))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else {
-                Text("\(index).")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                if showIndex {
+                    Text("\(index).")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("—")
+                        .foregroundStyle(.secondary)
+                }
             }
             // .modifier(dbgBG(LayoutDebugColor.DBG_GRAY__SenseMeta))
 
@@ -426,6 +603,21 @@ struct WordDefinitionsView: View {
             // Notes are appended inline to the numbered gloss in parentheses.
         }
         // .modifier(dbgBG(LayoutDebugColor.DBG_PINK__SenseRow))
+    }
+
+    private func plainGlossText(gloss: String, notes: String?) -> AttributedString {
+        var body = AttributedString(gloss)
+        body.font = .body
+        body.foregroundColor = .primary
+
+        var result = body
+        if let notes, notes.isEmpty == false {
+            var suffix = AttributedString(" (\(notes))")
+            suffix.font = .body
+            suffix.foregroundColor = .primary
+            result += suffix
+        }
+        return result
     }
 
     private func numberedGlossText(index: Int, gloss: String, notes: String?) -> AttributedString {
@@ -460,6 +652,79 @@ struct WordDefinitionsView: View {
         let parts = source.map { normalize($0.text) }.filter { $0.isEmpty == false }
         guard parts.isEmpty == false else { return nil }
         return parts.joined(separator: "; ")
+    }
+
+    // MARK: POS-aware ranking
+    private enum CoarseTokenPOS {
+        case noun
+        case verb
+        case adjective
+        case adverb
+        case particle
+        case auxiliary
+        case other
+    }
+
+    private func coarseTokenPOS() -> CoarseTokenPOS? {
+        let raw = (tokenPartOfSpeech ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard raw.isEmpty == false else { return nil }
+
+        // Mecab_Swift POS strings are typically like "名詞,一般,*,*".
+        let head = raw.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? raw
+        switch head {
+        case "名詞": return .noun
+        case "動詞": return .verb
+        case "形容詞": return .adjective
+        case "副詞": return .adverb
+        case "助詞": return .particle
+        case "助動詞": return .auxiliary
+        default: return .other
+        }
+    }
+
+    private func senseMatchesTokenPOS(_ sense: DictionaryEntrySense) -> Bool {
+        guard let coarse = coarseTokenPOS() else { return false }
+        guard sense.partsOfSpeech.isEmpty == false else { return false }
+
+        func anyPrefix(_ prefixes: [String]) -> Bool {
+            sense.partsOfSpeech.contains { tag in
+                let t = tag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return prefixes.contains(where: { t.hasPrefix($0) })
+            }
+        }
+
+        switch coarse {
+        case .noun:
+            return anyPrefix(["n", "pn"])
+        case .verb:
+            return anyPrefix(["v", "vs"])
+        case .adjective:
+            return anyPrefix(["adj"])
+        case .adverb:
+            return anyPrefix(["adv"])
+        case .particle:
+            return anyPrefix(["prt"])
+        case .auxiliary:
+            return anyPrefix(["aux"])
+        case .other:
+            return false
+        }
+    }
+
+    private func orderedSensesForDisplay(_ detail: DictionaryEntryDetail) -> [DictionaryEntrySense] {
+        guard detail.senses.isEmpty == false else { return [] }
+        // If we don't have token POS, preserve JMdict order.
+        guard coarseTokenPOS() != nil else {
+            return detail.senses.sorted(by: { $0.orderIndex < $1.orderIndex })
+        }
+
+        return detail.senses.sorted { lhs, rhs in
+            let lhsTier = senseMatchesTokenPOS(lhs) ? 0 : 1
+            let rhsTier = senseMatchesTokenPOS(rhs) ? 0 : 1
+            if lhsTier != rhsTier { return lhsTier < rhsTier }
+            if lhs.orderIndex != rhs.orderIndex { return lhs.orderIndex < rhs.orderIndex }
+            return lhs.id < rhs.id
+        }
     }
 
     private func primaryHeadword(for detail: DictionaryEntryDetail) -> String {
@@ -633,6 +898,12 @@ struct WordDefinitionsView: View {
             if terms.contains(t) == false { terms.append(t) }
         }
 
+        for lemma in lemmaCandidates {
+            let trimmed = lemma.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { continue }
+            if terms.contains(trimmed) == false { terms.append(trimmed) }
+        }
+
         guard terms.isEmpty == false else {
             entries = []
             entryDetails = []
@@ -642,14 +913,19 @@ struct WordDefinitionsView: View {
         isLoading = true
         errorMessage = nil
         entryDetails = []
+        exampleSentences = []
+        showAllExampleSentences = false
+        isLoadingExampleSentences = true
 
         var merged: [DictionaryEntry] = []
         var seen: Set<String> = []
 
         do {
             for term in terms {
+                let keys = DictionaryKeyPolicy.keys(forDisplayKey: term)
+                guard keys.lookupKey.isEmpty == false else { continue }
                 let rows = try await Task.detached(priority: .userInitiated) {
-                    try await DictionarySQLiteStore.shared.lookup(term: term, limit: 100)
+                    try await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 100)
                 }.value
                 for row in rows {
                     if seen.insert(row.id).inserted {
@@ -658,7 +934,37 @@ struct WordDefinitionsView: View {
                 }
             }
             entries = merged
-            entryDetails = await loadEntryDetails(for: merged)
+            let details = await loadEntryDetails(for: merged)
+            if coarseTokenPOS() != nil {
+                entryDetails = details.sorted { lhs, rhs in
+                    let lhsTier = lhs.senses.contains(where: senseMatchesTokenPOS) ? 0 : 1
+                    let rhsTier = rhs.senses.contains(where: senseMatchesTokenPOS) ? 0 : 1
+                    if lhsTier != rhsTier { return lhsTier < rhsTier }
+                    if lhs.isCommon != rhs.isCommon { return lhs.isCommon && rhs.isCommon == false }
+                    return lhs.entryID < rhs.entryID
+                }
+            } else {
+                entryDetails = details
+            }
+
+            let sentenceTerms = sentenceLookupTerms(primaryTerms: terms, entryDetails: details)
+            do {
+                let sentences = try await Task.detached(priority: .utility) {
+                    try await DictionarySQLiteStore.shared.fetchExampleSentences(containing: sentenceTerms, limit: 8)
+                }.value
+                exampleSentences = sentences.sorted { lhs, rhs in
+                    let ls = exampleSentenceComplexityScore(lhs)
+                    let rs = exampleSentenceComplexityScore(rhs)
+                    if ls != rs { return ls < rs }
+                    // Stable-ish tie-breakers.
+                    if lhs.jpText.count != rhs.jpText.count { return lhs.jpText.count < rhs.jpText.count }
+                    return lhs.id < rhs.id
+                }
+            } catch {
+                exampleSentences = []
+            }
+            isLoadingExampleSentences = false
+
             isLoading = false
             debugSQL = await Task.detached(priority: .utility) {
                 await DictionarySQLiteStore.shared.debugLastQueryDescription()
@@ -666,9 +972,140 @@ struct WordDefinitionsView: View {
         } catch {
             entries = []
             entryDetails = []
+            exampleSentences = []
+            isLoadingExampleSentences = false
             isLoading = false
             errorMessage = String(describing: error)
         }
+    }
+
+    private func refreshContextInsights() {
+        let sentence = contextSentence?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let sentence, sentence.isEmpty == false {
+            detectedGrammar = GrammarPatternDetector.detect(in: sentence)
+        } else {
+            detectedGrammar = []
+        }
+
+        let headword = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seed = (lemmaCandidates.first { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }) ?? headword
+        similarWords = JapaneseSimilarityService.neighbors(for: seed, maxCount: 12)
+            .filter { $0 != seed }
+    }
+
+    private func sentenceLookupTerms(primaryTerms: [String], entryDetails: [DictionaryEntryDetail]) -> [String] {
+        var out: [String] = []
+        func add(_ value: String?) {
+            guard let value else { return }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return }
+            if out.contains(trimmed) == false { out.append(trimmed) }
+        }
+
+        for term in primaryTerms {
+            add(term)
+        }
+
+        if let first = entryDetails.first {
+            add(primaryHeadword(for: first))
+            if let reading = first.kanaForms.first?.text {
+                add(reading)
+            }
+        }
+
+        return out
+    }
+
+    // MARK: Example sentence sorting
+    private func exampleSentenceComplexityScore(_ sentence: ExampleSentence) -> Int {
+        // Heuristic: simpler sentences tend to be shorter with fewer kanji and less punctuation.
+        var kanjiCount = 0
+        var punctuationCount = 0
+        var digitCount = 0
+
+        for scalar in sentence.jpText.unicodeScalars {
+            switch scalar.value {
+            case 0x4E00...0x9FFF, 0x3400...0x4DBF, 0xF900...0xFAFF: // CJK
+                kanjiCount += 1
+            case 0x0030...0x0039: // digits
+                digitCount += 1
+            case 0x3001, 0x3002, 0xFF01, 0xFF1F, 0xFF0C, 0xFF0E, 0xFF1A, 0xFF1B:
+                punctuationCount += 1
+            default:
+                if CharacterSet.punctuationCharacters.contains(scalar) {
+                    punctuationCount += 1
+                }
+            }
+        }
+
+        let length = sentence.jpText.count
+
+        // Weighting: kanji and punctuation add more "complexity" than raw length.
+        return (length * 2) + (kanjiCount * 6) + (punctuationCount * 4) + (digitCount * 2)
+    }
+
+    private func exampleSentenceRow(_ sentence: ExampleSentence) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(highlightedJapaneseSentence(sentence.jpText))
+                .fixedSize(horizontal: false, vertical: true)
+            Text(sentence.enText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .textSelection(.enabled)
+        .padding(.vertical, 4)
+    }
+
+    private func highlightedJapaneseSentence(_ sentence: String) -> AttributedString {
+        let s = sentence
+        guard s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return AttributedString(sentence) }
+
+        var terms: [String] = []
+        func add(_ value: String?) {
+            guard let value else { return }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return }
+            if terms.contains(trimmed) == false {
+                terms.append(trimmed)
+            }
+        }
+
+        add(surface)
+        add(kana)
+        for lemma in lemmaCandidates { add(lemma) }
+        if let first = entryDetails.first {
+            add(primaryHeadword(for: first))
+            add(first.kanaForms.first?.text)
+        }
+
+        guard terms.isEmpty == false else { return AttributedString(sentence) }
+
+        let ns = s as NSString
+        let mutable = NSMutableAttributedString(string: s)
+        let baseColor = UIColor.secondaryLabel
+        let highlightColor = UIColor.systemOrange
+
+        // Dim the whole sentence so the highlight stands out.
+        mutable.addAttribute(.foregroundColor, value: baseColor, range: NSRange(location: 0, length: ns.length))
+
+        for term in terms {
+            let needle = term as NSString
+            guard needle.length > 0, needle.length <= ns.length else { continue }
+
+            var search = NSRange(location: 0, length: ns.length)
+            while search.length > 0 {
+                let found = ns.range(of: term, options: [], range: search)
+                if found.location == NSNotFound || found.length == 0 { break }
+                mutable.addAttribute(.foregroundColor, value: highlightColor, range: found)
+
+                let nextLoc = NSMaxRange(found)
+                if nextLoc >= ns.length { break }
+                search = NSRange(location: nextLoc, length: ns.length - nextLoc)
+            }
+        }
+
+        return AttributedString(mutable)
     }
 
     private func loadEntryDetails(for entries: [DictionaryEntry]) async -> [DictionaryEntryDetail] {
@@ -749,6 +1186,38 @@ struct WordDefinitionsView: View {
         let normalizedKana = (k?.isEmpty == false) ? k : nil
         guard s.isEmpty == false else { return false }
         return store.words.contains { $0.surface == s && $0.kana == normalizedKana }
+    }
+
+    private func savedWordID(surface: String, kana: String?) -> UUID? {
+        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let k = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedKana = (k?.isEmpty == false) ? k : nil
+        guard s.isEmpty == false else { return nil }
+        return store.words.first(where: { $0.surface == s && $0.kana == normalizedKana })?.id
+    }
+
+    private func savedWordCreatedAt(surface: String, kana: String?) -> Date? {
+        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let k = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedKana = (k?.isEmpty == false) ? k : nil
+        guard s.isEmpty == false else { return nil }
+        return store.words.first(where: { $0.surface == s && $0.kana == normalizedKana })?.createdAt
+    }
+
+    /// Ensures the word is saved, returning its Word.ID if possible.
+    private func ensureSavedWordID(surface: String, kana: String?, meaning: String) -> UUID? {
+        if let id = savedWordID(surface: surface, kana: kana) {
+            return id
+        }
+
+        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let k = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedKana = (k?.isEmpty == false) ? k : nil
+        let m = meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.isEmpty == false, m.isEmpty == false else { return nil }
+
+        store.add(surface: s, kana: normalizedKana, meaning: m)
+        return savedWordID(surface: s, kana: normalizedKana)
     }
 
     private func toggleSaved(surface: String, kana: String?, meaning: String) {
@@ -833,6 +1302,110 @@ struct WordDefinitionsView: View {
 
     private func dbgRowBG(_ color: Color) -> some ViewModifier {
         DebugListRowBackground(enabled: layoutDebugColorsEnabled, color: color)
+    }
+}
+
+private struct WordListAssignmentSheet: View {
+    @EnvironmentObject private var store: WordsStore
+    @Environment(\.dismiss) private var dismiss
+
+    let wordID: Word.ID
+    let title: String
+
+    @State private var selectedListIDs: Set<UUID> = []
+    @State private var newListName: String = ""
+
+    private var word: Word? {
+        store.words.first(where: { $0.id == wordID })
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Text(title)
+                    .font(.headline)
+            }
+
+            Section("Lists") {
+                if store.lists.isEmpty {
+                    Text("No lists yet. Create one below.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.lists) { list in
+                        Button {
+                            toggleList(list.id)
+                        } label: {
+                            HStack {
+                                Text(list.name)
+                                Spacer()
+                                if selectedListIDs.contains(list.id) {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(.tint)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    TextField("New list name", text: $newListName)
+                        .textInputAutocapitalization(.words)
+                        .disableAutocorrection(true)
+                    Button("Add") {
+                        createListFromSheet()
+                    }
+                    .disabled(newListName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .navigationTitle("Lists")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Cancel") { dismiss() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") {
+                    store.setLists(forWordID: wordID, listIDs: Array(selectedListIDs))
+                    dismiss()
+                }
+                .disabled(word == nil)
+            }
+        }
+        .task {
+            if let word {
+                selectedListIDs = Set(word.listIDs)
+            }
+        }
+        .onReceive(store.$lists) { lists in
+            let valid = Set(lists.map { $0.id })
+            selectedListIDs.formIntersection(valid)
+        }
+    }
+
+    private func toggleList(_ id: UUID) {
+        if selectedListIDs.contains(id) {
+            selectedListIDs.remove(id)
+        } else {
+            selectedListIDs.insert(id)
+        }
+    }
+
+    private func createListFromSheet() {
+        let name = newListName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name.isEmpty == false else { return }
+
+        if let existing = store.lists.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            selectedListIDs.insert(existing.id)
+            newListName = ""
+            return
+        }
+
+        if let created = store.createList(name: name) {
+            selectedListIDs.insert(created.id)
+            newListName = ""
+        }
     }
 }
 

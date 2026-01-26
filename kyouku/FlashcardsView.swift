@@ -17,6 +17,8 @@ struct FlashcardsView: View {
     @State private var sessionCorrect: Int = 0
     @State private var sessionAgain: Int = 0
 
+    @State private var showEndSessionConfirm: Bool = false
+
     enum ReviewScope: String, CaseIterable, Identifiable {
         case all = "All"
         case mostRecent = "Most Recent"
@@ -59,6 +61,16 @@ struct FlashcardsView: View {
             .navigationTitle("Flashcards")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if session.isEmpty == false {
+                        Button {
+                            showEndSessionConfirm = true
+                        } label: {
+                            Label("End", systemImage: "xmark.circle")
+                        }
+                        .help("End Session")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         startSession()
@@ -79,6 +91,14 @@ struct FlashcardsView: View {
                     }
                     .help(shuffled ? "Shuffle On" : "Shuffle Off")
                 }
+            }
+            .alert("End session?", isPresented: $showEndSessionConfirm) {
+                Button("End Session", role: .destructive) {
+                    endSessionEarly()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will stop the current review session.")
             }
         }
     }
@@ -271,6 +291,7 @@ struct FlashcardsView: View {
         sessionAgain += 1
         ReviewPersistence.incrementAgain()
         let w = session[index]
+        ReviewPersistence.recordAgain(for: w.id)
         ReviewPersistence.markWrong(w.id)
         // Move current card to the end of the session
         session.remove(at: index)
@@ -284,6 +305,7 @@ struct FlashcardsView: View {
         guard !session.isEmpty else { return }
         sessionCorrect += 1
         ReviewPersistence.incrementCorrect()
+        ReviewPersistence.recordCorrect(for: session[index].id)
         ReviewPersistence.markRight(session[index].id)
         session.remove(at: index)
         if session.isEmpty { return }
@@ -295,6 +317,18 @@ struct FlashcardsView: View {
         let base = wordsMatchingSelection()
         sessionSource = base
         startSession()
+    }
+
+    private func endSessionEarly() {
+        session = []
+        sessionSource = []
+        index = 0
+        showBack = false
+        dragOffset = .zero
+        isSwipingOut = false
+        swipeDirection = 0
+        sessionCorrect = 0
+        sessionAgain = 0
     }
 
     private func wordsMatchingSelection() -> [Word] {
@@ -329,32 +363,149 @@ private struct FlashcardCard: View {
 
     @EnvironmentObject var notes: NotesStore
 
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(UIColor.secondarySystemBackground))
-                .shadow(color: Color.black.opacity(0.08), radius: 8, x: 0, y: 4)
+    private enum GestureMode {
+        case undecided
+        case swipe
+        case flip
+    }
 
-            cardContent
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: 320)
-        }
-        .opacity(isTop && isSwipingOut ? 0 : 1)
+    @State private var gestureMode: GestureMode = .undecided
+    @State private var flipAngleDegrees: Double = 0
+    @State private var flipStartAngleDegrees: Double = 0
+
+    private enum CardFaceKind {
+        case front
+        case back
+    }
+
+    private let maxRotationDegrees: CGFloat = 10
+    private let dismissDistance: CGFloat = 120
+    private let dismissPredictedDistance: CGFloat = 180
+    private let flipDistance: CGFloat = 110
+    private let flipPredictedDistance: CGFloat = 160
+
+    private let flipDragDistance: CGFloat = 220
+
+    var body: some View {
+        cardContent
+        .frame(maxWidth: .infinity, minHeight: 320, maxHeight: 320)
+        .contentShape(Rectangle())
+        .offset(x: isTop ? dragOffset.width : 0, y: isTop ? dragOffset.height : 0)
+        .rotationEffect(.degrees(isTop ? currentRotationDegrees : 0))
+        .scaleEffect(isTop && dragOffset != .zero ? 1.03 : 1)
+        .shadow(
+            color: Color.black.opacity(isTop ? currentShadowOpacity : 0.08),
+            radius: isTop ? (8 + 10 * dragProgress) : 8,
+            x: 0,
+            y: isTop ? (4 + 10 * dragProgress) : 4
+        )
         .overlay(actionOverlays)
-        .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.85), value: dragOffset)
-        .animation(.easeInOut(duration: 0.2), value: showBack)
+        .zIndex(isTop ? 10 : 0)
+        .allowsHitTesting(isTop)
         .gesture(dragGesture)
-        .onTapGesture { toggleFace() }
+        .onAppear {
+            if isTop {
+                flipAngleDegrees = showBack ? 180 : 0
+            }
+        }
+        .onChange(of: isTop) { _, newValue in
+            if newValue {
+                flipAngleDegrees = showBack ? 180 : 0
+            }
+        }
+        .onChange(of: showBack) { _, newValue in
+            guard isTop else { return }
+            guard gestureMode != .flip else { return }
+            flipAngleDegrees = newValue ? 180 : 0
+        }
+    }
+
+    private var dragProgress: CGFloat {
+        guard isTop else { return 0 }
+        return min(1, abs(dragOffset.width) / 140)
+    }
+
+    private var currentRotationDegrees: Double {
+        guard isTop else { return 0 }
+        let raw = (dragOffset.width / 22) // ~10° around 220pt
+        let clamped = max(-maxRotationDegrees, min(maxRotationDegrees, raw))
+        return Double(clamped)
+    }
+
+    private var currentShadowOpacity: Double {
+        0.14 + Double(0.18 * dragProgress)
     }
 
     @ViewBuilder
     private var cardContent: some View {
-        VStack(alignment: .center, spacing: 10) {
-            if showBack && isTop {
-                backFace
-            } else {
+        let angle = isTop ? flipAngleDegrees : 0
+        let radians = angle * .pi / 180
+        let isFrontVisible = cos(radians) >= 0
+
+        ZStack {
+            cardFace(flipAngle: angle, face: .front) {
                 frontFace
             }
+                .opacity(isFrontVisible ? 1 : 0)
+                .rotation3DEffect(
+                    .degrees(angle),
+                    axis: (x: 1, y: 0, z: 0),
+                    perspective: 1 / 500
+                )
+
+            cardFace(flipAngle: angle, face: .back) {
+                backFace
+            }
+                .opacity(isFrontVisible ? 0 : 1)
+                .rotation3DEffect(
+                    .degrees(angle - 180),
+                    axis: (x: 1, y: 0, z: 0),
+                    perspective: 1 / 500
+                )
+        }
+    }
+
+    private func cardFace<Content: View>(
+        flipAngle: Double,
+        face: CardFaceKind,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        let radians = flipAngle * .pi / 180
+        let tilt = abs(sin(radians))
+
+        let highlightOpacity = 0.02 + 0.07 * tilt
+        let shadowOpacity = 0.03 + 0.12 * tilt
+
+        let highlightFromTop = (face == .front)
+        let highlightStart: UnitPoint = highlightFromTop ? .top : .bottom
+        let highlightEnd: UnitPoint = .center
+        let shadowStart: UnitPoint = .center
+        let shadowEnd: UnitPoint = highlightFromTop ? .bottom : .top
+
+        return ZStack {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(UIColor.secondarySystemBackground))
+                .overlay {
+                    LinearGradient(
+                        colors: [Color.white.opacity(highlightOpacity), Color.clear],
+                        startPoint: highlightStart,
+                        endPoint: highlightEnd
+                    )
+                }
+                .overlay {
+                    LinearGradient(
+                        colors: [Color.clear, Color.black.opacity(shadowOpacity)],
+                        startPoint: shadowStart,
+                        endPoint: shadowEnd
+                    )
+                }
+                .overlay {
+                    Color.black.opacity(0.02 * tilt)
+                }
+
+            content()
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: 320)
         }
     }
 
@@ -362,12 +513,20 @@ private struct FlashcardCard: View {
     private var frontFace: some View {
         let displaySurface = displaySurfaceForCard(word)
         let displayKana = displayKanaForCard(word, displaySurface: displaySurface)
-        switch direction {
-        case .kanjiToKana:
-            Text(displaySurface).font(.largeTitle.weight(.bold))
-        case .kanaToEnglish:
-            Text((displayKana?.isEmpty == false) ? (displayKana ?? displaySurface) : displaySurface)
-                .font(.largeTitle.weight(.bold))
+        VStack(alignment: .center, spacing: 10) {
+            switch direction {
+            case .kanjiToKana:
+                Text(displaySurface).font(.largeTitle.weight(.bold))
+            case .kanaToEnglish:
+                Text((displayKana?.isEmpty == false) ? (displayKana ?? displaySurface) : displaySurface)
+                    .font(.largeTitle.weight(.bold))
+            }
+
+            Spacer(minLength: 0)
+
+            Text(word.createdAt, format: .dateTime.year().month().day().hour().minute())
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -375,37 +534,42 @@ private struct FlashcardCard: View {
     private var backFace: some View {
         let displaySurface = displaySurfaceForCard(word)
         let displayKana = displayKanaForCard(word, displaySurface: displaySurface)
-        switch direction {
-        case .kanjiToKana:
-            Text(displaySurface).font(.title2).bold()
-            if let kana = displayKana, kana.isEmpty == false, kana != displaySurface {
-                Text(kana).font(.title3).foregroundStyle(.secondary)
-            }
-            if !word.meaning.isEmpty {
-                Text(word.meaning)
-                    .font(.body)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 6)
-            }
-        case .kanaToEnglish:
-            if !word.meaning.isEmpty {
-                Text(word.meaning).font(.title3).bold()
-            }
-            if let kana = displayKana, kana.isEmpty == false {
-                Text(kana).font(.title2)
-            } else if displaySurface.isEmpty == false {
-                Text(displaySurface).font(.title2)
+        VStack(alignment: .center, spacing: 10) {
+            switch direction {
+            case .kanjiToKana:
+                // Kanji → Kana: back shows kana only.
+                if let kana = displayKana, kana.isEmpty == false {
+                    Text(kana)
+                        .font(.largeTitle.weight(.bold))
+                        .multilineTextAlignment(.center)
+                } else if isKanaOnlySurface(displaySurface) {
+                    Text(displaySurface)
+                        .font(.largeTitle.weight(.bold))
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text("—")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+            case .kanaToEnglish:
+                // Kana → English: back shows English meaning only.
+                if word.meaning.isEmpty == false {
+                    Text(word.meaning)
+                        .font(.title2.weight(.semibold))
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text("—")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
             }
 
-            // Only show an additional surface line if it's kana-only.
-            let rawSurface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
-            if rawSurface.isEmpty == false,
-               rawSurface != displaySurface,
-               isKanaOnlySurface(rawSurface) {
-                Text(rawSurface)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-            }
+            Spacer(minLength: 0)
+
+            Text(word.createdAt, format: .dateTime.year().month().day().hour().minute())
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -499,53 +663,102 @@ private struct FlashcardCard: View {
         DragGesture()
             .onChanged { value in
                 guard isTop else { return }
-                dragOffset = value.translation
+                // Gesture-driven motion must be immediate: no withAnimation here.
+
+                if gestureMode == .undecided {
+                    let t = value.translation
+                    if abs(t.width) > 12 || abs(t.height) > 12 {
+                        gestureMode = abs(t.width) >= abs(t.height) ? .swipe : .flip
+                        if gestureMode == .flip {
+                            flipStartAngleDegrees = flipAngleDegrees
+                        }
+                    }
+                }
+
+                switch gestureMode {
+                case .swipe, .undecided:
+                    dragOffset = value.translation
+                case .flip:
+                    // Keep only a subtle lift movement during flip.
+                    dragOffset = CGSize(width: 0, height: value.translation.height * 0.08)
+                    let delta = (-value.translation.height / flipDragDistance) * 180
+                    flipAngleDegrees = flipStartAngleDegrees + Double(delta)
+                }
             }
             .onEnded { value in
                 guard isTop else { return }
-                handleDragEnd(value.translation.width)
+                switch gestureMode {
+                case .flip:
+                    finishFlip(translation: value.translation, predicted: value.predictedEndTranslation)
+                case .swipe, .undecided:
+                    handleDragEnd(translation: value.translation, predicted: value.predictedEndTranslation)
+                }
+                gestureMode = .undecided
             }
     }
 
-    private func handleDragEnd(_ dx: CGFloat) {
-        let tiny: CGFloat = 1
-        if dx > tiny {
-            swipeOut(direction: 1) {
-                onKnow()
-            }
-        } else if dx < -tiny {
-            swipeOut(direction: -1) {
-                onAgain()
-            }
-        } else {
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+    private func handleDragEnd(translation: CGSize, predicted: CGSize) {
+        let dx = translation.width
+        let predictedDx = predicted.width
+
+        let shouldDismiss = abs(dx) > dismissDistance || abs(predictedDx) > dismissPredictedDistance
+        guard shouldDismiss else {
+            withAnimation(.interactiveSpring(response: 0.35, dampingFraction: 0.86)) {
                 dragOffset = .zero
             }
+            return
         }
+
+        let dir: Int = (predictedDx != 0 ? (predictedDx > 0) : (dx > 0)) ? 1 : -1
+        swipeOut(direction: dir) {
+            if dir > 0 {
+                onKnow()
+            } else {
+                onAgain()
+            }
+        }
+    }
+
+    private func finishFlip(translation: CGSize, predicted: CGSize) {
+        let dy = translation.height
+        let predictedDy = predicted.height
+
+        let shouldCommit = abs(dy) > flipDistance || abs(predictedDy) > flipPredictedDistance
+        let directionDY = (predictedDy != 0 ? predictedDy : dy)
+        let directionStep: Int = (directionDY < 0) ? 1 : -1  // Up advances, down reverses.
+
+        // Anchor decisions to the starting, settled face so we never "double count"
+        // a near-180° drag and accidentally land back on the same side.
+        let startIndex = Int((flipStartAngleDegrees / 180).rounded())
+        let targetIndex = shouldCommit ? (startIndex + directionStep) : startIndex
+
+        let targetAngle = Double(targetIndex) * 180
+
+        withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.86)) {
+            flipAngleDegrees = targetAngle
+            dragOffset = .zero
+        }
+        showBack = (abs(targetIndex) % 2) == 1
     }
 
     private func swipeOut(direction dir: Int, completion: @escaping () -> Void) {
-        withAnimation(.none) { dragOffset = .zero }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+        let offX: CGFloat = CGFloat(dir) * 720
+        withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.9)) {
             isSwipingOut = true
             swipeDirection = dir
+            dragOffset = CGSize(width: offX, height: dragOffset.height * 0.2)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
             completion()
             showBack = false
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+            dragOffset = .zero
+            withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86)) {
                 isSwipingOut = false
                 swipeDirection = 0
             }
         }
     }
 
-    private func toggleFace() {
-        guard isTop else { return }
-        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-            showBack.toggle()
-        }
-    }
 }
 
 private struct NotePicker: View {

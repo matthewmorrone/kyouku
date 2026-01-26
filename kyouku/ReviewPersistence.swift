@@ -4,6 +4,52 @@ enum ReviewPersistence {
     private static let wrongKey = "wrongWordIDs"
     private static let lifetimeCorrectKey = "lifetimeCorrectCount"
     private static let lifetimeAgainKey = "lifetimeAgainCount"
+    private static let perWordStatsKey = "wordReviewStatsV1"
+
+    struct WordStats: Codable, Hashable {
+        var correct: Int
+        var again: Int
+        var lastReviewedAt: Date?
+
+        var total: Int { correct + again }
+
+        var accuracy: Double? {
+            let t = total
+            guard t > 0 else { return nil }
+            return Double(correct) / Double(t)
+        }
+    }
+
+    private static func loadPerWordStats() -> [UUID: WordStats] {
+        guard let data = UserDefaults.standard.data(forKey: perWordStatsKey) else { return [:] }
+        do {
+            let decoded = try JSONDecoder().decode([String: WordStats].self, from: data)
+            var out: [UUID: WordStats] = [:]
+            out.reserveCapacity(decoded.count)
+            for (k, v) in decoded {
+                if let id = UUID(uuidString: k) {
+                    out[id] = v
+                }
+            }
+            return out
+        } catch {
+            return [:]
+        }
+    }
+
+    private static func savePerWordStats(_ stats: [UUID: WordStats]) {
+        var encodable: [String: WordStats] = [:]
+        encodable.reserveCapacity(stats.count)
+        for (id, st) in stats {
+            encodable[id.uuidString] = st
+        }
+        do {
+            let data = try JSONEncoder().encode(encodable)
+            UserDefaults.standard.set(data, forKey: perWordStatsKey)
+        } catch {
+            // ignore
+        }
+    }
 
     private static func loadIDs() -> Set<UUID> {
         guard let data = UserDefaults.standard.array(forKey: wrongKey) as? [String] else { return [] }
@@ -40,8 +86,40 @@ enum ReviewPersistence {
         saveIDs(ids)
     }
 
+    static func recordAgain(for id: UUID) {
+        var stats = loadPerWordStats()
+        var st = stats[id] ?? WordStats(correct: 0, again: 0, lastReviewedAt: nil)
+        st.again += 1
+        st.lastReviewedAt = Date()
+        stats[id] = st
+        savePerWordStats(stats)
+    }
+
+    static func recordCorrect(for id: UUID) {
+        var stats = loadPerWordStats()
+        var st = stats[id] ?? WordStats(correct: 0, again: 0, lastReviewedAt: nil)
+        st.correct += 1
+        st.lastReviewedAt = Date()
+        stats[id] = st
+        savePerWordStats(stats)
+    }
+
+    static func stats(for id: UUID) -> WordStats? {
+        loadPerWordStats()[id]
+    }
+
+    /// Returns a 0..1 accuracy score, or nil if there isn't enough signal.
+    static func learnedScore(for id: UUID, minimumReviews: Int = FuriganaKnownWordSettings.defaultMinimumReviews) -> Double? {
+        if allWrong().contains(id) { return nil }
+        guard let st = stats(for: id) else { return nil }
+        let minReviews = max(1, minimumReviews)
+        guard st.total >= minReviews else { return nil }
+        return st.accuracy
+    }
+
     static func clearAll() {
         UserDefaults.standard.removeObject(forKey: wrongKey)
+        UserDefaults.standard.removeObject(forKey: perWordStatsKey)
     }
 
     static func incrementCorrect() {

@@ -68,6 +68,15 @@ struct DictionaryEntryDetail: Identifiable, Hashable {
     var id: Int64 { entryID }
 }
 
+struct ExampleSentence: Identifiable, Hashable {
+    let jpID: Int64
+    let enID: Int64
+    let jpText: String
+    let enText: String
+
+    var id: String { "\(jpID)#\(enID)" }
+}
+
 private struct RawDictionaryRow {
     // Removed: lookup now returns one row per JMdict entry and no longer expands
     // kana variants into separate DictionaryEntry results.
@@ -101,6 +110,7 @@ actor DictionarySQLiteStore {
     private var hasGlossesFTS = false
     private var hasSurfaceIndex = false
     private var surfaceIndexUsesHash = false
+    private var hasSentencePairs = false
     private var lastQueryDescription: String = ""
 
     private init() {
@@ -116,12 +126,13 @@ actor DictionarySQLiteStore {
             return []
         }
 
-        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        // IMPORTANT: `term` must already be normalized by `DictionaryKeyPolicy.lookupKey`.
+        // No trimming/folding/normalization is performed here.
+        guard term.isEmpty == false else {
             return []
         }
 
-        let normalized = normalizeFullWidthASCII(trimmed)
+        let normalized = term
 
         // When English is explicitly requested, prioritize gloss search.
         if case .english = mode {
@@ -130,7 +141,7 @@ actor DictionarySQLiteStore {
                 return englishResults
             }
             // User might have typed Japanese while EN is selected; fall back to the JP pipeline.
-            return try lookupSync(term: term, limit: limit, mode: .japanese)
+            return try lookupSync(term: normalized, limit: limit, mode: .japanese)
         }
 
         // Default behavior: prefer Japanese surface/readings, then gloss.
@@ -164,12 +175,12 @@ actor DictionarySQLiteStore {
     }
 
     private func looksLikeLatinQuery(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.isEmpty == false else { return false }
-        guard containsJapaneseScript(trimmed) == false else { return false }
+        // Input is expected to already be a normalized lookup key (trimmed upstream).
+        guard text.isEmpty == false else { return false }
+        guard containsJapaneseScript(text) == false else { return false }
 
         var hasLatinLetter = false
-        for scalar in trimmed.unicodeScalars {
+        for scalar in text.unicodeScalars {
             if CharacterSet.whitespacesAndNewlines.contains(scalar) { continue }
             if scalar == "'" || scalar == "-" { continue }
 
@@ -238,6 +249,16 @@ actor DictionarySQLiteStore {
         try fetchEntryPriorityScoresSync(for: entryIDs)
     }
 
+    /// Best-effort example sentence lookup.
+    ///
+    /// Notes:
+    /// - The DB currently does not map JMdict entry IDs to sentences.
+    /// - We therefore do a substring match over `sentence_pairs.jp_text`.
+    /// - If the bundled DB lacks the optional `sentence_pairs` table, this returns [].
+    func fetchExampleSentences(containing terms: [String], limit: Int = 8) async throws -> [ExampleSentence] {
+        try fetchExampleSentencesSync(containing: terms, limit: limit)
+    }
+
     private func queryExactMatches(for term: String, limit: Int) throws -> [DictionaryEntry] {
         for candidate in exactMatchCandidates(for: term) {
             let rows = try selectEntries(matching: candidate, limit: limit)
@@ -265,6 +286,53 @@ actor DictionarySQLiteStore {
             let s = String(cString: sqlite3_column_text(stmt, 0))
             if s.isEmpty == false {
                 out.append(s)
+            }
+        }
+        return out
+    }
+
+    /// Returns surface forms that are explicitly allowed to end with small っ/ッ.
+    ///
+    /// This is used by Stage 1 segmentation to enforce the hard constraint that
+    /// normal lexical tokens must not terminate on sokuon. We only allow it for
+    /// entries that JMdict classifies as interjections or onomatopoeic/mimetic forms.
+    ///
+    /// IMPORTANT: Callers must treat this as bootstrap-only data and cache it in memory.
+    func listSokuonTerminalAllowedSurfaceForms() async throws -> [String] {
+        try ensureOpen()
+        guard let db else { return [] }
+        let sql = """
+        WITH allowed_entries AS (
+            SELECT DISTINCT entry_id
+            FROM senses
+            WHERE COALESCE(pos, '') LIKE '%int%'
+               OR COALESCE(misc, '') LIKE '%on-mim%'
+               OR COALESCE(misc, '') LIKE '%on-mat%'
+        )
+        SELECT DISTINCT k.text
+        FROM kana_forms k
+        JOIN allowed_entries a ON a.entry_id = k.entry_id
+        WHERE k.text LIKE '%っ' OR k.text LIKE '%ッ'
+        UNION
+        SELECT DISTINCT k.text
+        FROM kanji k
+        JOIN allowed_entries a ON a.entry_id = k.entry_id
+        WHERE k.text LIKE '%っ' OR k.text LIKE '%ッ';
+        """
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let ptr = sqlite3_column_text(stmt, 0) else { continue }
+            let raw = String(cString: ptr)
+            let normalized = raw.precomposedStringWithCanonicalMapping
+            if normalized.isEmpty == false {
+                out.append(normalized)
             }
         }
         return out
@@ -1183,15 +1251,96 @@ actor DictionarySQLiteStore {
         guard let db else {
             hasGlossesFTS = false
             hasSurfaceIndex = false
+            hasSentencePairs = false
             return
         }
         hasGlossesFTS = tableExists("glosses_fts", in: db)
         hasSurfaceIndex = tableExists("surface_index", in: db)
+        hasSentencePairs = tableExists("sentence_pairs", in: db)
         if hasSurfaceIndex {
             surfaceIndexUsesHash = tableHasColumn("surface_index", column: "token_hash", in: db)
         } else {
             surfaceIndexUsesHash = false
         }
+    }
+
+    private func fetchExampleSentencesSync(containing terms: [String], limit: Int) throws -> [ExampleSentence] {
+        try ensureOpen()
+        guard let db else { return [] }
+        guard hasSentencePairs else { return [] }
+
+        let normalizedTerms = terms
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+
+        guard normalizedTerms.isEmpty == false else { return [] }
+
+        func escapeLike(_ value: String) -> String {
+            // Escape LIKE wildcards and the escape character itself.
+            // We use ESCAPE '\\' in SQL.
+            var out = ""
+            out.reserveCapacity(value.count)
+            for ch in value {
+                if ch == "\\" || ch == "%" || ch == "_" {
+                    out.append("\\")
+                }
+                out.append(ch)
+            }
+            return out
+        }
+
+        func isShortAndBroad(_ value: String) -> Bool {
+            // Avoid pathological matches for 1-char kana / particles.
+            // Still allow 1-char kanji queries.
+            if value.count >= 2 { return false }
+            return containsKanjiCharacters(value) == false
+        }
+
+        let perTermLimit = max(8, min(50, limit * 4))
+        let overallLimit = max(1, limit)
+
+        var seen: Set<String> = []
+        var out: [ExampleSentence] = []
+        out.reserveCapacity(min(16, overallLimit))
+
+        let sql = "SELECT jp_id, en_id, jp_text, en_text FROM sentence_pairs WHERE jp_text LIKE ?1 ESCAPE '\\' ORDER BY jp_id ASC LIMIT ?2;"
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        for rawTerm in normalizedTerms {
+            if out.count >= overallLimit { break }
+            if isShortAndBroad(rawTerm) { continue }
+
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+
+            let pattern = "%\(escapeLike(rawTerm))%"
+            sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 2, Int32(perTermLimit))
+
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let jpID = sqlite3_column_int64(stmt, 0)
+                let enID = sqlite3_column_int64(stmt, 1)
+                guard let jpPtr = sqlite3_column_text(stmt, 2), let enPtr = sqlite3_column_text(stmt, 3) else {
+                    continue
+                }
+
+                let jpText = String(cString: jpPtr).trimmingCharacters(in: .whitespacesAndNewlines)
+                let enText = String(cString: enPtr).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard jpText.isEmpty == false, enText.isEmpty == false else { continue }
+
+                let key = "\(jpID)#\(enID)"
+                if seen.insert(key).inserted {
+                    out.append(ExampleSentence(jpID: jpID, enID: enID, jpText: jpText, enText: enText))
+                    if out.count >= overallLimit { break }
+                }
+            }
+        }
+
+        return out
     }
 
     private func tableExists(_ name: String, in db: OpaquePointer) -> Bool {
@@ -1469,22 +1618,7 @@ actor DictionarySQLiteStore {
         return String(m)
     }
 
-    private func normalizeFullWidthASCII(_ text: String) -> String {
-        var scalars: [UnicodeScalar] = []
-        scalars.reserveCapacity(text.count)
-        var changed = false
-        for scalar in text.unicodeScalars {
-            if (0xFF01...0xFF5E).contains(scalar.value),
-               let converted = UnicodeScalar(scalar.value - 0xFEE0) {
-                scalars.append(converted)
-                changed = true
-            } else {
-                scalars.append(scalar)
-            }
-        }
-        if !changed { return text }
-        return String(String.UnicodeScalarView(scalars))
-    }
+    // normalizeFullWidthASCII removed: dictionary lookup keys are normalized upstream by DictionaryKeyPolicy.
 
     private func sanitizeSurfaceToken(_ term: String) -> String {
         let allowedRanges: [ClosedRange<UInt32>] = [

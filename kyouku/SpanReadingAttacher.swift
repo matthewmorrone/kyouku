@@ -755,12 +755,22 @@ struct SpanReadingAttacher {
             }
         }
 
-        let semantic: [SemanticSpan] = segments.map { seg in
-            SemanticSpan(
-                range: seg.range,
-                surface: surface(of: seg),
-                sourceSpanIndices: seg.sourceSpanIndices,
-                readingKana: readingForSegment(seg)
+        var semantic: [SemanticSpan] = []
+        semantic.reserveCapacity(segments.count)
+        for seg in segments {
+            let surfaceText = surface(of: seg)
+            let mecabReadingRaw = readingForSegment(seg)
+            let mecabReading = mecabReadingRaw.map { Self.toHiragana($0) }
+            let override = await ReadingOverridePolicy.shared.overrideReading(for: surfaceText, mecabReading: mecabReading)
+            let finalReading = sanitizeRubyReading(override ?? mecabReading)
+
+            semantic.append(
+                SemanticSpan(
+                    range: seg.range,
+                    surface: surfaceText,
+                    sourceSpanIndices: seg.sourceSpanIndices,
+                    readingKana: finalReading
+                )
             )
         }
 

@@ -11,6 +11,7 @@ struct ExtractWordsView: View {
 
     // Inputs mirrored from PasteView's tokenListSheet usage
     let items: [TokenListItem]
+    let noteID: UUID
     let isReady: Bool
     let isEditing: Bool
     let selectedRange: NSRange?
@@ -31,10 +32,13 @@ struct ExtractWordsView: View {
     let dictionaryPanel: (TokenSelectionContext) -> TokenActionPanel
     let onDone: () -> Void
 
+    @EnvironmentObject private var readingOverrides: ReadingOverridesStore
+
     @State private var dictionaryPanelHeight: CGFloat = 0
 
     init(
         items: [TokenListItem],
+        noteID: UUID,
         isReady: Bool,
         isEditing: Bool,
         selectedRange: NSRange?,
@@ -54,6 +58,7 @@ struct ExtractWordsView: View {
         onDone: @escaping () -> Void
     ) {
         self.items = items
+        self.noteID = noteID
         self.isReady = isReady
         self.isEditing = isEditing
         self.selectedRange = selectedRange
@@ -113,6 +118,7 @@ struct ExtractWordsView: View {
 
                     TokenListPanel(
                         items: items,
+                        noteID: noteID,
                         isReady: isReady,
                         isEditing: isEditing,
                         selectedRange: selectedRange,
@@ -177,6 +183,7 @@ struct TokenListItem: Identifiable {
 
 struct TokenListPanel: View {
     let items: [TokenListItem]
+    let noteID: UUID
     let isReady: Bool
     let isEditing: Bool
     let selectedRange: NSRange?
@@ -190,8 +197,11 @@ struct TokenListPanel: View {
     let canMergeLeft: (Int) -> Bool
     let canMergeRight: (Int) -> Bool
 
+    @EnvironmentObject private var readingOverrides: ReadingOverridesStore
+
     init(
         items: [TokenListItem],
+        noteID: UUID,
         isReady: Bool,
         isEditing: Bool,
         selectedRange: NSRange?,
@@ -206,6 +216,7 @@ struct TokenListPanel: View {
         canMergeRight: @escaping (Int) -> Bool
     ) {
         self.items = items
+        self.noteID = noteID
         self.isReady = isReady
         self.isEditing = isEditing
         self.selectedRange = selectedRange
@@ -246,6 +257,7 @@ struct TokenListPanel: View {
                         ForEach(items) { item in
                             TokenListRow(
                                 item: item,
+                                noteID: noteID,
                                 isSelected: isItemSelected(item),
                                 onSelect: { onSelect(item.spanIndex) },
                                 onGoTo: { onGoTo(item.spanIndex) },
@@ -282,6 +294,7 @@ struct TokenListPanel: View {
 
     private struct TokenListRow: View {
         let item: TokenListItem
+        let noteID: UUID
         let isSelected: Bool
         let onSelect: () -> Void
         let onGoTo: () -> Void
@@ -291,6 +304,8 @@ struct TokenListPanel: View {
         let onSplit: () -> Void
         let mergeLeftEnabled: Bool
         let mergeRightEnabled: Bool
+
+        @EnvironmentObject private var readingOverrides: ReadingOverridesStore
 
         var body: some View {
             HStack(spacing: 12) {
@@ -360,11 +375,72 @@ struct TokenListPanel: View {
         }
 
         private var readingText: String? {
-            guard let reading = item.displayReading?.trimmingCharacters(in: .whitespacesAndNewlines), reading.isEmpty == false else { return nil }
             if Self.isKanaOnly(item.surface) {
                 return nil
             }
+
+            let fallback = item.reading ?? item.displayReading
+            let preferred = preferredReading(for: item.range, fallback: fallback)
+            guard let display = readingWithOkurigana(surface: item.surface, baseReading: preferred)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  display.isEmpty == false
+            else {
+                return nil
+            }
+            return display
+        }
+
+        private func preferredReading(for range: NSRange, fallback: String?) -> String? {
+            let overrides = readingOverrides.overrides(for: noteID, overlapping: range)
+            if let exact = overrides.first(where: {
+                $0.rangeStart == range.location &&
+                $0.rangeLength == range.length &&
+                $0.userKana != nil
+            }) {
+                return exact.userKana
+            }
+
+            if let bestOverlap = overrides
+                .filter({ $0.userKana != nil })
+                .max(by: { lhs, rhs in
+                    let lhsRange = NSRange(location: lhs.rangeStart, length: lhs.rangeLength)
+                    let rhsRange = NSRange(location: rhs.rangeStart, length: rhs.rangeLength)
+                    return NSIntersectionRange(lhsRange, range).length < NSIntersectionRange(rhsRange, range).length
+                }) {
+                return bestOverlap.userKana
+            }
+
+            return fallback
+        }
+
+        private func readingWithOkurigana(surface: String, baseReading: String?) -> String? {
+            guard var reading = baseReading?.trimmingCharacters(in: .whitespacesAndNewlines), reading.isEmpty == false else { return nil }
+            guard let suffix = trailingKanaSuffix(in: surface), suffix.isEmpty == false else { return reading }
+            if reading.hasSuffix(suffix) {
+                return reading
+            }
+            reading.append(suffix)
             return reading
+        }
+
+        private func trailingKanaSuffix(in surface: String) -> String? {
+            guard surface.isEmpty == false else { return nil }
+            var scalars: [UnicodeScalar] = []
+            for scalar in surface.unicodeScalars.reversed() {
+                if isKanaScalar(scalar) {
+                    scalars.append(scalar)
+                } else {
+                    break
+                }
+            }
+            guard scalars.isEmpty == false else { return nil }
+            return String(String.UnicodeScalarView(scalars.reversed()))
+        }
+
+        private func isKanaScalar(_ scalar: UnicodeScalar) -> Bool {
+            (0x3040...0x309F).contains(scalar.value) ||
+            (0x30A0...0x30FF).contains(scalar.value) ||
+            scalar.value == 0xFF70 ||
+            (0xFF66...0xFF9F).contains(scalar.value)
         }
 
         private static func isKanaOnly(_ text: String) -> Bool {

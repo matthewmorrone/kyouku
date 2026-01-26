@@ -9,8 +9,14 @@ actor LexiconProvider {
     static let shared = LexiconProvider()
 
     private var cachedTrie: LexiconTrie?
-    private var buildTask: Task<LexiconTrie, Error>?
+    private var cachedSokuonTerminalAllowedForms: Set<String>?
+    private var buildTask: Task<Bootstrap, Error>?
     private let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "LexiconProvider")
+
+    private struct Bootstrap {
+        let trie: LexiconTrie
+        let sokuonTerminalAllowedForms: Set<String>
+    }
 
     /// Returns the already-cached trie if available, without triggering a build.
     ///
@@ -20,25 +26,41 @@ actor LexiconProvider {
         cachedTrie
     }
 
+    func sokuonTerminalAllowedForms() async throws -> Set<String> {
+        if let cached = cachedSokuonTerminalAllowedForms {
+            return cached
+        }
+        let bootstrap = try await bootstrapIfNeeded()
+        return bootstrap.sokuonTerminalAllowedForms
+    }
+
     func trie() async throws -> LexiconTrie {
+        let bootstrap = try await bootstrapIfNeeded()
+        return bootstrap.trie
+    }
+
+    private func bootstrapIfNeeded() async throws -> Bootstrap {
         let overallInterval = signposter.beginInterval("Trie() Overall")
 
-        if let trie = cachedTrie {
+        if let trie = cachedTrie, let allowed = cachedSokuonTerminalAllowedForms {
             signposter.endInterval("Trie() Overall", overallInterval)
-            return trie
+            return Bootstrap(trie: trie, sokuonTerminalAllowedForms: allowed)
         }
 
         if let task = buildTask {
-            return try await task.value
+            let bootstrap = try await task.value
+            signposter.endInterval("Trie() Overall", overallInterval)
+            return bootstrap
         }
 
         // Capture actor-isolated state before entering the Task closure.
         let signposter = self.signposter
 
-        let task = Task<LexiconTrie, Error> {
-            let sqliteInterval = signposter.beginInterval("Trie() SQLite listAllSurfaceForms")
+        let task = Task<Bootstrap, Error> {
+            let sqliteInterval = signposter.beginInterval("Trie() SQLite bootstrap")
             let forms = try await DictionarySQLiteStore.shared.listAllSurfaceForms()
-            signposter.endInterval("Trie() SQLite listAllSurfaceForms", sqliteInterval)
+            let allowed = try await DictionarySQLiteStore.shared.listSokuonTerminalAllowedSurfaceForms()
+            signposter.endInterval("Trie() SQLite bootstrap", sqliteInterval)
 
             let buildInterval = signposter.beginInterval("Trie() Build LexiconTrie")
             // Build the trie off the main thread to avoid UI hitching
@@ -47,19 +69,20 @@ actor LexiconProvider {
                     continuation.resume(returning: LexiconTrie(words: forms))
                 }
             }
-
             signposter.endInterval("Trie() Build LexiconTrie", buildInterval)
-            return trie
+
+            return Bootstrap(trie: trie, sokuonTerminalAllowedForms: Set(allowed))
         }
         buildTask = task
 
         do {
-            let trie = try await task.value
-            cachedTrie = trie
+            let bootstrap = try await task.value
+            cachedTrie = bootstrap.trie
+            cachedSokuonTerminalAllowedForms = bootstrap.sokuonTerminalAllowedForms
             buildTask = nil
             signposter.endInterval("Trie() Overall", overallInterval)
             await CustomLogger.shared.info("Lexicon trie built and cached in memory.")
-            return trie
+            return bootstrap
         } catch {
             buildTask = nil
             signposter.endInterval("Trie() Overall", overallInterval)

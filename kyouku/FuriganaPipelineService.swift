@@ -1,6 +1,10 @@
 import Foundation
 
 struct FuriganaPipelineService {
+    private static func foldKanaToHiragana(_ value: String) -> String {
+        value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
+    }
+
     private static func isIgnorableTokenSurfaceScalar(_ scalar: UnicodeScalar) -> Bool {
         // Regular whitespace/newlines.
         if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
@@ -45,6 +49,10 @@ struct FuriganaPipelineService {
         let readingOverrides: [ReadingOverride]
         let context: String
         let padHeadwordSpacing: Bool
+
+        /// Kana-folded “known word” surfaces used for adaptive ruby suppression.
+        /// When non-empty, ruby annotations are removed for semantic spans that match.
+        let knownWordSurfaceKeys: Set<String>
     }
 
     struct Result {
@@ -97,12 +105,62 @@ struct FuriganaPipelineService {
                 context: input.context,
                 padHeadwordSpacing: input.padHeadwordSpacing
             )
-            attributed = projected
+            if input.knownWordSurfaceKeys.isEmpty {
+                attributed = projected
+            } else {
+                attributed = stripRubyForKnownSemanticSpans(
+                    attributed: projected,
+                    semanticSpans: resolvedSemantic,
+                    stage2Spans: resolvedSpans,
+                    knownSurfaceKeys: input.knownWordSurfaceKeys
+                )
+            }
         } else {
             attributed = nil
         }
 
         return Result(spans: resolvedSpans, semanticSpans: resolvedSemantic, attributedString: attributed)
+    }
+
+    private func stripRubyForKnownSemanticSpans(
+        attributed: NSAttributedString,
+        semanticSpans: [SemanticSpan],
+        stage2Spans: [AnnotatedSpan],
+        knownSurfaceKeys: Set<String>
+    ) -> NSAttributedString {
+        guard knownSurfaceKeys.isEmpty == false else { return attributed }
+        guard semanticSpans.isEmpty == false else { return attributed }
+        guard stage2Spans.isEmpty == false else { return attributed }
+
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+
+        func matchesKnown(for semantic: SemanticSpan) -> Bool {
+            let surfaceKey = Self.foldKanaToHiragana(semantic.surface.trimmingCharacters(in: .whitespacesAndNewlines))
+            if surfaceKey.isEmpty == false, knownSurfaceKeys.contains(surfaceKey) { return true }
+
+            // Also consider lemma candidates from underlying Stage-2 spans.
+            for idx in semantic.sourceSpanIndices {
+                guard idx >= 0, idx < stage2Spans.count else { continue }
+                for lemma in stage2Spans[idx].lemmaCandidates {
+                    let key = Self.foldKanaToHiragana(lemma.trimmingCharacters(in: .whitespacesAndNewlines))
+                    if key.isEmpty == false, knownSurfaceKeys.contains(key) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
+        for semantic in semanticSpans {
+            guard semantic.range.location != NSNotFound, semantic.range.length > 0 else { continue }
+            guard matchesKnown(for: semantic) else { continue }
+
+            mutable.removeAttribute(.rubyAnnotation, range: semantic.range)
+            mutable.removeAttribute(.rubyReadingText, range: semantic.range)
+            mutable.removeAttribute(.rubyReadingFontSize, range: semantic.range)
+        }
+
+        return mutable.copy() as? NSAttributedString ?? attributed
     }
 
     private static func splitSemanticSpansOnLineBreaks(text: String, spans: [SemanticSpan]) -> [SemanticSpan] {

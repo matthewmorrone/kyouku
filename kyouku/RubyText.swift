@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import CoreText
 
 private let RubyDebugBoundingDefaultStrokeColor = UIColor.systemPink.withAlphaComponent(0.9)
 private let RubyDebugBoundingDarkModeStrokeColor = UIColor(white: 1.0, alpha: 0.92)
@@ -103,6 +104,11 @@ struct RubyText: UIViewRepresentable {
     var tokenColorPalette: [UIColor] = []
     var semanticSpans: [SemanticSpan] = []
     var selectedRange: NSRange? = nil
+    /// Increment this token to request a one-shot scroll-to-selected-range.
+    ///
+    /// This is intentionally separate from `selectedRange` updates to avoid selection-induced
+    /// scroll jumps during normal view refreshes.
+    var scrollToSelectedRangeToken: Int = 0
     var customizedRanges: [NSRange] = []
     var alternateTokenColorsEnabled: Bool = false
     var enableTapInspection: Bool = true
@@ -246,13 +252,12 @@ struct RubyText: UIViewRepresentable {
             )
         )
 
-        var insets = textInsets
-        // Give ruby a tiny extra cushion to avoid occasional clipping on the first line
-        // due to rounding/subpixel layout, especially at larger text sizes.
-        let rubyTopFudge: CGFloat = 2
-        insets.top = max(insets.top, rubyHeadroom + rubyTopFudge)
+        let insets = textInsets
+        // Ruby headroom is reserved via custom TextKit 2 layout fragments (topMargin).
+        // Keep container inset stable so we don't introduce global top padding.
         uiView.rubyHighlightHeadroom = rubyHeadroom
         uiView.rubyBaselineGap = rubyBaselineGap
+        uiView.rubyReservedTopMargin = (annotationVisibility == .removed) ? 0 : max(0, rubyHeadroom)
 
         // Keep selection highlight geometry stable even when we don't reapply attributed text.
         let baseFont = UIFont.systemFont(ofSize: fontSize)
@@ -356,7 +361,14 @@ struct RubyText: UIViewRepresentable {
 
             let processed = RubyText.applyAnnotationVisibility(annotationVisibility, to: mutable)
 
-            uiView.applyAttributedText(processed)
+            let (displayText, indexMap) = RubyText.applyRubyWidthPaddingAroundRunsIfNeeded(
+                to: processed,
+                baseFont: baseFont,
+                defaultRubyFontSize: defaultRubyFontSize,
+                enabled: padHeadwordSpacing && annotationVisibility != .removed
+            )
+            uiView.rubyIndexMap = indexMap
+            uiView.applyAttributedText(displayText)
             uiView.lastAppliedRenderKey = renderKey
         }
 
@@ -382,7 +394,8 @@ struct RubyText: UIViewRepresentable {
             }
         }
         uiView.semanticSpans = semanticSpans
-        uiView.selectionHighlightRange = selectedRange
+        let displaySelectedRange = selectedRange.map { uiView.displayRange(fromSourceRange: $0) }
+        uiView.selectionHighlightRange = displaySelectedRange
         uiView.isTapInspectionEnabled = enableTapInspection
         uiView.isDragSelectionEnabled = enableDragSelection
         uiView.padHeadwordSpacing = padHeadwordSpacing
@@ -412,11 +425,18 @@ struct RubyText: UIViewRepresentable {
         let overlay = max(0, bottomOverlayHeight)
         let selectionChanged = (context.coordinator.lastAutoEnsureSelectionRange != selectedRange)
         let overlayChanged = abs(context.coordinator.lastAutoEnsureOverlayHeight - overlay) > 0.5
-        if overlay > 0, let selectedRange, selectedRange.length > 0, (selectionChanged || overlayChanged) {
-            uiView.ensureHighlightedRangeVisibleIfCovered(selectedRange, bottomOverlayHeight: overlay)
+        if overlay > 0, let displaySelectedRange, displaySelectedRange.length > 0, (selectionChanged || overlayChanged) {
+            uiView.ensureHighlightedRangeVisibleIfCovered(displaySelectedRange, bottomOverlayHeight: overlay)
         }
         context.coordinator.lastAutoEnsureSelectionRange = selectedRange
         context.coordinator.lastAutoEnsureOverlayHeight = overlay
+
+        // One-shot explicit scroll request (e.g., constellation tap).
+        let scrollTokenChanged = (context.coordinator.lastScrollToSelectedRangeToken != scrollToSelectedRangeToken)
+        if scrollTokenChanged, let displaySelectedRange, displaySelectedRange.length > 0 {
+            uiView.ensureHighlightedRangeVisible(displaySelectedRange, bottomOverlayHeight: overlay)
+        }
+        context.coordinator.lastScrollToSelectedRangeToken = scrollToSelectedRangeToken
 
         // Help the view expand vertically rather than compress
         uiView.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -502,6 +522,7 @@ struct RubyText: UIViewRepresentable {
 
         var lastAutoEnsureSelectionRange: NSRange? = nil
         var lastAutoEnsureOverlayHeight: CGFloat = 0
+        var lastScrollToSelectedRangeToken: Int = 0
 
         private weak var textView: UITextView?
         private var scrollSyncGroupID: String? = nil
@@ -837,23 +858,29 @@ struct RubyText: UIViewRepresentable {
         defaultRubyFontSize: CGFloat,
         rubyBaselineGap: CGFloat
     ) -> CGFloat {
-        guard attributed.length > 0 else { return max(0, defaultRubyFontSize + rubyBaselineGap) }
-        let full = NSRange(location: 0, length: attributed.length)
-        var maxRubySize: CGFloat = 0
-        attributed.enumerateAttribute(.rubyReadingFontSize, in: full, options: []) { value, _, _ in
-            if let num = value as? NSNumber {
-                maxRubySize = max(maxRubySize, CGFloat(max(1.0, num.doubleValue)))
-            } else if let cg = value as? CGFloat {
-                maxRubySize = max(maxRubySize, max(1.0, cg))
-            } else if let dbl = value as? Double {
-                maxRubySize = max(maxRubySize, CGFloat(max(1.0, dbl)))
-            }
+        guard attributed.length > 0 else {
+            let rubyFont = UIFont.systemFont(ofSize: max(1, defaultRubyFontSize))
+            return max(0, rubyFont.lineHeight + rubyBaselineGap)
         }
-        if maxRubySize <= 0 {
-            maxRubySize = max(1.0, defaultRubyFontSize)
+        let full = NSRange(location: 0, length: attributed.length)
+        var maxRubyHeight: CGFloat = 0
+        attributed.enumerateAttribute(.rubyReadingFontSize, in: full, options: []) { value, _, _ in
+            let rubySize: CGFloat? = {
+                if let num = value as? NSNumber { return CGFloat(num.doubleValue) }
+                if let cg = value as? CGFloat { return cg }
+                if let dbl = value as? Double { return CGFloat(dbl) }
+                return nil
+            }()
+            guard let rubySize, rubySize.isFinite else { return }
+            let rubyFont = UIFont.systemFont(ofSize: max(1.0, rubySize))
+            maxRubyHeight = max(maxRubyHeight, rubyFont.lineHeight)
+        }
+        if maxRubyHeight <= 0 {
+            let rubyFont = UIFont.systemFont(ofSize: max(1, defaultRubyFontSize))
+            maxRubyHeight = rubyFont.lineHeight
         }
         // Reserve the ruby font height plus a small gap to visually separate from the base glyphs.
-        return max(0, maxRubySize + rubyBaselineGap)
+        return max(0, maxRubyHeight + rubyBaselineGap)
     }
 
     /// Computes a symmetric horizontal inset to prevent ruby from overhanging and being clipped at the edges.
@@ -881,12 +908,307 @@ struct RubyText: UIViewRepresentable {
         // Heuristic: allow a small fraction of the ruby size as overhang inset on each side.
         return max(0, maxRubySize * 0.25)
     }
+
+    private static func measureTypographicWidth(_ attributed: NSAttributedString) -> CGFloat {
+        let line = CTLineCreateWithAttributedString(attributed)
+        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    }
+
+    private static func makeWidthAttachmentAttributes(width: CGFloat) -> [NSAttributedString.Key: Any] {
+        let w = max(0, width)
+
+        var callbacks = CTRunDelegateCallbacks(
+            version: kCTRunDelegateVersion1,
+            dealloc: { ref in
+                Unmanaged<NSNumber>.fromOpaque(UnsafeRawPointer(ref)).release()
+            },
+            getAscent: { ref in
+                let data = Unmanaged<NSNumber>.fromOpaque(UnsafeRawPointer(ref)).takeUnretainedValue()
+                _ = data
+                return 0
+            },
+            getDescent: { _ in 0 },
+            getWidth: { ref in
+                let data = Unmanaged<NSNumber>.fromOpaque(UnsafeRawPointer(ref)).takeUnretainedValue()
+                return CGFloat(data.doubleValue)
+            }
+        )
+
+        let boxed = NSNumber(value: Double(w))
+        let ref = Unmanaged.passRetained(boxed).toOpaque()
+        let delegate = CTRunDelegateCreate(&callbacks, ref)
+
+        return [
+            kCTRunDelegateAttributeName as NSAttributedString.Key: delegate as Any,
+            .foregroundColor: UIColor.clear
+        ]
+    }
+
+    static func applyRubyWidthPaddingAroundRunsIfNeeded(
+        to attributed: NSAttributedString,
+        baseFont: UIFont,
+        defaultRubyFontSize: CGFloat,
+        enabled: Bool
+    ) -> (NSAttributedString, TokenOverlayTextView.RubyIndexMap) {
+        guard enabled, attributed.length > 0 else {
+            return (attributed, .identity)
+        }
+
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        let full = NSRange(location: 0, length: mutable.length)
+
+        // Insert display-only spacers around ruby-bearing headword runs so base width matches ruby width.
+        // We insert exactly one U+FFFC per spacer and use a CTRunDelegate width.
+        struct SpacerInsertion {
+            let insertAtSourceIndex: Int
+            let width: CGFloat
+            let rubyReading: String
+            let rubyFontSize: CGFloat
+        }
+        var insertions: [SpacerInsertion] = []
+        insertions.reserveCapacity(64)
+
+        mutable.enumerateAttribute(.rubyReadingText, in: full, options: []) { value, range, _ in
+            guard let reading = value as? String, reading.isEmpty == false else { return }
+            guard range.location != NSNotFound, range.length > 0 else { return }
+            guard NSMaxRange(range) <= mutable.length else { return }
+
+            let rubyFontSize: CGFloat = {
+                if let stored = mutable.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? Double {
+                    return CGFloat(max(1.0, stored))
+                }
+                if let stored = mutable.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? CGFloat {
+                    return max(1.0, stored)
+                }
+                if let stored = mutable.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? NSNumber {
+                    return CGFloat(max(1.0, stored.doubleValue))
+                }
+                return max(1.0, defaultRubyFontSize)
+            }()
+
+            let baseSub = mutable.attributedSubstring(from: range)
+            let baseWidth = measureTypographicWidth(baseSub)
+
+            let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
+            let rubyAttr = NSAttributedString(string: reading, attributes: [.font: rubyFont])
+            let rubyWidth = measureTypographicWidth(rubyAttr)
+
+            let overhang = rubyWidth - baseWidth
+            guard overhang > 0.25 else { return }
+
+            let pad = overhang / 2
+            insertions.append(.init(insertAtSourceIndex: range.location, width: pad, rubyReading: reading, rubyFontSize: rubyFontSize))
+            insertions.append(.init(insertAtSourceIndex: NSMaxRange(range), width: pad, rubyReading: reading, rubyFontSize: rubyFontSize))
+        }
+
+        guard insertions.isEmpty == false else {
+            return (mutable, .identity)
+        }
+
+        // Adjacent ruby runs (common when furigana is per-kanji) produce TWO insertions at the
+        // same boundary: a right-pad for the left run and a left-pad for the right run.
+        // The conservative sum can create huge intra-word gaps (e.g. "純　情").
+        // Allow ruby to overhang more by capping the *total* padding at shared boundaries.
+        let groupedByIndex = Dictionary(grouping: insertions, by: { $0.insertAtSourceIndex })
+        if groupedByIndex.values.contains(where: { $0.count >= 2 }) {
+            let capTotalAtSharedBoundary = max(1.0, baseFont.pointSize * 0.28)
+            var adjusted: [SpacerInsertion] = []
+            adjusted.reserveCapacity(insertions.count)
+
+            for (idx, group) in groupedByIndex {
+                if group.count < 2 {
+                    adjusted.append(contentsOf: group)
+                    continue
+                }
+
+                let sum = group.reduce(CGFloat(0)) { $0 + $1.width }
+                let scale: CGFloat = (sum > capTotalAtSharedBoundary && sum > 0)
+                    ? (capTotalAtSharedBoundary / sum)
+                    : 1.0
+
+                for item in group {
+                    adjusted.append(
+                        .init(
+                            insertAtSourceIndex: idx,
+                            width: max(0, item.width * scale),
+                            rubyReading: item.rubyReading,
+                            rubyFontSize: item.rubyFontSize
+                        )
+                    )
+                }
+            }
+
+            insertions = adjusted
+        }
+
+        // Apply insertions from end to start so indices remain stable.
+        let sorted = insertions.sorted {
+            if $0.insertAtSourceIndex != $1.insertAtSourceIndex {
+                return $0.insertAtSourceIndex > $1.insertAtSourceIndex
+            }
+            return $0.width > $1.width
+        }
+
+        for item in sorted {
+            let attachmentChar = "\u{FFFC}" // object replacement character
+            let attrs = makeWidthAttachmentAttributes(width: item.width)
+            let insert = NSMutableAttributedString(string: attachmentChar, attributes: attrs)
+            insert.addAttribute(.font, value: baseFont, range: NSRange(location: 0, length: insert.length))
+            // Extend ruby attributes across the spacers so the ruby run's measured base width includes padding.
+            insert.addAttribute(.rubyReadingText, value: item.rubyReading, range: NSRange(location: 0, length: insert.length))
+            insert.addAttribute(.rubyReadingFontSize, value: item.rubyFontSize, range: NSRange(location: 0, length: insert.length))
+
+            let safeIndex = max(0, min(mutable.length, item.insertAtSourceIndex))
+            mutable.insert(insert, at: safeIndex)
+        }
+
+        let insertionPositions = insertions.map { $0.insertAtSourceIndex }.sorted()
+        return (mutable, TokenOverlayTextView.RubyIndexMap(insertionPositions: insertionPositions))
+    }
 }
 
 final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     // NOTE: Avoid TextKit 1 entry points (`layoutManager`, `textStorage`, `glyphRange(...)`, etc.).
     // Geometry for highlights + ruby anchoring is derived via TextKit 2 (`textLayoutManager`)
     // with `selectionRects(for:)` as a UI-safe fallback.
+
+    struct RubyIndexMap: Equatable {
+        // In SOURCE coordinates, each value indicates a 1-UTF16-unit insertion position.
+        // (We insert exactly one U+FFFC per spacer.) Duplicates are allowed.
+        let insertionPositions: [Int]
+
+        static let identity = RubyIndexMap(insertionPositions: [])
+
+        private func lowerBound(_ value: Int) -> Int {
+            // First index where insertionPositions[index] >= value
+            var low = 0
+            var high = insertionPositions.count
+            while low < high {
+                let mid = (low + high) / 2
+                if insertionPositions[mid] < value {
+                    low = mid + 1
+                } else {
+                    high = mid
+                }
+            }
+            return low
+        }
+
+        private func upperBound(_ value: Int) -> Int {
+            // First index where insertionPositions[index] > value
+            var low = 0
+            var high = insertionPositions.count
+            while low < high {
+                let mid = (low + high) / 2
+                if insertionPositions[mid] <= value {
+                    low = mid + 1
+                } else {
+                    high = mid
+                }
+            }
+            return low
+        }
+
+        func sourceToDisplay(_ sourceIndex: Int, includeInsertionsAtIndex: Bool) -> Int {
+            guard insertionPositions.isEmpty == false else { return sourceIndex }
+            let count: Int = includeInsertionsAtIndex
+                ? upperBound(sourceIndex) // <= sourceIndex
+                : lowerBound(sourceIndex) // < sourceIndex
+            return sourceIndex + count
+        }
+
+        func displayToSource(_ displayIndex: Int) -> Int {
+            guard insertionPositions.isEmpty == false else { return displayIndex }
+            let target = max(0, displayIndex)
+
+            // Find the largest source index such that sourceToDisplay(source) <= display.
+            // This maps inserted spacer indices to the nearest preceding source index.
+            var low = 0
+            var high = target
+            while low < high {
+                let mid = (low + high + 1) / 2
+                let mapped = sourceToDisplay(mid, includeInsertionsAtIndex: true)
+                if mapped <= target {
+                    low = mid
+                } else {
+                    high = mid - 1
+                }
+            }
+            return low
+        }
+
+        func sourceRangeToDisplay(_ range: NSRange) -> NSRange {
+            guard range.location != NSNotFound, range.length > 0 else { return range }
+            let start = sourceToDisplay(range.location, includeInsertionsAtIndex: true)
+            let end = sourceToDisplay(NSMaxRange(range), includeInsertionsAtIndex: false)
+            return NSRange(location: start, length: max(0, end - start))
+        }
+    }
+
+    final class RubyHeadroomLayoutFragment: NSTextLayoutFragment {
+        var rubyHeadroom: CGFloat = 0
+
+        // Reserve space above the first line in this fragment.
+        // This is the supported custom-spacing hook for fragment layout.
+        override var topMargin: CGFloat {
+            max(super.topMargin, rubyHeadroom)
+        }
+
+        // Expand rendering bounds so any ruby drawn into the reserved headroom isn't clipped.
+        override var renderingSurfaceBounds: CGRect {
+            var b = super.renderingSurfaceBounds
+            let h = max(0, rubyHeadroom)
+            b.origin.y -= h
+            b.size.height += h
+            return b
+        }
+    }
+
+    var rubyIndexMap: RubyIndexMap = .identity {
+        didSet {
+            guard oldValue != rubyIndexMap else { return }
+            rebuildPreferredWrapBreakIndicesIfNeeded()
+            if headwordDebugRectsEnabled {
+                updateHeadwordDebugRects()
+            }
+            updateHeadwordBoundingRects()
+            setNeedsLayout()
+        }
+    }
+
+    // Extra vertical headroom reserved via custom TextKit 2 layout fragments.
+    // This avoids paragraph-style hacks and ensures ruby never overlaps the previous line.
+    var rubyReservedTopMargin: CGFloat = 0 {
+        didSet {
+            guard abs(oldValue - rubyReservedTopMargin) > 0.5 else { return }
+            rubyOverlayDirty = true
+            setNeedsLayout()
+            if let tlm = textLayoutManager {
+                tlm.invalidateLayout(for: tlm.documentRange)
+            }
+        }
+    }
+
+    func displayIndex(fromSourceIndex sourceIndex: Int, includeInsertionsAtIndex: Bool = true) -> Int {
+        rubyIndexMap.sourceToDisplay(sourceIndex, includeInsertionsAtIndex: includeInsertionsAtIndex)
+    }
+
+    func sourceIndex(fromDisplayIndex displayIndex: Int) -> Int {
+        rubyIndexMap.displayToSource(displayIndex)
+    }
+
+    func displayRange(fromSourceRange range: NSRange) -> NSRange {
+        rubyIndexMap.sourceRangeToDisplay(range)
+    }
+
+    func sourceRange(fromDisplayRange range: NSRange) -> NSRange {
+        guard range.location != NSNotFound, range.length > 0 else { return range }
+        let startSource = sourceIndex(fromDisplayIndex: range.location)
+        let lastDisplayIndex = max(range.location, NSMaxRange(range) - 1)
+        let lastSource = sourceIndex(fromDisplayIndex: lastDisplayIndex)
+        let endSourceExclusive = lastSource + 1
+        return NSRange(location: startSource, length: max(0, endSourceExclusive - startSource))
+    }
 
     var semanticSpans: [SemanticSpan] = [] {
         didSet {
@@ -940,8 +1262,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         for span in semanticSpans {
             let loc = span.range.location
             guard loc != NSNotFound else { continue }
-            if loc > 0 && loc < length {
-                indices.insert(loc)
+            let displayLoc = displayIndex(fromSourceIndex: loc, includeInsertionsAtIndex: true)
+            if displayLoc > 0 && displayLoc < length {
+                indices.insert(displayLoc)
             }
         }
         preferredWrapBreakIndices = indices
@@ -1548,7 +1871,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     private func resolvedColorForSemanticSpan(_ span: SemanticSpan) -> UIColor? {
         guard let attributedText, attributedText.length > 0 else { return nil }
         let documentRange = NSRange(location: 0, length: attributedText.length)
-        let bounded = NSIntersectionRange(span.range, documentRange)
+        let bounded = NSIntersectionRange(displayRange(fromSourceRange: span.range), documentRange)
         guard bounded.length > 0 else { return nil }
 
         let backing = attributedText.string as NSString
@@ -2126,8 +2449,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         let expandedVisible = expandRange(visibleRange, by: 128)
 
         for span in semanticSpans {
-            let spanRange = span.range
-            guard spanRange.location != NSNotFound, spanRange.length > 0 else { continue }
+            let sourceRange = span.range
+            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
+            let spanRange = displayRange(fromSourceRange: sourceRange)
             guard NSIntersectionRange(spanRange, expandedVisible).length > 0 else { continue }
             _ = baseHighlightRectsInContentCoordinates(in: spanRange)
             warmed += 1
@@ -2163,11 +2487,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         for idx in 0..<maxSpans {
             let span = semanticSpans[idx]
             guard span.range.location != NSNotFound, span.range.length > 0 else { continue }
+            let displaySpanRange = displayRange(fromSourceRange: span.range)
             // Hard-boundary spans (punctuation/whitespace) are part of the pipeline as
             // segmentation delimiters, but are not “headwords” and should not produce
             // debug bounding boxes.
-            guard isHardBoundaryOnly(range: span.range) == false else { continue }
-            let rects = unionRectsByLine(baseHighlightRectsInContentCoordinates(in: span.range))
+            guard isHardBoundaryOnly(range: displaySpanRange) == false else { continue }
+            let rects = unionRectsByLine(baseHighlightRectsInContentCoordinates(in: displaySpanRange))
             for rect in rects.prefix(4) {
                 let r = rect.insetBy(dx: 0.5, dy: 0.5)
                 guard r.width > 0, r.height > 0 else { continue }
@@ -2198,11 +2523,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         for idx in 0..<maxSpans {
             let span = semanticSpans[idx]
             guard span.range.location != NSNotFound, span.range.length > 0 else { continue }
-            guard isHardBoundaryOnly(range: span.range) == false else { continue }
+            let displaySpanRange = displayRange(fromSourceRange: span.range)
+            guard isHardBoundaryOnly(range: displaySpanRange) == false else { continue }
             guard let color = sanitizedStrokeColor(from: resolvedColorForSemanticSpan(span)) else { continue }
             let key = DebugColorKey(color: color)
             let path = pathsByKey[key] ?? CGMutablePath()
-            let rects = unionRectsByLine(baseHighlightRectsInContentCoordinates(in: span.range))
+            let rects = unionRectsByLine(baseHighlightRectsInContentCoordinates(in: displaySpanRange))
             for rect in rects.prefix(4) {
                 let r = rect.insetBy(dx: 0.5, dy: 0.5)
                 guard r.width > 0, r.height > 0 else { continue }
@@ -3244,7 +3570,32 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 rubyFontSize = CGFloat(max(1.0, baseFontSize * 0.6))
             }
 
-            let color = (text.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? UIColor) ?? UIColor.label
+            // Ruby runs can begin with an invisible width spacer (U+FFFC) when we pad headword widths.
+            // If so, the spacer's clear foregroundColor would incorrectly make ruby invisible.
+            // Choose the first non-spacer glyph's color within the run.
+            let backing = text.string as NSString
+            let upper = min(text.length, NSMaxRange(range))
+            var chosenColor: UIColor? = nil
+            if range.location < upper {
+                var idx = range.location
+                while idx < upper {
+                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
+                    guard r.location != NSNotFound, r.length > 0 else { break }
+                    guard NSMaxRange(r) <= upper else { break }
+                    let s = backing.substring(with: r)
+                    if s == "\u{FFFC}" {
+                        idx = NSMaxRange(r)
+                        continue
+                    }
+                    if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        idx = NSMaxRange(r)
+                        continue
+                    }
+                    chosenColor = text.attribute(.foregroundColor, at: r.location, effectiveRange: nil) as? UIColor
+                    break
+                }
+            }
+            let color = chosenColor ?? (text.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? UIColor) ?? UIColor.label
             runs.append(RubyRun(range: range, reading: reading, fontSize: rubyFontSize, color: color))
         }
 
@@ -3417,8 +3768,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     }
 
     private func logOnScreenWidthsIfPossible(for selection: RubySpanSelection) {
-        let range = selection.highlightRange
-        guard range.location != NSNotFound, range.length > 0 else { return }
+        let tokenRange = displayRange(fromSourceRange: selection.highlightRange)
+        guard tokenRange.location != NSNotFound, tokenRange.length > 0 else { return }
+
+        let range: NSRange = {
+            if padHeadwordSpacing, let run = cachedRubyRuns.first(where: { NSIntersectionRange($0.range, tokenRange).length > 0 }) {
+                return run.range
+            }
+            return tokenRange
+        }()
 
         // Base: prefer TextKit 2 segment rects so this works even when the UITextView is not selectable.
         // These rects are view-coordinate and reflect the actual laid-out advances.
@@ -3431,6 +3789,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }()
         let baseUnions = unionRectsByLine(baseRectsInView)
         let baseWidth = (baseUnions.map { $0.width }.max() ?? 0)
+        let baseWidestLine = baseUnions.max(by: { $0.width < $1.width })
+        let baseXInView = baseWidestLine?.minX ?? 0
 
         // Ruby: use actual overlay layer frames (content-space) converted to view-space.
         let rubyRectsInContent = rubyHighlightRectsInContentCoordinates(in: range)
@@ -3438,11 +3798,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         let rubyRectsInView = rubyRectsInContent.map { $0.offsetBy(dx: -offset.x, dy: -offset.y) }
         let rubyUnions = unionRectsByLine(rubyRectsInView)
         let rubyWidth = rubyUnions.map { $0.width }.max()
+        let rubyWidestLine = rubyUnions.max(by: { $0.width < $1.width })
+        let rubyXInView = rubyWidestLine?.minX ?? 0
 
         if let rubyWidth {
-            CustomLogger.shared.debug(String(format: "WIDTH headword=%.2f furigana=%.2f", baseWidth, rubyWidth))
+            CustomLogger.shared.debug(String(format: "METRICS offX=%.2f headword(x=%.2f w=%.2f) furigana(x=%.2f w=%.2f)", offset.x, baseXInView, baseWidth, rubyXInView, rubyWidth))
         } else {
-            CustomLogger.shared.debug(String(format: "WIDTH headword=%.2f furigana=<none>", baseWidth))
+            CustomLogger.shared.debug(String(format: "METRICS offX=%.2f headword(x=%.2f w=%.2f) furigana=<none>", offset.x, baseXInView, baseWidth))
         }
     }
 
@@ -3497,6 +3859,66 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 let visibleMinX: CGFloat = margin
                 let visibleMaxX: CGFloat = bounds.width - margin
 
+                if leftmost.minX < visibleMinX {
+                    target.x += (leftmost.minX - visibleMinX)
+                } else if rightmost.maxX > visibleMaxX {
+                    target.x += (rightmost.maxX - visibleMaxX)
+                }
+
+                let minX = -inset.left
+                let maxX = max(minX, contentSize.width - bounds.width + inset.right)
+                target.x = min(max(target.x, minX), maxX)
+            }
+        }
+
+        if (target.x - contentOffset.x).magnitude > 0.5 || (target.y - contentOffset.y).magnitude > 0.5 {
+            setContentOffset(target, animated: false)
+        }
+    }
+
+    func ensureHighlightedRangeVisible(_ characterRange: NSRange, bottomOverlayHeight: CGFloat) {
+        guard isScrollEnabled else { return }
+        guard characterRange.location != NSNotFound, characterRange.length > 0 else { return }
+        guard isTracking == false, isDragging == false, isDecelerating == false else { return }
+
+        layoutIfNeeded()
+
+        var rects: [CGRect] = []
+        if #available(iOS 15.0, *) {
+            rects = textKit2SegmentRectsInViewCoordinates(for: characterRange)
+        }
+        if rects.isEmpty {
+            rects = baseHighlightRects(in: characterRange)
+        }
+        guard let lowest = rects.max(by: { $0.maxY < $1.maxY }) else { return }
+        guard let highest = rects.min(by: { $0.minY < $1.minY }) else { return }
+
+        let overlay = max(0, bottomOverlayHeight)
+        let inset = adjustedContentInset
+        let margin: CGFloat = 12
+        let visibleMinY: CGFloat = margin
+        let visibleMaxY: CGFloat = (bounds.height - overlay) - margin
+
+        var target = contentOffset
+
+        // Scroll vertically if the range is above or below the visible window.
+        if highest.minY < visibleMinY {
+            target.y += (highest.minY - visibleMinY)
+        } else if lowest.maxY > visibleMaxY {
+            target.y += (lowest.maxY - visibleMaxY)
+        }
+
+        let minY = -inset.top
+        let maxY = max(minY, contentSize.height - bounds.height + inset.bottom)
+        target.y = min(max(target.y, minY), maxY)
+
+        // Horizontal handling for no-wrap.
+        if contentSize.width > (bounds.width + 2) {
+            let leftmost = rects.min(by: { $0.minX < $1.minX })
+            let rightmost = rects.max(by: { $0.maxX < $1.maxX })
+            if let leftmost, let rightmost {
+                let visibleMinX: CGFloat = margin
+                let visibleMaxX: CGFloat = bounds.width - margin
                 if leftmost.minX < visibleMinX {
                     target.x += (leftmost.minX - visibleMinX)
                 } else if rightmost.maxX > visibleMaxX {
@@ -3720,7 +4142,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 dragSelectionActive = false
             }
             guard let selected = selectionHighlightRange, selected.length > 0 else { return }
-            dragSelectionEndedHandler?(selected)
+            dragSelectionEndedHandler?(sourceRange(fromDisplayRange: selected))
 
         default:
             break
@@ -3744,7 +4166,18 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             CustomLogger.shared.debug("Inspect tap at x=\(tapPoint.x) y=\(tapPoint.y)")
         }
 
-        guard let rawIndex = utf16IndexForTap(at: tapPoint) else {
+        // IMPORTANT:
+        // In character-tap mode (incremental lookup), do not infer a character index from
+        // whitespace via "closest position" heuristics. Require a direct glyph hit (or
+        // ruby overlay hit) so taps on empty areas always clear.
+        let rawIndex: Int?
+        if characterTapHandler != nil {
+            rawIndex = utf16IndexForCharacterTap(at: tapPoint)
+        } else {
+            rawIndex = utf16IndexForTap(at: tapPoint)
+        }
+
+        guard let rawIndex else {
             clearInspectionHighlight()
             if Self.verboseRubyLoggingEnabled {
                 CustomLogger.shared.debug("Inspect tap ignored: no glyph resolved")
@@ -3760,20 +4193,36 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             return
         }
 
+        let sourceResolvedIndex = sourceIndex(fromDisplayIndex: resolvedIndex)
+
         // Always try to log on-screen widths for the tapped token, even when the caller
         // uses character-tap mode (PasteView) and we don't apply token highlights.
-        if let selection = spanSelectionContext(forUTF16Index: resolvedIndex) {
+        if let selection = spanSelectionContext(forUTF16Index: sourceResolvedIndex) {
             logOnScreenWidthsIfPossible(for: selection)
         }
 
         if let characterTapHandler {
             // In character-tap mode, do not apply token highlights; just report the UTF-16 index.
+            // IMPORTANT: do not treat whitespace/line-band taps as selection.
+            // Only accept the tap if it actually hit the rendered glyphs for the resolved character
+            // (or its ruby overlay glyphs when furigana is visible).
+            let hitRange = composedCharacterRangeInDisplayString(atUTF16Index: resolvedIndex)
+            guard hitRange.location != NSNotFound,
+                  hitRange.length > 0,
+                  pointHitsDisplayRange(hitRange, at: tapPoint) else {
+                clearInspectionHighlight()
+                if Self.verboseRubyLoggingEnabled {
+                    CustomLogger.shared.debug("Inspect character tap ignored: tap did not hit glyphs")
+                }
+                return
+            }
+
             clearInspectionHighlight()
-            characterTapHandler(resolvedIndex)
+            characterTapHandler(sourceResolvedIndex)
             return
         }
 
-        guard let selection = spanSelectionContext(forUTF16Index: resolvedIndex) else {
+        guard let selection = spanSelectionContext(forUTF16Index: sourceResolvedIndex) else {
             clearInspectionHighlight()
             if Self.verboseRubyLoggingEnabled {
                 CustomLogger.shared.debug("Inspect tap unresolved: no annotated span contains index=\(resolvedIndex)")
@@ -3792,7 +4241,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             return
         }
 
-        applyInspectionHighlight(range: selection.highlightRange)
+        applyInspectionHighlight(range: displayRange(fromSourceRange: selection.highlightRange))
         notifySpanSelection(selection)
 
         if let details = inspectionDetails(forUTF16Index: resolvedIndex) {
@@ -3811,11 +4260,57 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             }
         }
 
-        logSpanResolution(for: resolvedIndex)
+        logSpanResolution(for: sourceResolvedIndex)
+    }
+
+    private func composedCharacterRangeInDisplayString(atUTF16Index index: Int) -> NSRange {
+        guard let text = attributedText?.string, text.isEmpty == false else { return NSRange(location: NSNotFound, length: 0) }
+        let ns = text as NSString
+        guard index >= 0, index < ns.length else { return NSRange(location: NSNotFound, length: 0) }
+        return ns.rangeOfComposedCharacterSequence(at: index)
+    }
+
+    private func pointHitsDisplayRange(_ range: NSRange, at point: CGPoint) -> Bool {
+        guard range.location != NSNotFound, range.length > 0 else { return false }
+
+        // A) Base glyph hit-test (view coordinates).
+        if let uiRange = textRange(for: range) {
+            let rects = selectionRects(for: uiRange)
+                .map { $0.rect }
+                .filter { $0.isNull == false && $0.isEmpty == false }
+            if rects.contains(where: { $0.insetBy(dx: -2, dy: -2).contains(point) }) {
+                return true
+            }
+        }
+
+        // B) Ruby glyph hit-test (furigana overlay layers are content-space).
+        guard rubyAnnotationVisibility == .visible,
+              let layers = rubyOverlayContainerLayer.sublayers,
+              layers.isEmpty == false else {
+            return false
+        }
+
+        let offset = contentOffset
+        for layer in layers {
+            guard let textLayer = layer as? CATextLayer else { continue }
+            guard let loc = textLayer.value(forKey: "rubyRangeLocation") as? Int,
+                  let len = textLayer.value(forKey: "rubyRangeLength") as? Int else {
+                continue
+            }
+            let runRange = NSRange(location: loc, length: len)
+            if NSIntersectionRange(runRange, range).length <= 0 { continue }
+
+            let rInView = textLayer.frame.offsetBy(dx: -offset.x, dy: -offset.y)
+            if rInView.insetBy(dx: -2, dy: -2).contains(point) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private func pointHitsSemanticSpan(_ selection: RubySpanSelection, at point: CGPoint) -> Bool {
-        let range = selection.highlightRange
+        let range = displayRange(fromSourceRange: selection.highlightRange)
         guard range.location != NSNotFound, range.length > 0 else { return false }
 
         // A) Base glyph hit-test (view coordinates).
@@ -3886,7 +4381,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         guard let rawIndex = utf16IndexForTap(at: location),
               let resolvedIndex = resolvedTextIndex(from: rawIndex),
               NSLocationInRange(resolvedIndex, highlightRange) else { return nil }
-        guard spanSelectionContext(forUTF16Index: resolvedIndex) != nil else { return nil }
+          let sourceResolvedIndex = sourceIndex(fromDisplayIndex: resolvedIndex)
+          guard spanSelectionContext(forUTF16Index: sourceResolvedIndex) != nil else { return nil }
 
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             guard let self else { return nil }
@@ -3941,6 +4437,47 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         guard offset >= 0, offset < attributedLength else { return nil }
 
         return offset
+    }
+
+    private func utf16IndexForCharacterTap(at point: CGPoint) -> Int? {
+        guard let attributedLength = attributedText?.length, attributedLength > 0 else { return nil }
+
+        // A) Strict base-glyph hit.
+        if let directRange = characterRange(at: point) {
+            let offset = offset(from: beginningOfDocument, to: directRange.start)
+            guard offset >= 0, offset < attributedLength else { return nil }
+            return offset
+        }
+
+        // B) Ruby overlay hit (tap above headword).
+        guard rubyAnnotationVisibility == .visible,
+              let layers = rubyOverlayContainerLayer.sublayers,
+              layers.isEmpty == false else {
+            return nil
+        }
+
+        // Overlay frames are in content coordinates; convert view point to content.
+        let offset = contentOffset
+        let pointInContent = CGPoint(x: point.x + offset.x, y: point.y + offset.y)
+
+        for layer in layers {
+            guard let textLayer = layer as? CATextLayer else { continue }
+            guard let loc = textLayer.value(forKey: "rubyRangeLocation") as? Int,
+                  let len = textLayer.value(forKey: "rubyRangeLength") as? Int else {
+                continue
+            }
+
+            if textLayer.frame.insetBy(dx: -2, dy: -2).contains(pointInContent) {
+                let clamped = max(0, min(loc, attributedLength - 1))
+                // Prefer something within the annotated run when possible.
+                if len > 1 {
+                    return max(0, min(loc + (len / 2), attributedLength - 1))
+                }
+                return clamped
+            }
+        }
+
+        return nil
     }
 
     private func textRangeNearPoint(_ point: CGPoint) -> UITextRange? {
@@ -4012,7 +4549,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     }
 
     private func isInspectableCharacter(_ character: Character) -> Bool {
-        character.isNewline == false && character.isWhitespace == false
+        if character.isNewline { return false }
+        if character.isWhitespace { return false }
+        if character == "\u{FFFC}" { return false }
+        return true
     }
 
     private func pointHitsRenderedText(_ point: CGPoint, attributedLength: Int) -> Bool {
@@ -4107,6 +4647,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
 @available(iOS 15.0, *)
 extension TokenOverlayTextView: NSTextLayoutManagerDelegate {
+    func textLayoutManager(
+        _ textLayoutManager: NSTextLayoutManager,
+        textLayoutFragmentFor location: any NSTextLocation,
+        in textElement: NSTextElement
+    ) -> NSTextLayoutFragment {
+        let fragment = RubyHeadroomLayoutFragment(textElement: textElement, range: nil)
+        fragment.rubyHeadroom = max(0, rubyReservedTopMargin)
+        return fragment
+    }
+
     func textLayoutManager(_ textLayoutManager: NSTextLayoutManager, shouldBreakLineByWordBefore location: NSTextLocation) -> Bool {
         guard wrapLines else { return true }
 

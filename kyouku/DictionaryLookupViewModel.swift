@@ -17,22 +17,127 @@ final class DictionaryLookupViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
 
-    func load(term: String, fallbackTerms: [String] = [], mode: DictionarySearchMode = .japanese) async {
-        let primary = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        query = primary
+    /// The term (surface or lemma) that actually produced the current `results`, if any.
+    ///
+    /// This is intended for purely additive, read-only features (e.g. semantic neighbors)
+    /// and must not affect lookup/boundary behavior.
+    @Published var resolvedEmbeddingTerm: String? = nil
 
-        let normalizedFallbacks = fallbackTerms
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { $0.isEmpty == false }
+    private let deinflectionCache = DeinflectionCache()
 
-        var candidates: [String] = []
-        for candidate in [primary] + normalizedFallbacks {
-            guard candidate.isEmpty == false else { continue }
-            if candidates.contains(candidate) == false {
-                candidates.append(candidate)
+    private static let lookupTraceEnabled: Bool = {
+        ProcessInfo.processInfo.environment["DICT_LOOKUP_TRACE"] == "1"
+    }()
+
+    private struct LookupHit {
+        let displayKey: String
+        let lookupKey: String
+        let rows: [DictionaryEntry]
+        let priority: [Int64: Int]
+        let deinflectionTrace: String?
+    }
+
+    private func lookupSurfaceThenDeinflect(displayKey: String, lookupKey: String, mode: DictionarySearchMode) async throws -> LookupHit? {
+        // 1) Exact surface lookup
+        let surfacePayload: (rows: [DictionaryEntry], priority: [Int64: Int]) = try await Task.detached(priority: .userInitiated) {
+            let rows = try await DictionarySQLiteStore.shared.lookup(term: lookupKey, limit: 50, mode: mode)
+            let ids = Array(Set(rows.map { $0.entryID }))
+            let priority = (try? await DictionarySQLiteStore.shared.fetchEntryPriorityScores(for: ids)) ?? [:]
+            return (rows, priority)
+        }.value
+
+        if surfacePayload.rows.isEmpty == false {
+            return LookupHit(displayKey: displayKey, lookupKey: lookupKey, rows: surfacePayload.rows, priority: surfacePayload.priority, deinflectionTrace: nil)
+        }
+
+        // 2) Deinflection lookup
+        guard mode == .japanese else { return nil }
+        let deinflected = await deinflectionCache.candidates(for: displayKey)
+        for d in deinflected {
+            if d.trace.isEmpty { continue }
+            let keys = DictionaryKeyPolicy.keys(forDisplayKey: d.baseForm)
+            guard keys.lookupKey.isEmpty == false else { continue }
+
+            let lemmaPayload: (rows: [DictionaryEntry], priority: [Int64: Int]) = try await Task.detached(priority: .userInitiated) {
+                let rows = try await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 50, mode: mode)
+                let ids = Array(Set(rows.map { $0.entryID }))
+                let priority = (try? await DictionarySQLiteStore.shared.fetchEntryPriorityScores(for: ids)) ?? [:]
+                return (rows, priority)
+            }.value
+
+            if lemmaPayload.rows.isEmpty == false {
+                let trace = d.trace.map { "\($0.reason):\($0.rule.kanaIn)->\($0.rule.kanaOut)" }.joined(separator: ",")
+                return LookupHit(displayKey: keys.displayKey, lookupKey: keys.lookupKey, rows: lemmaPayload.rows, priority: lemmaPayload.priority, deinflectionTrace: trace)
             }
         }
 
+        return nil
+    }
+
+    func lookup(term: String, mode: DictionarySearchMode = .japanese) async {
+        let primaryKeys = DictionaryKeyPolicy.keys(forDisplayKey: term)
+        query = primaryKeys.displayKey
+
+        resolvedEmbeddingTerm = nil
+
+        guard primaryKeys.lookupKey.isEmpty == false else {
+            results = []
+            errorMessage = nil
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            if let hit = try await lookupSurfaceThenDeinflect(displayKey: primaryKeys.displayKey, lookupKey: primaryKeys.lookupKey, mode: mode) {
+                let rankedRows = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
+                results = rankedRows
+                isLoading = false
+                errorMessage = nil
+                resolvedEmbeddingTerm = hit.displayKey
+
+                if Self.lookupTraceEnabled {
+                    if let trace = hit.deinflectionTrace {
+                        CustomLogger.shared.info("DictionaryLookup resolved via deinflection display='\(primaryKeys.displayKey)' -> lemma='\(hit.displayKey)' trace=[\(trace)] rows=\(hit.rows.count)")
+                    } else {
+                        CustomLogger.shared.info("DictionaryLookup resolved display='\(hit.displayKey)' lookup='\(hit.lookupKey)' rows=\(hit.rows.count)")
+                    }
+                }
+                return
+            }
+        } catch {
+            results = []
+            errorMessage = String(describing: error)
+            isLoading = false
+            return
+        }
+
+        results = []
+        isLoading = false
+        resolvedEmbeddingTerm = nil
+    }
+
+    // Backwards-compatible wrapper.
+    func load(term: String, fallbackTerms: [String] = [], mode: DictionarySearchMode = .japanese) async {
+        // NOTE: legacy `fallbackTerms` are intentionally ignored for UI determinism.
+        await lookup(term: term, mode: mode)
+    }
+
+    /// Selection-driven lookup: enumerate token-aligned spans containing the selection and stop on first hit.
+    func lookup(
+        selectedRange: NSRange,
+        inText text: String,
+        tokenSpans: [TextSpan],
+        mode: DictionarySearchMode = .japanese
+    ) async {
+        let nsText = text as NSString
+        let displaySelection = nsText.substring(with: selectedRange)
+        query = displaySelection
+
+        resolvedEmbeddingTerm = nil
+
+        let candidates = SelectionSpanResolver.candidates(selectedRange: selectedRange, tokenSpans: tokenSpans, text: nsText)
         guard candidates.isEmpty == false else {
             results = []
             errorMessage = nil
@@ -42,21 +147,82 @@ final class DictionaryLookupViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        for candidate in candidates {
-            do {
-                // Keep SQLite work off the MainActor so highlight/ruby overlays can render immediately.
-                let payload: (rows: [DictionaryEntry], priority: [Int64: Int]) = try await Task.detached(priority: .userInitiated) {
-                    let rows = try await DictionarySQLiteStore.shared.lookup(term: candidate, limit: 50, mode: mode)
-                    let ids = Array(Set(rows.map { $0.entryID }))
-                    let priority = (try? await DictionarySQLiteStore.shared.fetchEntryPriorityScores(for: ids)) ?? [:]
-                    return (rows, priority)
-                }.value
+        var triedLookupKeys: Set<String> = []
+        triedLookupKeys.reserveCapacity(candidates.count * 2)
 
-                if payload.rows.isEmpty == false {
-                    let rankedRows = rankResults(payload.rows, for: candidate, mode: mode, entryPriority: payload.priority)
+        func isReduplicationCandidate(_ candidate: SelectionSpanCandidate) -> (single: DictionaryKeyPolicy.Keys, leftSurface: String, rightSurface: String)? {
+            // Candidate must cover exactly two consecutive token spans.
+            guard let startIdx = tokenSpans.firstIndex(where: { $0.range.location == candidate.range.location }) else { return nil }
+            guard (startIdx + 1) < tokenSpans.count else { return nil }
+            let a = tokenSpans[startIdx]
+            let b = tokenSpans[startIdx + 1]
+            guard NSMaxRange(a.range) == b.range.location else { return nil }
+            guard NSMaxRange(b.range) == NSMaxRange(candidate.range) else { return nil }
+
+            let aKey = DictionaryKeyPolicy.lookupKey(for: a.surface)
+            let bKey = DictionaryKeyPolicy.lookupKey(for: b.surface)
+            guard aKey.isEmpty == false, aKey == bKey else { return nil }
+
+            return (DictionaryKeyPolicy.keys(forDisplayKey: a.surface), a.surface, b.surface)
+        }
+
+        for cand in candidates {
+            do {
+                // Reduplication is structural: if X X and X is a dictionary entry while X X is not,
+                // prefer looking up X and do not treat X X as a lexical unit.
+                if mode == .japanese, let redup = isReduplicationCandidate(cand) {
+                    let singleLookupKey = redup.single.lookupKey
+                    // Only apply if single exists and combined does not.
+                    let singleRows: [DictionaryEntry] = (try? await Task.detached(priority: .userInitiated) {
+                        try await DictionarySQLiteStore.shared.lookup(term: singleLookupKey, limit: 1, mode: mode)
+                    }.value) ?? []
+
+                    if singleRows.isEmpty == false {
+                        let combinedRows: [DictionaryEntry] = (try? await Task.detached(priority: .userInitiated) {
+                            try await DictionarySQLiteStore.shared.lookup(term: cand.lookupKey, limit: 1, mode: mode)
+                        }.value) ?? []
+
+                        if combinedRows.isEmpty {
+                            if ProcessInfo.processInfo.environment["REDUP_TRACE"] == "1" {
+                                CustomLogger.shared.info("Selection lookup reduplication: skipping combined «\(cand.displayKey)» and looking up «\(redup.single.displayKey)»")
+                            }
+
+                            let payload: (rows: [DictionaryEntry], priority: [Int64: Int]) = try await Task.detached(priority: .userInitiated) {
+                                let rows = try await DictionarySQLiteStore.shared.lookup(term: singleLookupKey, limit: 50, mode: mode)
+                                let ids = Array(Set(rows.map { $0.entryID }))
+                                let priority = (try? await DictionarySQLiteStore.shared.fetchEntryPriorityScores(for: ids)) ?? [:]
+                                return (rows, priority)
+                            }.value
+
+                            if payload.rows.isEmpty == false {
+                                let rankedRows = rankResults(payload.rows, for: redup.single.displayKey, mode: mode, entryPriority: payload.priority)
+                                results = rankedRows
+                                isLoading = false
+                                errorMessage = nil
+                                return
+                            }
+                        }
+                    }
+                }
+
+                if triedLookupKeys.contains(cand.lookupKey) {
+                    continue
+                }
+                triedLookupKeys.insert(cand.lookupKey)
+
+                if let hit = try await lookupSurfaceThenDeinflect(displayKey: cand.displayKey, lookupKey: cand.lookupKey, mode: mode) {
+                    let rankedRows = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
                     results = rankedRows
                     isLoading = false
                     errorMessage = nil
+                    resolvedEmbeddingTerm = hit.displayKey
+                    if Self.lookupTraceEnabled {
+                        if let trace = hit.deinflectionTrace {
+                            CustomLogger.shared.info("Selection lookup resolved via deinflection range=(\(cand.range.location),\(cand.range.length)) display='\(cand.displayKey)' -> lemma='\(hit.displayKey)' trace=[\(trace)] rows=\(hit.rows.count)")
+                        } else {
+                            CustomLogger.shared.info("Selection lookup resolved range=(\(cand.range.location),\(cand.range.length)) display='\(hit.displayKey)' lookup='\(hit.lookupKey)' rows=\(hit.rows.count)")
+                        }
+                    }
                     return
                 }
             } catch {
@@ -69,6 +235,22 @@ final class DictionaryLookupViewModel: ObservableObject {
 
         results = []
         isLoading = false
+        resolvedEmbeddingTerm = nil
+        if Self.lookupTraceEnabled {
+            CustomLogger.shared.info("Selection lookup: no hits for range=(\(selectedRange.location),\(selectedRange.length))")
+        }
+    }
+
+    // Backwards-compatible wrapper.
+    func load(
+        selectedRange: NSRange,
+        inText text: String,
+        tokenSpans: [TextSpan],
+        fallbackTerms: [String] = [],
+        mode: DictionarySearchMode = .japanese
+    ) async {
+        // NOTE: legacy `fallbackTerms` are intentionally ignored for UI determinism.
+        await lookup(selectedRange: selectedRange, inText: text, tokenSpans: tokenSpans, mode: mode)
     }
 }
 

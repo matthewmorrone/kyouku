@@ -6,6 +6,7 @@ struct FuriganaRenderingHost: View {
     @State private var scrollSyncGroupID: String = UUID().uuidString
 
     @Binding var text: String
+    @Binding var editorSelectedRange: NSRange?
     var furiganaText: NSAttributedString?
     var furiganaSpans: [AnnotatedSpan]?
     var semanticSpans: [SemanticSpan]
@@ -21,6 +22,7 @@ struct FuriganaRenderingHost: View {
     var tokenPalette: [UIColor]
     var unknownTokenColor: UIColor
     var selectedRangeHighlight: NSRange?
+    var scrollToSelectedRangeToken: Int = 0
     var customizedRanges: [NSRange]
     var extraTokenOverlays: [RubyText.TokenOverlay] = []
     var enableTapInspection: Bool = true
@@ -85,6 +87,7 @@ struct FuriganaRenderingHost: View {
         return VStack(spacing: 0) {
             EditingTextView(
                 text: $text,
+                selectedRange: $editorSelectedRange,
                 isEditable: isEditing,
                 fontSize: CGFloat(textSize),
                 lineSpacing: CGFloat(lineSpacing),
@@ -159,7 +162,28 @@ struct FuriganaRenderingHost: View {
             right: 12 + insetOverhang
         )
 
-        return RubyText(
+        // NOTE: TextKit cannot perfectly widen single-glyph headwords (e.g. lone kanji)
+        // to match ruby width without side-effects. The experimental CoreText renderer
+        // supports the exact width-matching behavior but intentionally bypasses TextKit
+        // selection + hit-testing.
+        let useCoreTextRenderer: Bool = {
+            ProcessInfo.processInfo.environment["RUBY_CORETEXT"] == "1"
+        }()
+
+        if useCoreTextRenderer {
+            return AnyView(
+                CoreTextRubyText(
+                    attributed: attributed,
+                    fontSize: CGFloat(textSize),
+                    extraGap: CGFloat(max(0, lineSpacing)),
+                    textInsets: insets
+                )
+                .id(rubyViewIdentity())
+                .frame(minHeight: 40, alignment: .topLeading)
+            )
+        }
+
+        return AnyView(RubyText(
             attributed: attributed,
             fontSize: CGFloat(textSize),
             lineHeightMultiple: 1.0,
@@ -179,6 +203,7 @@ struct FuriganaRenderingHost: View {
             tokenColorPalette: tokenPalette,
             semanticSpans: semanticSpans,
             selectedRange: selectedRangeHighlight,
+            scrollToSelectedRangeToken: scrollToSelectedRangeToken,
             customizedRanges: customizedRanges,
             alternateTokenColorsEnabled: alternateTokenColors,
             enableTapInspection: enableTapInspection,
@@ -197,7 +222,7 @@ struct FuriganaRenderingHost: View {
         // IMPORTANT: do not include `annotationVisibility` in the identity, otherwise
         // toggling furigana recreates the view and resets the ScrollView to the top.
         .id(rubyViewIdentity())
-        .frame(minHeight: 40, alignment: .topLeading)
+        .frame(minHeight: 40, alignment: .topLeading))
     }
 
     private func rubyViewIdentity() -> String {
@@ -378,6 +403,7 @@ struct FuriganaRenderingHost: View {
 @MainActor
 private struct EditingTextView: UIViewRepresentable {
     @Binding var text: String
+    @Binding var selectedRange: NSRange?
     let isEditable: Bool
     let fontSize: CGFloat
     let lineSpacing: CGFloat
@@ -583,7 +609,7 @@ private struct EditingTextView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text)
+        Coordinator(text: $text, selectedRange: $selectedRange)
     }
 
     private func applyTypingAttributes(to textView: UITextView) {
@@ -634,6 +660,7 @@ private struct EditingTextView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, UITextViewDelegate {
         @Binding var text: String
+        @Binding var selectedRange: NSRange?
 
         private weak var textView: UITextView?
         private var scrollSyncGroupID: String? = nil
@@ -641,8 +668,19 @@ private struct EditingTextView: UIViewRepresentable {
         private var scrollObserver: NSObjectProtocol? = nil
         private var isApplyingExternalScroll: Bool = false
 
-        init(text: Binding<String>) {
+        init(text: Binding<String>, selectedRange: Binding<NSRange?>) {
             _text = text
+            _selectedRange = selectedRange
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            // Keep a lightweight selection/caret snapshot for higher-level features.
+            let r = textView.selectedRange
+            if r.location == NSNotFound {
+                selectedRange = nil
+            } else {
+                selectedRange = r
+            }
         }
 
         deinit {

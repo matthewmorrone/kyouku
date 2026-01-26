@@ -1,15 +1,41 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum WordsListFilter: Hashable {
+    case all
+    case list(UUID)
+    case note(UUID)
+
+    var isAll: Bool {
+        switch self {
+        case .all: return true
+        case .list, .note: return false
+        }
+    }
+}
+
 struct WordsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notesStore: NotesStore
+    @EnvironmentObject var router: AppRouter
     @StateObject private var lookup = DictionaryLookupViewModel()
     @State private var searchText: String = ""
     @State private var searchMode: DictionarySearchMode = .japanese
     @State private var editModeState: EditMode = .inactive
     @State private var selectedWordIDs: Set<Word.ID> = []
     @State private var showCSVImportSheet = false
+    @State private var selectedFilter: WordsListFilter = .all
+    @State private var showListsSheet: Bool = false
+    @State private var showListsBrowserSheet: Bool = false
+    @State private var showNewWordSheet: Bool = false
+    @AppStorage("wordsShowEntrySourceLabels") private var showEntrySourceLabels: Bool = false
+    @State private var suppressedSearchTaskID: String? = nil
+
+    private struct EditingWord: Identifiable {
+        let id: Word.ID
+    }
+
+    @State private var editingWord: EditingWord? = nil
 
     var body: some View {
         NavigationStack {
@@ -31,6 +57,88 @@ struct WordsView: View {
                     .accessibilityLabel("Import CSV")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        showNewWordSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("New Word")
+                    .disabled(isEditing)
+
+                    Menu {
+                        Toggle(isOn: $showEntrySourceLabels) {
+                            Label("Show Source", systemImage: "tag")
+                        }
+
+                        Button {
+                            selectedFilter = .all
+                        } label: {
+                            HStack {
+                                Text("All Words")
+                                if selectedFilter.isAll {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+
+                        if store.lists.isEmpty == false {
+                            Divider()
+                            ForEach(store.lists) { list in
+                                let count = store.wordCount(inList: list.id)
+                                Button {
+                                    selectedFilter = .list(list.id)
+                                } label: {
+                                    HStack {
+                                        Text(list.name)
+                                        Spacer()
+                                        Text("\(count)")
+                                            .foregroundStyle(.secondary)
+                                        if selectedFilter == .list(list.id) {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let noteLists = noteListItems
+                        if noteLists.isEmpty == false {
+                            Divider()
+                            ForEach(noteLists) { item in
+                                Button {
+                                    selectedFilter = .note(item.id)
+                                } label: {
+                                    HStack {
+                                        Text(item.title)
+                                        Spacer()
+                                        Text("\(item.count)")
+                                            .foregroundStyle(.secondary)
+                                        if selectedFilter == .note(item.id) {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Divider()
+                        Button {
+                            showListsBrowserSheet = true
+                        } label: {
+                            Label("Browse Lists", systemImage: "folder")
+                        }
+
+                        Button {
+                            showListsSheet = true
+                        } label: {
+                            Label("Manage Saved Lists", systemImage: "folder.badge.gear")
+                        }
+                    } label: {
+                        Image(systemName: selectedFilter.isAll ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                    }
+                    .accessibilityLabel("Filter lists")
+
                     if isEditing {
                         if canEditSavedWords {
                             Button {
@@ -66,6 +174,12 @@ struct WordsView: View {
                 selectedWordIDs.removeAll()
             }
         }
+        .onChange(of: selectedFilter) { oldValue, newValue in
+            if oldValue != newValue {
+                selectedWordIDs.removeAll()
+                editModeState = .inactive
+            }
+        }
         .onChange(of: trimmedSearchText) { untrimmed, trimmed in
             if trimmed.isEmpty == false {
                 editModeState = .inactive
@@ -78,6 +192,64 @@ struct WordsView: View {
         .sheet(isPresented: $showCSVImportSheet) {
             NavigationStack {
                 WordsCSVImportView()
+            }
+        }
+        .sheet(isPresented: $showListsSheet) {
+            NavigationStack {
+                WordListsManagerView()
+            }
+        }
+        .sheet(isPresented: $showListsBrowserSheet) {
+            NavigationStack {
+                WordListsBrowserView(selectedFilter: $selectedFilter)
+            }
+        }
+        .sheet(isPresented: $showNewWordSheet) {
+            WordCreateView(initialSurface: hasActiveSearch ? trimmedSearchText : "")
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { editingWord != nil },
+                set: { isPresented in
+                    if isPresented == false {
+                        editingWord = nil
+                    }
+                }
+            )
+        ) {
+            Group {
+                if let item = editingWord {
+                    WordEditView(wordID: item.id)
+                }
+            }
+        }
+        .sheet(
+            item: Binding(
+                get: { router.openWordRequest },
+                set: { newValue in
+                    // Only allow dismissal from the sheet side.
+                    if newValue == nil {
+                        router.openWordRequest = nil
+                    }
+                }
+            )
+        ) { request in
+            NavigationStack {
+                if let word = store.word(id: request.wordID) {
+                    WordDefinitionsView(
+                        surface: word.dictionarySurface ?? displayHeadword(for: word),
+                        kana: word.kana,
+                        contextSentence: nil,
+                        lemmaCandidates: [],
+                        tokenPartOfSpeech: nil,
+                        sourceNoteID: word.sourceNoteID,
+                        tokenParts: []
+                    )
+                } else {
+                    Text("Word not found")
+                        .foregroundStyle(.secondary)
+                        .navigationTitle("Word")
+                }
             }
         }
     }
@@ -173,7 +345,11 @@ struct WordsView: View {
                     WordDefinitionsView(
                         surface: row.surface,
                         kana: row.kana,
-                        sourceNoteID: nil
+                        contextSentence: nil,
+                        lemmaCandidates: [],
+                        tokenPartOfSpeech: nil,
+                        sourceNoteID: nil,
+                        tokenParts: []
                     )
                 } label: {
                     dictionaryRow(row)
@@ -197,7 +373,11 @@ struct WordsView: View {
                         WordDefinitionsView(
                             surface: word.dictionarySurface ?? displayHeadword(for: word),
                             kana: word.kana,
-                            sourceNoteID: word.sourceNoteID
+                            contextSentence: nil,
+                            lemmaCandidates: [],
+                            tokenPartOfSpeech: nil,
+                            sourceNoteID: word.sourceNoteID,
+                            tokenParts: []
                         )
                     } label: {
                         savedRow(word)
@@ -228,7 +408,13 @@ struct WordsView: View {
                 }
             }
             Spacer(minLength: 0)
-            if word.sourceNoteID != nil {
+            if showEntrySourceLabels, let sourceLabel = entrySourceLabel(for: word) {
+                Text(sourceLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityLabel("Source: \(sourceLabel)")
+            } else if word.sourceNoteID != nil {
                 Image(systemName: "note.text")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -242,6 +428,14 @@ struct WordsView: View {
             } label: {
                 Label("Delete", systemImage: "trash")
             }
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            Button {
+                editingWord = EditingWord(id: word.id)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            .tint(Color(uiColor: .systemBlue))
         }
     }
 
@@ -285,10 +479,244 @@ struct WordsView: View {
     }
 
     private var sortedWords: [Word] {
-        store.words.sorted { $0.createdAt > $1.createdAt }
+        let base = store.words
+        let filtered: [Word]
+        switch selectedFilter {
+        case .all:
+            filtered = base
+        case .list(let listID):
+            filtered = base.filter { $0.listIDs.contains(listID) }
+        case .note(let noteID):
+            filtered = base.filter { $0.sourceNoteID == noteID }
+        }
+        return filtered.sorted { $0.createdAt > $1.createdAt }
     }
 
+    private func entrySourceLabel(for word: Word) -> String? {
+        var components: [String] = []
+
+        if let noteID = word.sourceNoteID {
+            let title = title(forNoteID: noteID)
+            components.append(title)
+        }
+
+        let listIDs = word.listIDs
+        if listIDs.isEmpty == false {
+            let names = listIDs
+                .compactMap { name(forListID: $0) }
+                .filter { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
+
+            if let first = names.first {
+                if names.count == 1 {
+                    components.append(first)
+                } else {
+                    components.append("\(first) +\(names.count - 1)")
+                }
+            } else {
+                components.append("List")
+            }
+        }
+
+        let combined = components.joined(separator: " · ")
+        return combined.isEmpty ? nil : combined
+    }
+
+    private func name(forListID id: UUID) -> String? {
+        store.lists.first(where: { $0.id == id })?.name
+    }
+
+    private func title(forNoteID id: UUID) -> String {
+        if let note = notesStore.notes.first(where: { $0.id == id }) {
+            let trimmed = (note.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Untitled Note" : trimmed
+        }
+        return "Deleted Note"
+    }
+
+    private struct NoteListItem: Identifiable, Hashable {
+        let id: UUID
+        let title: String
+        let count: Int
+    }
+
+    private var noteListItems: [NoteListItem] {
+        var counts: [UUID: Int] = [:]
+        for word in store.words {
+            guard let noteID = word.sourceNoteID else { continue }
+            counts[noteID, default: 0] += 1
+        }
+        guard counts.isEmpty == false else { return [] }
+
+        func title(for noteID: UUID) -> String {
+            guard let note = notesStore.notes.first(where: { $0.id == noteID }) else {
+                return "Deleted Note"
+            }
+            if let title = note.title?.trimmingCharacters(in: .whitespacesAndNewlines), title.isEmpty == false {
+                return title
+            }
+            let firstLine = note.text
+                .split(whereSeparator: { $0.isNewline })
+                .map(String.init)
+                .first(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
+                ?? "Untitled Note"
+            let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.count <= 42 { return trimmed }
+            let prefix = trimmed.prefix(42)
+            return "\(prefix)…"
+        }
+
+        return counts
+            .map { (noteID, count) in NoteListItem(id: noteID, title: title(for: noteID), count: count) }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count > rhs.count }
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+    }
+
+
+private struct WordListsBrowserView: View {
+    @EnvironmentObject private var store: WordsStore
+    @EnvironmentObject private var notesStore: NotesStore
+    @Environment(\.dismiss) private var dismiss
+
+    @Binding var selectedFilter: WordsListFilter
+
+    private struct NoteListItem: Identifiable, Hashable {
+        let id: UUID
+        let title: String
+        let count: Int
+    }
+
+    private var noteListItems: [NoteListItem] {
+        var counts: [UUID: Int] = [:]
+        for word in store.words {
+            guard let noteID = word.sourceNoteID else { continue }
+            counts[noteID, default: 0] += 1
+        }
+        guard counts.isEmpty == false else { return [] }
+
+        func title(for noteID: UUID) -> String {
+            guard let note = notesStore.notes.first(where: { $0.id == noteID }) else {
+                return "Deleted Note"
+            }
+            if let title = note.title?.trimmingCharacters(in: .whitespacesAndNewlines), title.isEmpty == false {
+                return title
+            }
+            let firstLine = note.text
+                .split(whereSeparator: { $0.isNewline })
+                .map(String.init)
+                .first(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
+                ?? "Untitled Note"
+            let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.count <= 42 { return trimmed }
+            let prefix = trimmed.prefix(42)
+            return "\(prefix)…"
+        }
+
+        return counts
+            .map { (noteID, count) in NoteListItem(id: noteID, title: title(for: noteID), count: count) }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count > rhs.count }
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Button {
+                    selectedFilter = .all
+                    dismiss()
+                } label: {
+                    HStack {
+                        Text("All Words")
+                        Spacer()
+                        Text("\(store.words.count)")
+                            .foregroundStyle(.secondary)
+                        if selectedFilter.isAll {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+
+            if store.lists.isEmpty == false {
+                Section("Saved Lists") {
+                    ForEach(store.lists) { list in
+                        let count = store.wordCount(inList: list.id)
+                        Button {
+                            selectedFilter = .list(list.id)
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Text(list.name)
+                                Spacer()
+                                Text("\(count)")
+                                    .foregroundStyle(.secondary)
+                                if selectedFilter == .list(list.id) {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let noteLists = noteListItems
+            if noteLists.isEmpty == false {
+                Section("Notes") {
+                    ForEach(noteLists) { item in
+                        Button {
+                            selectedFilter = .note(item.id)
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Text(item.title)
+                                Spacer()
+                                Text("\(item.count)")
+                                    .foregroundStyle(.secondary)
+                                if selectedFilter == .note(item.id) {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                NavigationLink {
+                    WordListsManagerView()
+                } label: {
+                    Label("Manage Saved Lists", systemImage: "folder.badge.gear")
+                }
+            }
+        }
+        .navigationTitle("Lists")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") {
+                    dismiss()
+                }
+            }
+        }
+    }
+}
     private func performLookup() async {
+        // If we programmatically change `searchMode` after a successful fallback
+        // lookup, SwiftUI will re-run the `.task(id:)`. Suppress that second run
+        // to avoid hitting SQLite twice for the same term.
+        if let suppressed = suppressedSearchTaskID {
+            if suppressed == searchTaskID {
+                suppressedSearchTaskID = nil
+                return
+            } else {
+                // Stale suppression key; clear it so it can't affect future searches.
+                suppressedSearchTaskID = nil
+            }
+        }
+
         let term = trimmedSearchText
 
         // If the user cleared the search, reset results immediately
@@ -304,7 +732,22 @@ struct WordsView: View {
         try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
         if Task.isCancelled { return }
 
-        await lookup.load(term: term, mode: searchMode)
+        let initialMode = searchMode
+        await lookup.load(term: term, mode: initialMode)
+        if Task.isCancelled { return }
+
+        // If this mode returned zero results, try the other mode.
+        // Only switch the UI mode if it actually produces results.
+        if lookup.results.isEmpty {
+            let fallbackMode: DictionarySearchMode = (initialMode == .english) ? .japanese : .english
+            await lookup.load(term: term, mode: fallbackMode)
+            if Task.isCancelled { return }
+
+            if lookup.results.isEmpty == false {
+                suppressedSearchTaskID = makeSearchTaskID(mode: fallbackMode, term: term)
+                searchMode = fallbackMode
+            }
+        }
     }
 
     private func add(entry: DictionaryEntry) {
@@ -415,8 +858,12 @@ struct WordsView: View {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func makeSearchTaskID(mode: DictionarySearchMode, term: String) -> String {
+        "\(mode == .english ? "EN" : "JP")|\(term)"
+    }
+
     private var searchTaskID: String {
-        "\(searchMode == .english ? "EN" : "JP")|\(trimmedSearchText)"
+        makeSearchTaskID(mode: searchMode, term: trimmedSearchText)
     }
 
     /// Merge dictionary lookup results that differ only by kana script (hiragana/katakana)
@@ -531,10 +978,14 @@ private struct WordsCSVImportView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var rawText: String = ""
+    @FocusState private var isEditorFocused: Bool
     @State private var isParsing: Bool = false
     @State private var items: [WordsCSVImportItem] = []
     @State private var errorText: String? = nil
     @State private var isFileImporterPresented: Bool = false
+    @State private var addToListMode: WordsCSVImportListMode = .none
+    @State private var selectedExistingListID: UUID? = nil
+    @State private var newListName: String = ""
 
     private var importableItems: [WordsCSVImportItem] {
         items.filter { item in
@@ -545,18 +996,29 @@ private struct WordsCSVImportView: View {
     var body: some View {
         VStack(spacing: 12) {
             inputControls
+            listControls
             csvEditor
             previewList
             importButton
         }
         .padding(.horizontal)
         .padding(.top, 12)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            isEditorFocused = false
+        }
         .navigationTitle("Import CSV")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Done") {
                     dismiss()
+                }
+            }
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Hide Keyboard") {
+                    isEditorFocused = false
                 }
             }
         }
@@ -593,6 +1055,56 @@ private struct WordsCSVImportView: View {
         }
     }
 
+    private var listControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Add imported words to")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Picker("List mode", selection: $addToListMode) {
+                Text("No list").tag(WordsCSVImportListMode.none)
+                Text("Existing list").tag(WordsCSVImportListMode.existing)
+                Text("New list").tag(WordsCSVImportListMode.new)
+            }
+            .pickerStyle(.segmented)
+
+            switch addToListMode {
+            case .none:
+                EmptyView()
+
+            case .existing:
+                if store.lists.isEmpty {
+                    Text("No lists yet. Create one first.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("Existing list", selection: $selectedExistingListID) {
+                        Text("Choose…").tag(UUID?.none)
+                        ForEach(store.lists) { list in
+                            Text(list.name).tag(Optional(list.id))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+
+            case .new:
+                TextField("New list name", text: $newListName)
+                    .textInputAutocapitalization(.words)
+                    .disableAutocorrection(true)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color(uiColor: .secondarySystemBackground))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color(uiColor: .separator).opacity(0.35), lineWidth: 1)
+                    )
+            }
+        }
+    }
+
     private var csvEditor: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Paste CSV text")
@@ -601,7 +1113,8 @@ private struct WordsCSVImportView: View {
 
             TextEditor(text: $rawText)
                 .font(.system(.body, design: .monospaced))
-                .frame(minHeight: 140)
+                .focused($isEditorFocused)
+                .frame(minHeight: 120)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(.quaternary)
@@ -616,36 +1129,37 @@ private struct WordsCSVImportView: View {
     }
 
     private var previewList: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             let total = items.count
             let importable = importableItems.count
             Text(total == 0 ? "Parsed rows" : "Parsed rows: \(importable)/\(total) importable")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
-            List {
-                if items.isEmpty {
-                    Text("No rows parsed yet.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(items) { item in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.finalSurface ?? "(missing surface)")
-                                .font(.headline)
-                            if let kana = item.finalKana, kana.isEmpty == false, kana != item.finalSurface {
-                                Text(kana)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Text(item.finalMeaning ?? "(missing meaning)")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if items.isEmpty {
+                        Text("No rows parsed yet.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 14)
+                    } else {
+                        ForEach(items) { item in
+                            WordsCSVImportRow(item: item)
+                            Divider()
                         }
                     }
                 }
             }
-            .listStyle(.insetGrouped)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color(uiColor: .separator).opacity(0.25), lineWidth: 1)
+            )
         }
     }
 
@@ -658,7 +1172,7 @@ private struct WordsCSVImportView: View {
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
-        .disabled(importableItems.isEmpty)
+        .disabled(importableItems.isEmpty || importSelectionIsValid == false)
         .padding(.bottom, 8)
     }
 
@@ -709,10 +1223,159 @@ private struct WordsCSVImportView: View {
     }
 
     private func importWords() {
-        for item in importableItems {
-            guard let surface = item.finalSurface, surface.isEmpty == false else { continue }
-            guard let meaning = item.finalMeaning, meaning.isEmpty == false else { continue }
-            store.add(surface: surface, kana: item.finalKana, meaning: meaning, note: item.finalNote)
+        let listIDs = resolveImportListIDsCreatingIfNeeded().ids
+
+        let payload: [WordsStore.WordToAdd] = importableItems.compactMap { item in
+            guard let surface = item.finalSurface, surface.isEmpty == false else { return nil }
+            guard let meaning = item.finalMeaning, meaning.isEmpty == false else { return nil }
+            return WordsStore.WordToAdd(surface: surface, dictionarySurface: nil, kana: item.finalKana, meaning: meaning, note: item.finalNote)
+        }
+
+        store.addMany(payload, sourceNoteID: nil, listIDs: listIDs)
+    }
+
+    private var importSelectionIsValid: Bool {
+        switch addToListMode {
+        case .none:
+            return true
+        case .existing:
+            guard let id = selectedExistingListID else { return false }
+            return store.lists.contains(where: { $0.id == id })
+        case .new:
+            let name = newListName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty == false
+        }
+    }
+
+    private func resolveImportListIDsCreatingIfNeeded() -> (ids: [UUID], isValid: Bool) {
+        switch addToListMode {
+        case .none:
+            return ([], true)
+        case .existing:
+            guard let id = selectedExistingListID else { return ([], false) }
+            guard store.lists.contains(where: { $0.id == id }) else { return ([], false) }
+            return ([id], true)
+        case .new:
+            let name = newListName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard name.isEmpty == false else { return ([], false) }
+            if let existing = store.lists.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                return ([existing.id], true)
+            }
+            if let created = store.createList(name: name) {
+                return ([created.id], true)
+            }
+            // In case createList rejected due to normalization, fall back to best match.
+            if let fallback = store.lists.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                return ([fallback.id], true)
+            }
+            return ([], false)
+        }
+    }
+}
+
+private enum WordsCSVImportListMode: Hashable {
+    case none
+    case existing
+    case new
+}
+
+private struct WordListsManagerView: View {
+    @EnvironmentObject private var store: WordsStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var newListName: String = ""
+    @State private var editingList: WordList? = nil
+
+    var body: some View {
+        List {
+            Section("Create") {
+                HStack(spacing: 12) {
+                    TextField("List name", text: $newListName)
+                        .textInputAutocapitalization(.words)
+                        .disableAutocorrection(true)
+                    Button("Add") {
+                        if store.createList(name: newListName) != nil {
+                            newListName = ""
+                        }
+                    }
+                    .disabled(newListName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+
+            Section("Lists") {
+                if store.lists.isEmpty {
+                    Text("No lists yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.lists) { list in
+                        HStack {
+                            Text(list.name)
+                            Spacer()
+                            Text("\(store.wordCount(inList: list.id))")
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            editingList = list
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                store.deleteList(id: list.id)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Lists")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") { dismiss() }
+            }
+        }
+        .sheet(item: $editingList) { list in
+            NavigationStack {
+                WordListEditView(list: list)
+            }
+        }
+    }
+}
+
+private struct WordListEditView: View {
+    @EnvironmentObject private var store: WordsStore
+    @Environment(\.dismiss) private var dismiss
+
+    let list: WordList
+    @State private var name: String
+
+    init(list: WordList) {
+        self.list = list
+        _name = State(initialValue: list.name)
+    }
+
+    var body: some View {
+        Form {
+            Section("Name") {
+                TextField("List name", text: $name)
+                    .textInputAutocapitalization(.words)
+                    .disableAutocorrection(true)
+            }
+        }
+        .navigationTitle("Edit List")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Save") {
+                    store.renameList(id: list.id, name: name)
+                    dismiss()
+                }
+            }
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Cancel") { dismiss() }
+            }
         }
     }
 }
@@ -771,6 +1434,41 @@ private struct WordsCSVImportItem: Identifiable, Hashable {
         guard let raw = providedNote else { return nil }
         let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
+    }
+}
+
+private struct WordsCSVImportRow: View {
+    let item: WordsCSVImportItem
+
+    var body: some View {
+        let surface = item.finalSurface ?? "—"
+        let kana = item.finalKana ?? ""
+        let meaning = item.finalMeaning ?? "—"
+
+        return HStack(spacing: 12) {
+            Text(surface)
+                .font(.headline)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(kana)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            Text(meaning)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
     }
 }
 
@@ -862,10 +1560,12 @@ private enum WordsCSVImport {
 
                     var hit: DictionaryEntry? = nil
                     for cand in candidates {
+                        let keys = await MainActor.run { DictionaryKeyPolicy.keys(forDisplayKey: cand) }
+                        guard keys.lookupKey.isEmpty == false else { continue }
                         let rows: [DictionaryEntry]
                         do {
                             rows = try await Task.detached(priority: .userInitiated, operation: { () async throws -> [DictionaryEntry] in
-                                try await DictionarySQLiteStore.shared.lookup(term: cand, limit: 1)
+                                try await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 1)
                             }).value
                         } catch {
                             continue

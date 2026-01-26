@@ -25,6 +25,8 @@ struct TextSpan: Equatable, Hashable {
     }
 }
 
+extension TextSpan: @unchecked Sendable {}
+
 extension TextSpan {
     static func describe(spans: [TextSpan]) -> String {
         spans

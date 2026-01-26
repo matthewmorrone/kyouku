@@ -3,7 +3,7 @@ import Foundation
 /// Minimal trie built from all JMdict surface forms. It supports fast,
 /// bounded longest-prefix lookups across UTF-16 code units so segmentation can
 /// scan text once without enumerating arbitrary substrings.
-final class LexiconTrie {
+final class LexiconTrie: @unchecked Sendable {
     private final class Node {
         var children: [UInt16: Node] = [:]
         var isWord: Bool = false
@@ -17,13 +17,16 @@ final class LexiconTrie {
 
 //#if DEBUG
     var debugMaxWordLength: Int { maxWordLength }
+//#endif
 
-    func debugContainsWord(_ word: String) -> Bool {
+    /// Returns true if `word` exists as an exact lexicon surface form.
+    ///
+    /// This is a pure in-memory check (no SQLite).
+    func containsWord(_ word: String, requireKanji: Bool = false) -> Bool {
         let ns = word as NSString
         guard ns.length > 0 else { return false }
-        return containsWord(in: ns, from: 0, through: ns.length, requireKanji: false)
+        return containsWord(in: ns, from: 0, through: ns.length, requireKanji: requireKanji)
     }
-//#endif
 
     init(words: [String]) {
         let root = Node()

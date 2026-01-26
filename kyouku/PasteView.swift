@@ -44,6 +44,7 @@ struct PasteView: View {
     @State private var hasInitialized: Bool = false
     @State private var isEditing: Bool = false
     @State private var furiganaAttributedText: NSAttributedString? = nil
+    @State private var furiganaAttributedTextBase: NSAttributedString? = nil
     @State private var furiganaSpans: [AnnotatedSpan]? = nil
     @State private var furiganaSemanticSpans: [SemanticSpan] = []
     @State private var furiganaRefreshToken: Int = 0
@@ -71,9 +72,28 @@ struct PasteView: View {
     @State private var incrementalSelectedCharacterRange: NSRange? = nil
     @State private var incrementalSheetDetent: PresentationDetent = .height(420)
 
+    // Sentence-level semantic heatmap (visual-only)
+    @State private var sentenceRanges: [NSRange] = []
+    @State private var sentenceVectors: [[Float]?] = []
+    @State private var sentenceHeatmapSelectedIndex: Int? = nil
+    @State private var sentenceHeatmapTask: Task<Void, Never>? = nil
+
+    // Live semantic feedback while editing (read-only)
+    @State private var editorSelectedRange: NSRange? = nil
+    @State private var liveSemanticFeedback: LiveSemanticFeedback? = nil
+    @State private var liveSemanticFeedbackTask: Task<Void, Never>? = nil
+
+    // Semantic constellation (sentence graph)
+    @State private var isConstellationSheetPresented: Bool = false
+    @State private var constellationScrollToSelectedRangeToken: Int = 0
+
     @State private var showWordDefinitionsSheet: Bool = false
     @State private var wordDefinitionsSurface: String = ""
     @State private var wordDefinitionsKana: String? = nil
+    @State private var wordDefinitionsContextSentence: String? = nil
+    @State private var wordDefinitionsLemmaCandidates: [String] = []
+    @State private var wordDefinitionsPartOfSpeech: String? = nil
+    @State private var wordDefinitionsTokenParts: [WordDefinitionsView.TokenPart] = []
 
     private var tokenSelection: TokenSelectionContext? {
         get { selectionController.tokenSelection }
@@ -130,6 +150,9 @@ struct PasteView: View {
     @AppStorage("readingHighlightUnknownTokens") private var highlightUnknownTokens: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
+    @AppStorage(FuriganaKnownWordSettings.modeKey) private var knownWordFuriganaModeRaw: String = FuriganaKnownWordSettings.defaultModeRawValue
+    @AppStorage(FuriganaKnownWordSettings.scoreThresholdKey) private var knownWordFuriganaScoreThreshold: Double = FuriganaKnownWordSettings.defaultScoreThreshold
+    @AppStorage(FuriganaKnownWordSettings.minimumReviewsKey) private var knownWordFuriganaMinimumReviews: Int = FuriganaKnownWordSettings.defaultMinimumReviews
 
     @State private var showingFuriganaOptions: Bool = false
     @AppStorage("pasteViewScratchNoteID") private var scratchNoteIDRaw: String = ""
@@ -236,7 +259,11 @@ struct PasteView: View {
                 WordDefinitionsView(
                     surface: wordDefinitionsSurface,
                     kana: wordDefinitionsKana,
-                    sourceNoteID: currentNote?.id
+                    contextSentence: wordDefinitionsContextSentence,
+                    lemmaCandidates: wordDefinitionsLemmaCandidates,
+                    tokenPartOfSpeech: wordDefinitionsPartOfSpeech,
+                    sourceNoteID: currentNote?.id,
+                    tokenParts: wordDefinitionsTokenParts
                 )
             }
         }
@@ -257,15 +284,12 @@ struct PasteView: View {
             .toolbar { coreToolbar }
             .alert("Set Title", isPresented: $isTitleEditAlertPresented) {
                 TextField("Title", text: $titleEditDraft)
-
                 Button("Cancel", role: .cancel) {
                     // no-op
                 }
                 Button("Set") {
                     applyTitleEditDraft()
                 }
-            } message: {
-                Text("Set a custom title for this note.")
             }
             .safeAreaInset(edge: .bottom) { coreBottomInset }
             .onAppear { onAppearHandler() }
@@ -344,6 +368,15 @@ struct PasteView: View {
                     recomputeSpans: false
                 )
             }
+            .onChange(of: knownWordFuriganaModeRaw) { _, _ in
+                triggerFuriganaRefreshIfNeeded(reason: "known-word furigana mode changed", recomputeSpans: false)
+            }
+            .onChange(of: knownWordFuriganaScoreThreshold) { _, _ in
+                triggerFuriganaRefreshIfNeeded(reason: "known-word furigana threshold changed", recomputeSpans: false)
+            }
+            .onChange(of: knownWordFuriganaMinimumReviews) { _, _ in
+                triggerFuriganaRefreshIfNeeded(reason: "known-word furigana minimum reviews changed", recomputeSpans: false)
+            }
 
         let selectionHandling = furiganaControls
             .onChange(of: selectionController.tokenSelection?.id) { (_: String?, newID: String?) in
@@ -375,7 +408,16 @@ struct PasteView: View {
                         }
                     }
                 }
-                handleSelectionLookup(for: newSelection?.surface ?? "")
+                updateSentenceHeatmapSelection(for: newSelection?.range)
+                handleSelectionLookup()
+            }
+            .onChange(of: selectionController.persistentSelectionRange) { _, newRange in
+                guard incrementalLookupEnabled == false else { return }
+                updateSentenceHeatmapSelection(for: newRange)
+            }
+            .onChange(of: incrementalSelectedCharacterRange) { _, newRange in
+                guard incrementalLookupEnabled else { return }
+                updateSentenceHeatmapSelection(for: newRange)
             }
             .onChange(of: sheetSelection?.id) { (_: String?, newID: String?) in
                 guard dictionaryPopupEnabled else { return }
@@ -414,6 +456,20 @@ struct PasteView: View {
                 }
                 processPendingRouterResetRequest()
             }
+            .onChange(of: inputText) { _, _ in
+                scheduleLiveSemanticFeedbackIfNeeded()
+            }
+            .onChange(of: editorSelectedRange?.location) { _, _ in
+                scheduleLiveSemanticFeedbackIfNeeded()
+            }
+            .onChange(of: isEditing) { _, editing in
+                if editing {
+                    scheduleLiveSemanticFeedbackIfNeeded()
+                } else {
+                    liveSemanticFeedbackTask?.cancel()
+                    liveSemanticFeedback = nil
+                }
+            }
             .onReceive(readingOverrides.$overrides) { _ in
                 handleOverridesExternalChange()
             }
@@ -428,6 +484,9 @@ struct PasteView: View {
                 if isDictionarySheetPresented {
                     isDictionarySheetPresented = false
                     clearSelection(resetPersistent: true)
+                } else if tokenSelection != nil {
+                    // Background/whitespace tap clears selection.
+                    clearSelection(resetPersistent: false)
                 }
             }
             .overlay(alignment: .bottom) {
@@ -500,13 +559,20 @@ struct PasteView: View {
         // Precompute helpers outside of the ViewBuilder to avoid non-View statements inside VStack
         let extraOverlays: [RubyText.TokenOverlay] = incrementalLookupEnabled ? savedWordOverlays : []
 
-        let spanSelectionHandler: ((RubySpanSelection?) -> Void)?
-        if incrementalLookupEnabled {
-            spanSelectionHandler = nil
-        } else {
-            spanSelectionHandler = { selection in
-                handleInlineSpanSelection(selection)
+        let spanSelectionHandler: ((RubySpanSelection?) -> Void)? = { selection in
+            if incrementalLookupEnabled {
+                // In incremental lookup mode we still want whitespace taps to clear state.
+                guard selection != nil else {
+                    incrementalSelectedCharacterRange = nil
+                    incrementalLookupTask?.cancel()
+                    isIncrementalPopupVisible = false
+                    incrementalPopupHits = []
+                    return
+                }
+                return
             }
+
+            handleInlineSpanSelection(selection)
         }
 
         let contextMenuStateProvider: (() -> RubyContextMenuState?)?
@@ -546,6 +612,7 @@ struct PasteView: View {
         return VStack(spacing: 0) {
             FuriganaRenderingHost(
                 text: $inputText,
+                editorSelectedRange: $editorSelectedRange,
                 furiganaText: furiganaAttributedText,
                 furiganaSpans: furiganaSpans,
                 semanticSpans: furiganaSemanticSpans,
@@ -561,12 +628,12 @@ struct PasteView: View {
                 tokenPalette: alternateTokenPalette,
                 unknownTokenColor: unknownTokenColor,
                 selectedRangeHighlight: incrementalLookupEnabled ? incrementalSelectedCharacterRange : persistentSelectionRange,
+                scrollToSelectedRangeToken: constellationScrollToSelectedRangeToken,
                 customizedRanges: customizedRanges,
                 extraTokenOverlays: extraOverlays,
                 enableTapInspection: true,
                 bottomObstructionHeight: tokenPanelOverlap,
-                onCharacterTap: { utf16Index in
-                    if incrementalLookupEnabled {
+                onCharacterTap: incrementalLookupEnabled ? { utf16Index in
                         // Existing incremental lookup behavior
                         let ns = inputText as NSString
                         if ns.length == 0 {
@@ -585,35 +652,9 @@ struct PasteView: View {
                             incrementalSelectedCharacterRange = r
                         }
                         startIncrementalLookup(atUTF16Index: utf16Index)
-                    } else {
-                        // Fallback: map tap position to the semantic span containing the tapped UTF-16 index
-                        let ns = inputText as NSString
-                        guard ns.length > 0 else { return }
-                        let clamped = min(max(0, utf16Index), max(0, ns.length - 1))
-                        let r = ns.rangeOfComposedCharacterSequence(at: clamped)
-                        let ch = ns.substring(with: r)
-                        if ch == "\n" || ch == "\r" {
-                            clearSelection()
-                            return
-                        }
-
-                        if let match = furiganaSemanticSpans.enumerated().first(where: { NSLocationInRange(clamped, $0.element.range) }) {
-                            // In drag-selection mode with token highlighting disabled,
-                            // keep taps opening the dictionary but avoid snapping
-                            // to full token boundaries. Instead, treat the tapped
-                            // character range as an arbitrary selection.
-                            let dragSelectionMode = (incrementalLookupEnabled == false && alternateTokenColors == false)
-                            if dragSelectionMode && tokenHighlightsEnabled == false {
-                                presentDictionaryForArbitraryRange(r)
-                            } else {
-                                presentDictionaryForSpan(at: match.offset, focusSplitMenu: false)
-                            }
-                        } else {
-                            // No token at this location; clear selection
-                            clearSelection()
-                        }
-                    }
-                }, onSpanSelection: spanSelectionHandler, enableDragSelection: incrementalLookupEnabled ? false : (alternateTokenColors == false),
+                } : nil,
+                onSpanSelection: spanSelectionHandler,
+                enableDragSelection: incrementalLookupEnabled ? false : (alternateTokenColors == false),
                 onDragSelectionBegan: {
                     guard incrementalLookupEnabled == false else { return }
                         // Avoid showing stale popup content while the user is selecting.
@@ -628,6 +669,14 @@ struct PasteView: View {
                 onContextMenuAction: contextMenuActionHandler,
                 viewMetricsContext: viewMetricsContext
             )
+            .overlay(alignment: .topTrailing) {
+                if isEditing, let liveSemanticFeedback {
+                    LiveSemanticFeedbackBadge(feedback: liveSemanticFeedback)
+                        .padding(.top, 10)
+                        .padding(.trailing, 10)
+                        .allowsHitTesting(false)
+                }
+            }
             .background(
                 GeometryReader { proxy in
                     Color.clear.preference(
@@ -663,6 +712,18 @@ struct PasteView: View {
                             .font(.title2)
                     }
                     .accessibilityLabel("Save")
+                }
+
+                ControlCell {
+                    Button {
+                        hideKeyboard()
+                        isConstellationSheetPresented = true
+                    } label: {
+                        Image(systemName: "circle.dotted")
+                            .font(.title2)
+                    }
+                    .accessibilityLabel("Constellation")
+                    .accessibilityHint("View sentence constellation")
                 }
 
                 ControlCell {
@@ -726,6 +787,23 @@ struct PasteView: View {
                 }
             }
             .controlSize(.small)
+        }
+        .sheet(isPresented: $isConstellationSheetPresented) {
+            SemanticConstellationSheet(
+                sentenceRanges: sentenceRanges,
+                sentenceVectors: sentenceVectors,
+                selectedSentenceIndex: sentenceHeatmapSelectedIndex,
+                onSelectSentence: { range, _ in
+                    // Visual-only: select + scroll; do not trigger dictionary lookup.
+                    if incrementalLookupEnabled {
+                        incrementalSelectedCharacterRange = range
+                    } else {
+                        persistentSelectionRange = range
+                    }
+                    constellationScrollToSelectedRangeToken &+= 1
+                }
+            )
+            .presentationDetents([.medium, .large])
         }
     }
 
@@ -820,7 +898,8 @@ struct PasteView: View {
             ScrollView {
                 Text(adjustedSpansDebugText)
                     .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
+                    .textSelection(.disabled)
+                    .allowsHitTesting(false)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
             }
@@ -852,6 +931,7 @@ struct PasteView: View {
         NavigationStack {
             ExtractWordsView(
                 items: tokenListItems,
+                noteID: activeNoteID,
                 isReady: (furiganaSemanticSpans.isEmpty == false) || (furiganaSpans != nil),
                 isEditing: isEditing,
                 selectedRange: tokenSelection?.range ?? persistentSelectionRange,
@@ -957,12 +1037,22 @@ struct PasteView: View {
     private var inlineDictionaryOverlay: some View {
         if inlineDictionaryPanelEnabled {
             if tokenSelection != nil {
-                legacyDismissOverlay
+                inlineDismissScrim
             }
             if let selection = tokenSelection, selection.range.length > 0 {
                 inlineTokenActionPanel(for: selection)
             }
         }
+    }
+
+    private var inlineDismissScrim: some View {
+        // When the inline dictionary panel is visible, we lightly dim the background.
+        // IMPORTANT: keep this scrim non-interactive so it never blocks scrolling.
+        Color.black.opacity(0.02)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+            .transition(.opacity)
+            .zIndex(0.5)
     }
 
     @ViewBuilder
@@ -990,55 +1080,58 @@ struct PasteView: View {
     }
 
     private func inlineTokenActionPanel(for selection: TokenSelectionContext) -> some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
 
-            let preferred = normalizedReading(preferredReadingForSelection(selection))
+                let preferred = normalizedReading(preferredReadingForSelection(selection))
 
-            TokenActionPanel(
-                selection: selection,
-                lookup: inlineLookup,
-                preferredReading: preferred,
-                canMergePrevious: canMergeSelection(.previous),
-                canMergeNext: canMergeSelection(.next),
-                onShowDefinitions: {
-                    presentWordDefinitions(for: selection)
-                },
-                onDismiss: { clearSelection(resetPersistent: true) },
-                onSaveWord: { entry in
-                    toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
-                },
-                onApplyReading: { entry in
-                    applyDictionaryReading(entry)
-                },
-                onApplyCustomReading: { kana in
-                    applyCustomReading(kana)
-                },
-                isWordSaved: { entry in
-                    isSavedWord(for: selection.surface, preferredReading: preferred, entry: entry)
-                },
-                onMergePrevious: { mergeSelection(.previous) },
-                onMergeNext: { mergeSelection(.next) },
-                onSplit: { offset in splitSelection(at: offset) },
-                onReset: resetSelectionOverrides,
-                isSelectionCustomized: selectionIsCustomized(selection),
-                enableDragToDismiss: true,
-                embedInMaterialBackground: true,
-                focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
-                onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
-            )
-            .id("token-action-panel-\(overrideSignature)")
-            .padding(.horizontal, 0)
-            .padding(.bottom, 0)
-            .ignoresSafeArea(edges: .bottom)
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: TokenActionPanelFramePreferenceKey.self,
-                        value: proxy.frame(in: .named(Self.coordinateSpaceName))
-                    )
-                }
-            )
+                TokenActionPanel(
+                    selection: selection,
+                    lookup: inlineLookup,
+                    preferredReading: preferred,
+                    canMergePrevious: canMergeSelection(.previous),
+                    canMergeNext: canMergeSelection(.next),
+                    onShowDefinitions: {
+                        presentWordDefinitions(for: selection)
+                    },
+                    onDismiss: { clearSelection(resetPersistent: true) },
+                    onSaveWord: { entry in
+                        toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
+                    },
+                    onApplyReading: { entry in
+                        applyDictionaryReading(entry)
+                    },
+                    onApplyCustomReading: { kana in
+                        applyCustomReading(kana)
+                    },
+                    isWordSaved: { entry in
+                        isSavedWord(for: selection.surface, preferredReading: preferred, entry: entry)
+                    },
+                    onMergePrevious: { mergeSelection(.previous) },
+                    onMergeNext: { mergeSelection(.next) },
+                    onSplit: { offset in splitSelection(at: offset) },
+                    onReset: resetSelectionOverrides,
+                    isSelectionCustomized: selectionIsCustomized(selection),
+                    enableDragToDismiss: true,
+                    embedInMaterialBackground: true,
+                    containerHeight: proxy.size.height,
+                    focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
+                    onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
+                )
+                .id("token-action-panel-\(overrideSignature)")
+                .padding(.horizontal, 0)
+                .padding(.bottom, 0)
+                .ignoresSafeArea(edges: .bottom)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: TokenActionPanelFramePreferenceKey.self,
+                            value: proxy.frame(in: .named(Self.coordinateSpaceName))
+                        )
+                    }
+                )
+            }
         }
         .zIndex(1)
         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1392,14 +1485,12 @@ struct PasteView: View {
         selectionController.beginPendingSelectionRestoration(for: range)
     }
 
-    private func handleSelectionLookup(for term: String) {
+    private func handleSelectionLookup() {
         // INVESTIGATION NOTES (2026-01-04)
         // Dictionary lookup behavior for the popup:
-        // - Primary term is the selected surface.
-        // - Fallback terms are lemma candidates (can be multiple).
-        // DictionaryLookupViewModel.load iterates candidates sequentially and does SQLite lookups until hits.
-        // This means one tap can cause multiple DB queries and result allocations.
-        guard term.isEmpty == false else {
+        // - Always routes through DictionaryLookupViewModel.lookup(selectedRange:...)
+        // - Ordering is surface → deinflection → STOP (no lemma/reading fallbacks for UI determinism)
+        guard let selection = tokenSelection else {
             Task { @MainActor in
                 inlineLookup.results = []
                 inlineLookup.errorMessage = nil
@@ -1407,16 +1498,13 @@ struct PasteView: View {
             }
             return
         }
-        let lemmaFallbacks = tokenSelection?.annotatedSpan.lemmaCandidates ?? []
-        let readingFallback = (tokenSelection?.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        var fallbacks: [String] = lemmaFallbacks
-        if readingFallback.isEmpty == false {
-            fallbacks.append(readingFallback)
-        }
+        let tokens = furiganaSpans?.map(\.span) ?? []
+        let selectedRange = selection.range
+        let currentText = inputText
 
-        Task { [fallbacks] in
-            await inlineLookup.load(term: term, fallbackTerms: fallbacks)
+        Task { [tokens, selectedRange, currentText] in
+            await inlineLookup.lookup(selectedRange: selectedRange, inText: currentText, tokenSpans: tokens)
         }
     }
 
@@ -1528,7 +1616,36 @@ struct PasteView: View {
     private func presentWordDefinitions(for selection: TokenSelectionContext) {
         wordDefinitionsSurface = selection.surface
         wordDefinitionsKana = normalizedReading(preferredReadingForSelection(selection))
+        wordDefinitionsLemmaCandidates = selection.annotatedSpan.lemmaCandidates
+        wordDefinitionsPartOfSpeech = selection.annotatedSpan.partOfSpeech
+        wordDefinitionsContextSentence = SentenceContextExtractor.sentence(containing: selection.range, in: inputText)?.sentence
+        wordDefinitionsTokenParts = tokenPartsForSelection(selection)
         showWordDefinitionsSheet = true
+    }
+
+    private func tokenPartsForSelection(_ selection: TokenSelectionContext) -> [WordDefinitionsView.TokenPart] {
+        let indices = selection.sourceSpanIndices
+        guard indices.isEmpty == false else { return [] }
+        guard furiganaSemanticSpans.isEmpty == false else { return [] }
+
+        var parts: [WordDefinitionsView.TokenPart] = []
+        parts.reserveCapacity(min(8, indices.count))
+        var seen: Set<String> = []
+
+        for idx in indices {
+            guard furiganaSemanticSpans.indices.contains(idx) else { continue }
+            let semantic = furiganaSemanticSpans[idx]
+            guard let trimmed = trimmedRangeAndSurface(for: semantic.range) else { continue }
+            guard isHardBoundaryOnly(trimmed.surface) == false else { continue }
+
+            let reading = normalizedReading(preferredReading(for: trimmed.range, fallback: semantic.readingKana))
+            let key = "\(trimmed.range.location)#\(trimmed.range.length)"
+            guard seen.contains(key) == false else { continue }
+            seen.insert(key)
+            parts.append(.init(id: key, surface: trimmed.surface, kana: reading))
+        }
+
+        return parts.count > 1 ? parts : []
     }
 
     private func preferredReadingForSelection(_ selection: TokenSelectionContext) -> String? {
@@ -1655,7 +1772,8 @@ struct PasteView: View {
 
                 ZStack {
                     ForEach(Array(regions.enumerated()), id: \.offset) { _, rect in
-                        Color.black.opacity(0.001)
+                        // IMPORTANT: UIKit ignores views with alpha <= 0.01 for hit-testing.
+                        Color.black.opacity(0.02)
                             .frame(width: rect.width, height: rect.height)
                             .position(x: rect.midX, y: rect.midY)
                             .contentShape(Rectangle())
@@ -2206,9 +2324,50 @@ struct PasteView: View {
 
     private func applyDictionaryReading(_ entry: DictionaryEntry) {
         guard let selection = tokenSelection else { return }
-        let rawKana = entry.kana ?? entry.kanji
-        let trimmedKana = rawKana.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let tokenSurface = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard tokenSurface.isEmpty == false else { return }
+
+        let tokenSuffix = trailingKanaSuffix(in: tokenSurface)
+
+        let lemmaSurface: String = {
+            let kanji = entry.kanji.trimmingCharacters(in: .whitespacesAndNewlines)
+            if kanji.isEmpty == false { return kanji }
+            let kana = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return kana
+        }()
+
+        let lemmaSuffix = trailingKanaSuffix(in: lemmaSurface)
+        let baseReading = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Heuristic: if both lemma and token have okurigana, treat the lemma's okurigana
+        // as a suffix in the reading and swap it for the token's okurigana.
+        // Example: 抱く(だく) -> 抱かれ(だかれ)
+        let surfaceReading: String = {
+            guard baseReading.isEmpty == false else { return "" }
+            guard let tokenSuffix, tokenSuffix.isEmpty == false else { return baseReading }
+            guard let lemmaSuffix, lemmaSuffix.isEmpty == false else { return baseReading }
+            guard baseReading.hasSuffix(lemmaSuffix) else { return baseReading }
+            let stem = String(baseReading.dropLast(lemmaSuffix.count))
+            return stem + tokenSuffix
+        }()
+
+        // Store only the kanji reading portion for mixed kanji-kana tokens so ruby
+        // can render like 抱(だ)かれ instead of treating the whole surface as ruby.
+        let overrideKana: String = {
+            guard let tokenSuffix, tokenSuffix.isEmpty == false else { return surfaceReading }
+            guard surfaceReading.hasSuffix(tokenSuffix) else { return surfaceReading }
+            let storage = tokenSurface as NSString
+            // If the token is entirely kana, don't strip; it would produce empty.
+            if isKanaOnlySurface(tokenSurface) { return surfaceReading }
+            // Ensure there is at least one non-kana scalar before stripping.
+            if storage.length <= tokenSuffix.utf16.count { return surfaceReading }
+            return String(surfaceReading.dropLast(tokenSuffix.count))
+        }()
+
+        let trimmedKana = overrideKana.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedKana.isEmpty == false else { return }
+
         let override = ReadingOverride(
             noteID: activeNoteID,
             rangeStart: selection.range.location,
@@ -2626,6 +2785,42 @@ struct PasteView: View {
         let currentAmendedSpans = tokenBoundaries.spans(for: activeNoteID, text: currentText)
         let currentHardCuts = tokenBoundaries.hardCuts(for: activeNoteID, text: currentText)
         let currentHeadwordSpacingPadding = readingHeadwordSpacingPadding
+
+        let knownWordSurfaceKeys: Set<String> = {
+            let mode = FuriganaKnownWordMode(rawValue: knownWordFuriganaModeRaw) ?? .off
+            guard mode != .off else { return [] }
+
+            var out: Set<String> = []
+            out.reserveCapacity(min(4096, words.words.count * 2))
+
+            func insertWordKeys(_ w: Word) {
+                let s = w.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                if s.isEmpty == false { out.insert(kanaFoldToHiragana(s)) }
+                if let ds = w.dictionarySurface?.trimmingCharacters(in: .whitespacesAndNewlines), ds.isEmpty == false {
+                    out.insert(kanaFoldToHiragana(ds))
+                }
+            }
+
+            switch mode {
+            case .off:
+                return []
+            case .saved:
+                for w in words.words {
+                    insertWordKeys(w)
+                }
+            case .learned:
+                let threshold = max(0.0, min(1.0, knownWordFuriganaScoreThreshold))
+                let minReviews = max(1, knownWordFuriganaMinimumReviews)
+                for w in words.words {
+                    if let score = ReviewPersistence.learnedScore(for: w.id, minimumReviews: minReviews), score >= threshold {
+                        insertWordKeys(w)
+                    }
+                }
+            }
+
+            return out
+        }()
+
         let pipelineInput = FuriganaPipelineService.Input(
             text: currentText,
             showFurigana: currentShowFurigana,
@@ -2639,7 +2834,8 @@ struct PasteView: View {
             hardCuts: currentHardCuts,
             readingOverrides: currentOverrides,
             context: "PasteView",
-            padHeadwordSpacing: currentHeadwordSpacingPadding
+            padHeadwordSpacing: currentHeadwordSpacingPadding,
+            knownWordSurfaceKeys: knownWordSurfaceKeys
         )
         let service = furiganaPipeline
         return {
@@ -2657,13 +2853,388 @@ struct PasteView: View {
                 furiganaSpans = result.spans
                 furiganaSemanticSpans = result.semanticSpans
                 if showFurigana == currentShowFurigana {
-                    furiganaAttributedText = result.attributedString
+                    let base = result.attributedString ?? NSAttributedString(string: currentText)
+                    furiganaAttributedTextBase = base
+                    furiganaAttributedText = applySentenceHeatmap(to: base)
                 } else if showFurigana == false {
-                    furiganaAttributedText = nil
+                    let base = NSAttributedString(string: currentText)
+                    furiganaAttributedTextBase = base
+                    furiganaAttributedText = applySentenceHeatmap(to: base)
                 }
                 restoreSelectionIfNeeded()
+                startSentenceHeatmapPrecomputeIfPossible(text: currentText, spans: result.spans)
             }
         }
+    }
+
+    // MARK: - Sentence semantic heatmap
+
+    private func updateSentenceHeatmapSelection(for selectedRange: NSRange?) {
+        guard let base = furiganaAttributedTextBase else {
+            // Rendering not ready yet; just record state.
+            sentenceHeatmapSelectedIndex = nil
+            return
+        }
+
+        guard let selectedRange, sentenceRanges.isEmpty == false else {
+            sentenceHeatmapSelectedIndex = nil
+            furiganaAttributedText = base
+            return
+        }
+
+        let idx = sentenceRanges.firstIndex(where: { NSLocationInRange(selectedRange.location, $0) })
+        if idx == sentenceHeatmapSelectedIndex {
+            return
+        }
+
+        sentenceHeatmapSelectedIndex = idx
+        if idx == nil {
+            furiganaAttributedText = base
+        } else {
+            furiganaAttributedText = applySentenceHeatmap(to: base)
+        }
+    }
+
+    private func startSentenceHeatmapPrecomputeIfPossible(text: String, spans: [AnnotatedSpan]?) {
+        let nsText = text as NSString
+        let ranges = SentenceRangeResolver.sentenceRanges(in: nsText)
+        sentenceRanges = ranges
+
+        let currentSelectionRange: NSRange? = incrementalLookupEnabled ? incrementalSelectedCharacterRange : persistentSelectionRange
+        updateSentenceHeatmapSelection(for: currentSelectionRange)
+
+        guard let spans, spans.isEmpty == false, ranges.isEmpty == false else {
+            sentenceVectors = []
+            return
+        }
+
+        sentenceHeatmapTask?.cancel()
+        let capturedRanges = ranges
+        let capturedSpans = spans
+        sentenceHeatmapTask = Task(priority: .utility) {
+            // Resolve EmbeddingAccess safely.
+            let access = await MainActor.run(resultType: EmbeddingAccess.self, body: { EmbeddingAccess.shared })
+
+            // Bucket spans by sentence.
+            var tokenBuckets: [[EmbeddingToken]] = Array(repeating: [], count: capturedRanges.count)
+            tokenBuckets.reserveCapacity(capturedRanges.count)
+
+            var sentenceIndex = 0
+            for s in capturedSpans {
+                let r = s.span.range
+                guard r.location != NSNotFound, r.length > 0 else { continue }
+
+                // Fast path: spans are typically in ascending order.
+                if sentenceIndex < capturedRanges.count {
+                    while sentenceIndex < capturedRanges.count,
+                          NSMaxRange(capturedRanges[sentenceIndex]) <= r.location {
+                        sentenceIndex += 1
+                    }
+                }
+
+                let resolvedSentenceIndex: Int?
+                if sentenceIndex < capturedRanges.count,
+                   NSLocationInRange(r.location, capturedRanges[sentenceIndex]) {
+                    resolvedSentenceIndex = sentenceIndex
+                } else {
+                    // Fallback (should be rare): handle out-of-order spans.
+                    resolvedSentenceIndex = capturedRanges.firstIndex(where: { NSLocationInRange(r.location, $0) })
+                }
+
+                guard let sentenceIndex = resolvedSentenceIndex else { continue }
+                let lemma = s.lemmaCandidates.first
+                let token = EmbeddingToken(surface: s.span.surface, lemma: lemma, reading: s.readingKana)
+                tokenBuckets[sentenceIndex].append(token)
+            }
+
+            // Collect all unique candidate keys for batch fetch.
+            var unique: [String] = []
+            unique.reserveCapacity(capturedSpans.count * 2)
+            var seen: Set<String> = []
+            seen.reserveCapacity(capturedSpans.count * 2)
+
+            let perSentenceCandidates: [[[String]]] = tokenBuckets.map { bucket in
+                bucket.map { EmbeddingFallbackPolicy.candidates(for: $0) }
+            }
+
+            for sentence in perSentenceCandidates {
+                for tokenCandidates in sentence {
+                    for c in tokenCandidates {
+                        if c.isEmpty { continue }
+                        if seen.insert(c).inserted {
+                            unique.append(c)
+                        }
+                    }
+                }
+            }
+
+            let fetched = access.vectors(for: unique)
+
+            func normalize(_ v: [Float]) -> [Float] {
+                var sum: Float = 0
+                for x in v { sum += x * x }
+                let norm = sum.squareRoot()
+                guard norm > 0 else { return v }
+                return v.map { $0 / norm }
+            }
+
+            var vectors: [[Float]?] = Array(repeating: nil, count: capturedRanges.count)
+
+            for (i, sentence) in perSentenceCandidates.enumerated() {
+                var acc: [Float]? = nil
+                var count: Float = 0
+                for tokenCandidates in sentence {
+                    var chosen: [Float]? = nil
+                    for c in tokenCandidates {
+                        if let v = fetched[c] {
+                            chosen = v
+                            break
+                        }
+                    }
+                    guard let vec = chosen else { continue }
+
+                    if acc == nil {
+                        acc = Array(repeating: 0, count: vec.count)
+                    }
+                    guard var a = acc else { continue }
+                    for j in 0..<vec.count {
+                        a[j] += vec[j]
+                    }
+                    acc = a
+                    count += 1
+                }
+
+                if let acc, count > 0 {
+                    let mean = acc.map { $0 / count }
+                    vectors[i] = normalize(mean)
+                }
+            }
+
+            await MainActor.run {
+                guard Task.isCancelled == false else { return }
+                sentenceVectors = vectors
+                // Re-apply heatmap with fresh vectors if a selection is active.
+                if let base = furiganaAttributedTextBase {
+                    furiganaAttributedText = applySentenceHeatmap(to: base)
+                }
+            }
+        }
+    }
+
+    private func applySentenceHeatmap(to base: NSAttributedString?) -> NSAttributedString? {
+        guard let base else { return nil }
+        guard let selectedIndex = sentenceHeatmapSelectedIndex else { return base }
+        guard sentenceRanges.isEmpty == false, sentenceVectors.count == sentenceRanges.count else { return base }
+        guard sentenceVectors.indices.contains(selectedIndex), let selectedVec = sentenceVectors[selectedIndex] else { return base }
+
+        // Compute similarities (dot product) and map to background colors.
+        var sims: [Float] = Array(repeating: 0, count: sentenceRanges.count)
+        for i in 0..<sentenceRanges.count {
+            guard let v = sentenceVectors[i] else {
+                sims[i] = 0
+                continue
+            }
+            sims[i] = EmbeddingMath.cosineSimilarity(a: selectedVec, b: v)
+        }
+
+        let mutable = NSMutableAttributedString(attributedString: base)
+        // Remove any existing heatmap backgrounds (only within sentence ranges).
+        for r in sentenceRanges {
+            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= mutable.length else { continue }
+            mutable.removeAttribute(.backgroundColor, range: r)
+        }
+
+        func clamp01(_ x: Float) -> CGFloat {
+            CGFloat(max(0, min(1, x)))
+        }
+
+        func heatColor(sim: Float, isSelected: Bool) -> UIColor {
+            // Convert [-1,1] -> [0,1], but we mostly expect [0,1].
+            let t = clamp01((sim + 1) * 0.5)
+            // Low similarity = light gray; high similarity = warm.
+            let baseGray = UIColor.systemGray5
+            let warm = UIColor.systemOrange
+
+            let alpha: CGFloat = isSelected ? 0.28 : (0.04 + 0.18 * t)
+            return blend(base: baseGray, top: warm, t: t).withAlphaComponent(alpha)
+        }
+
+        for i in 0..<sentenceRanges.count {
+            let r = sentenceRanges[i]
+            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= mutable.length else { continue }
+            let color = heatColor(sim: sims[i], isSelected: i == selectedIndex)
+            mutable.addAttribute(.backgroundColor, value: color, range: r)
+        }
+
+        return mutable
+    }
+
+    private func blend(base: UIColor, top: UIColor, t: CGFloat) -> UIColor {
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        var tr: CGFloat = 0, tg: CGFloat = 0, tb: CGFloat = 0, ta: CGFloat = 0
+        base.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+        top.getRed(&tr, green: &tg, blue: &tb, alpha: &ta)
+        let u = max(0, min(1, t))
+        return UIColor(
+            red: br + (tr - br) * u,
+            green: bg + (tg - bg) * u,
+            blue: bb + (tb - bb) * u,
+            alpha: 1
+        )
+    }
+
+    struct LiveSemanticFeedback: Equatable {
+        let previousSimilarity: Float?
+        let paragraphSimilarity: Float?
+        let displaySentenceIndex: Int
+    }
+
+    private func scheduleLiveSemanticFeedbackIfNeeded() {
+        guard isEditing else { return }
+        guard incrementalLookupEnabled == false else {
+            liveSemanticFeedback = nil
+            return
+        }
+
+        liveSemanticFeedbackTask?.cancel()
+
+        let capturedText = inputText
+        let capturedCaretRange = editorSelectedRange
+        let capturedSentenceRanges = sentenceRanges
+        let capturedSentenceVectors = sentenceVectors
+
+        liveSemanticFeedbackTask = Task(priority: .utility) {
+            // Debounce: don't run on every keystroke.
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard Task.isCancelled == false else { return }
+
+            let nsText = capturedText as NSString
+            guard nsText.length > 0 else {
+                await MainActor.run { liveSemanticFeedback = nil }
+                return
+            }
+
+            guard let caret = capturedCaretRange else {
+                await MainActor.run { liveSemanticFeedback = nil }
+                return
+            }
+
+            let caretLoc = max(0, min(caret.location, max(0, nsText.length - 1)))
+
+            let ranges: [NSRange] = capturedSentenceRanges.isEmpty
+                ? SentenceRangeResolver.sentenceRanges(in: nsText)
+                : capturedSentenceRanges
+
+            guard ranges.isEmpty == false else {
+                await MainActor.run { liveSemanticFeedback = nil }
+                return
+            }
+
+            guard let sentenceIndex = ranges.firstIndex(where: { NSLocationInRange(caretLoc, $0) }) else {
+                await MainActor.run { liveSemanticFeedback = nil }
+                return
+            }
+
+            guard capturedSentenceVectors.count == ranges.count else {
+                // Embeddings not ready for this text yet.
+                await MainActor.run { liveSemanticFeedback = nil }
+                return
+            }
+
+            guard let current = capturedSentenceVectors[sentenceIndex] else {
+                await MainActor.run { liveSemanticFeedback = nil }
+                return
+            }
+
+            let prevSim: Float? = {
+                guard sentenceIndex > 0 else { return nil }
+                guard let prev = capturedSentenceVectors[sentenceIndex - 1] else { return nil }
+                return EmbeddingMath.cosineSimilarity(a: current, b: prev)
+            }()
+
+            let paragraph = paragraphRange(containingUTF16: caretLoc, in: nsText)
+            let paraIndices = ranges.indices.filter { NSIntersectionRange(ranges[$0], paragraph).length > 0 }
+
+            let paraSim: Float? = {
+                // Exclude current sentence when possible.
+                let withoutCurrent = paraIndices.filter { $0 != sentenceIndex }
+                let source = withoutCurrent.isEmpty ? paraIndices : withoutCurrent
+                guard source.count > 0 else { return nil }
+
+                var acc: [Float]? = nil
+                var count: Float = 0
+                for idx in source {
+                    guard let v = capturedSentenceVectors[idx] else { continue }
+                    if acc == nil { acc = Array(repeating: 0, count: v.count) }
+                    guard var a = acc else { continue }
+                    for j in 0..<v.count { a[j] += v[j] }
+                    acc = a
+                    count += 1
+                }
+                guard let acc, count > 0 else { return nil }
+                let mean = acc.map { $0 / count }
+                var sum: Float = 0
+                for x in mean { sum += x * x }
+                let norm = sum.squareRoot()
+                guard norm > 0 else { return nil }
+                let centroid = mean.map { $0 / norm }
+                return EmbeddingMath.cosineSimilarity(a: current, b: centroid)
+            }()
+
+            if prevSim == nil && paraSim == nil {
+                await MainActor.run { liveSemanticFeedback = nil }
+                return
+            }
+
+            let feedback = LiveSemanticFeedback(
+                previousSimilarity: prevSim,
+                paragraphSimilarity: paraSim,
+                displaySentenceIndex: sentenceIndex
+            )
+
+            await MainActor.run {
+                guard isEditing else { return }
+                liveSemanticFeedback = feedback
+            }
+        }
+    }
+
+    private func paragraphRange(containingUTF16 loc: Int, in text: NSString) -> NSRange {
+        let n = text.length
+        guard n > 0 else { return NSRange(location: 0, length: 0) }
+        let clamped = max(0, min(loc, n - 1))
+
+        func isLineBreak(_ ch: unichar) -> Bool {
+            ch == 0x000A || ch == 0x000D
+        }
+
+        // Paragraph boundaries are blank lines (two consecutive line breaks).
+        var start = 0
+        var i = clamped
+        while i > 0 {
+            let c0 = text.character(at: i)
+            let c1 = text.character(at: i - 1)
+            if isLineBreak(c0) && isLineBreak(c1) {
+                start = i + 1
+                break
+            }
+            i -= 1
+        }
+
+        var end = n
+        i = clamped
+        while i < n - 1 {
+            let c0 = text.character(at: i)
+            let c1 = text.character(at: i + 1)
+            if isLineBreak(c0) && isLineBreak(c1) {
+                end = i
+                break
+            }
+            i += 1
+        }
+
+        if end < start { return NSRange(location: 0, length: n) }
+        return NSRange(location: start, length: end - start)
     }
 
     @MainActor
@@ -2979,7 +3550,11 @@ extension PasteView {
 
         let start = tappedRange.location
         incrementalLookupTask = Task {
-            let candidates = buildIncrementalCandidates(from: start, nsText: nsText)
+            // Token-aligned candidate expansion (no character-by-character growth).
+            let tokens: [TextSpan] = await MainActor.run {
+                furiganaSpans?.map(\.span) ?? []
+            }
+            let candidates = SelectionSpanResolver.candidates(selectedRange: tappedRange, tokenSpans: tokens, text: nsText)
             var hits: [IncrementalLookupHit] = []
             hits.reserveCapacity(16)
             var seen: Set<String> = []
@@ -2992,11 +3567,10 @@ extension PasteView {
                 for semantic in furiganaSemanticSpans {
                     // Only consider spans that begin at the tapped offset.
                     guard semantic.range.location == start else { continue }
-                    let surface = semantic.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let surface = semantic.surface
                     guard surface.isEmpty == false else { continue }
                     let lemmas = aggregatedAnnotatedSpan(for: semantic)
                         .lemmaCandidates
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                         .filter { $0.isEmpty == false }
                     if lemmas.isEmpty == false {
                         out[surface] = lemmas
@@ -3007,10 +3581,9 @@ extension PasteView {
 
             func appendRows(_ rows: [DictionaryEntry], matchedSurface: String) async {
                 // This Task is not main-actor isolated; only touch MainActor-isolated properties via MainActor.run.
-                let folded = matchedSurface.applyingTransform(.hiraganaToKatakana, reverse: true) ?? matchedSurface
                 for row in rows {
                     let rowID = await MainActor.run { row.id }
-                    let key = "\(folded)#\(rowID)"
+                    let key = "\(matchedSurface)#\(rowID)"
                     if seen.contains(key) { continue }
                     seen.insert(key)
                     hits.append(IncrementalLookupHit(matchedSurface: matchedSurface, entry: row))
@@ -3019,21 +3592,67 @@ extension PasteView {
 
             for cand in candidates {
                 guard Task.isCancelled == false else { return }
-                let trimmed = cand.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard trimmed.isEmpty == false else { continue }
 
-                if let rows = try? await DictionarySQLiteStore.shared.lookup(term: trimmed, limit: 50), rows.isEmpty == false {
-                    await appendRows(rows, matchedSurface: trimmed)
+                // Reduplication is structural, not semantic:
+                // If the candidate covers exactly two adjacent identical tokens (after normalization),
+                // prefer looking up the single token and do not treat the combined surface as a unit.
+                if let startIdx = tokens.firstIndex(where: { $0.range.location == cand.range.location }), (startIdx + 1) < tokens.count {
+                    let a = tokens[startIdx]
+                    let b = tokens[startIdx + 1]
+                    if NSMaxRange(b.range) == NSMaxRange(cand.range), NSMaxRange(a.range) == b.range.location {
+                    let k0 = DictionaryKeyPolicy.lookupKey(for: a.surface)
+                    let k1 = DictionaryKeyPolicy.lookupKey(for: b.surface)
+                    if k0.isEmpty == false, k0 == k1 {
+                        // Only apply if X exists and XX does not.
+                        if let singleRows = try? await DictionarySQLiteStore.shared.lookup(term: k0, limit: 50), singleRows.isEmpty == false {
+                            if let combinedRows = try? await DictionarySQLiteStore.shared.lookup(term: cand.lookupKey, limit: 1), combinedRows.isEmpty {
+                                if ProcessInfo.processInfo.environment["REDUP_TRACE"] == "1" {
+                                    CustomLogger.shared.info("Incremental lookup reduplication: using single token lookup for «\(a.surface)» «\(b.surface)»")
+                                }
+                                await appendRows(singleRows, matchedSurface: a.surface)
+                                await appendRows(singleRows, matchedSurface: b.surface)
+                                continue
+                            }
+                        }
+                    }
+                    }
+                }
+
+                if let rows = try? await DictionarySQLiteStore.shared.lookup(term: cand.lookupKey, limit: 50), rows.isEmpty == false {
+                    await appendRows(rows, matchedSurface: cand.displayKey)
                     continue
+                }
+
+                // Deinflection hard stop: on surface miss, try deinflected lemma candidates.
+                if let deinflector = try? await MainActor.run(resultType: Deinflector.self, body: {
+                    try Deinflector.loadBundled(named: "deinflect")
+                }) {
+                    let deinflected = await MainActor.run { deinflector.deinflect(cand.displayKey, maxDepth: 8, maxResults: 32) }
+                    for d in deinflected {
+                        guard Task.isCancelled == false else { return }
+                        if d.trace.isEmpty { continue }
+                        let keys = DictionaryKeyPolicy.keys(forDisplayKey: d.baseForm)
+                        guard keys.lookupKey.isEmpty == false else { continue }
+                        if let rows = try? await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 50), rows.isEmpty == false {
+                            if ProcessInfo.processInfo.environment["DEINFLECT_HARDSTOP_TRACE"] == "1" {
+                                let trace = d.trace.map { "\($0.reason):\($0.rule.kanaIn)->\($0.rule.kanaOut)" }.joined(separator: ",")
+                                CustomLogger.shared.info("Incremental lookup deinflection hard-stop: «\(cand.displayKey)» -> «\(keys.displayKey)» trace=[\(trace)]")
+                            }
+                            await appendRows(rows, matchedSurface: cand.displayKey)
+                            break
+                        }
+                    }
                 }
 
                 // Lemmatization fallback: if this candidate corresponds to a Stage-2 token surface,
                 // try its lemma candidates (base forms) against the dictionary.
-                if let lemmas = lemmaCandidatesBySurface[trimmed], lemmas.isEmpty == false {
+                if let lemmas = lemmaCandidatesBySurface[cand.displayKey], lemmas.isEmpty == false {
                     for lemma in lemmas {
                         guard Task.isCancelled == false else { return }
-                        if let rows = try? await DictionarySQLiteStore.shared.lookup(term: lemma, limit: 50), rows.isEmpty == false {
-                            await appendRows(rows, matchedSurface: trimmed)
+                        let keys = DictionaryKeyPolicy.keys(forDisplayKey: lemma)
+                        guard keys.lookupKey.isEmpty == false else { continue }
+                        if let rows = try? await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 50), rows.isEmpty == false {
+                            await appendRows(rows, matchedSurface: cand.displayKey)
                         }
                     }
                 }
@@ -3048,28 +3667,6 @@ extension PasteView {
                 }
             }
         }
-    }
-
-    private func buildIncrementalCandidates(from start: Int, nsText: NSString) -> [String] {
-        guard start >= 0, start < nsText.length else { return [] }
-        var out: [String] = []
-        out.reserveCapacity(24)
-
-        var cursor = start
-        // First character already confirmed non-newline.
-        let first = nsText.rangeOfComposedCharacterSequence(at: cursor)
-        cursor = NSMaxRange(first)
-        out.append(nsText.substring(with: NSRange(location: start, length: cursor - start)))
-
-        while cursor < nsText.length {
-            let next = nsText.rangeOfComposedCharacterSequence(at: cursor)
-            let ch = nsText.substring(with: next)
-            if ch == "\n" || ch == "\r" { break }
-            cursor = NSMaxRange(next)
-            out.append(nsText.substring(with: NSRange(location: start, length: cursor - start)))
-        }
-
-        return out
     }
 
     fileprivate func recomputeSavedWordOverlays() {

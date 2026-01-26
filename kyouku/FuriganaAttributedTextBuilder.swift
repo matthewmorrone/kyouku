@@ -61,13 +61,184 @@ enum FuriganaAttributedTextBuilder {
         let nsText = text as NSString
         let adjustedSpans = normalizeCoverage(spans: segmented, text: nsText)
 
+        // Optional embedding-based boundary refinement stage.
+        // This never rewrites strings; it selects a best-cover over token-aligned spans
+        // derived by slicing the original text.
+        var spansForAttachment = adjustedSpans
+        var boundariesAuthoritative = (baseSpans != nil)
+        if baseSpans == nil {
+            let session = EmbeddingSession()
+            if session.isFeatureEnabled(.tokenBoundaryResolution) {
+                let traceEnabled: Bool = {
+                    ProcessInfo.processInfo.environment["EMBED_BOUNDARY_TRACE"] == "1"
+                }()
+
+                if traceEnabled {
+                    let status = EmbeddingFeatureGates.shared.metadataStatus()
+                    let reason = status.reason ?? "nil"
+                    CustomLogger.shared.info(
+                        "Embedding boundary refinement enabled. metadataOK=\(status.enabled) reason=\(reason)"
+                    )
+                }
+
+                let scorer = EmbeddingBoundaryScorer()
+                // Dictionary-aware eligibility consults the already-loaded in-memory JMdict trie.
+                // IMPORTANT: this must not trigger SQLite bootstrap work.
+                let trie: LexiconTrie?
+                if let t = await SegmentationService.shared.cachedTrieIfAvailable() {
+                    trie = t
+                } else {
+                    trie = await LexiconProvider.shared.cachedTrieIfAvailable()
+                }
+
+                // Always run refinement off the main thread; Swift 6 forbids `Thread.isMainThread`
+                // checks in async contexts, and this stage is CPU-bound.
+                // Control-flow invariant:
+                // surface lookup → deinflection lookup → STOP if hit → only then consider refinement.
+                //
+                // We enforce this structurally by:
+                // 1) Pre-merging verb phrases (boundary-frozen; no semantic scoring)
+                // 2) Applying reduplication hard cuts (structural, not semantic)
+                // 3) Pre-merging dictionary/deinflection-lockable spans (hard stop)
+                // 4) Running embedding refinement ONLY if allowed and ambiguity exists.
+
+                var workingSpans = adjustedSpans
+                var combinedHardCuts = tokenBoundaries
+
+                // (2) Verb-headed spans: boundary-frozen.
+                let gated = MorphologicalIntegrityGate.apply(text: nsText, spans: workingSpans, hardCuts: combinedHardCuts, trie: trie)
+                workingSpans = gated.spans
+
+                // (3) Reduplication is structural.
+                if let trie {
+                    let redup = ReduplicationGate.apply(text: nsText, spans: workingSpans, hardCuts: combinedHardCuts, trie: trie)
+                    if redup.addedHardCuts.isEmpty == false {
+                        combinedHardCuts.append(contentsOf: redup.addedHardCuts)
+                    }
+                }
+
+                // (1) Deinflection is a HARD STOP.
+                var deinflectionLocks = 0
+                if let trie {
+                    if let deinflector = try? await MainActor.run(resultType: Deinflector.self, body: {
+                        try Deinflector.loadBundled(named: "deinflect")
+                    }) {
+                        let merged = DeinflectionHardStopMerger.apply(text: nsText, spans: workingSpans, hardCuts: combinedHardCuts, trie: trie, deinflector: deinflector)
+                        workingSpans = merged.spans
+                        deinflectionLocks = merged.deinflectionLocks
+                        if merged.addedHardCuts.isEmpty == false {
+                            combinedHardCuts.append(contentsOf: merged.addedHardCuts)
+                        }
+                    }
+                }
+
+                // Boundary refinement is CONDITIONAL.
+                // We skip refinement if any verb-phrase gating occurred OR any deinflection lock occurred.
+                let shouldSkipDueToVerbPhrase = (gated.merges > 0)
+                if shouldSkipDueToVerbPhrase && traceEnabled {
+                    CustomLogger.shared.info("Boundary refinement skipped: verb-headed span(s) boundary-frozen merges=\(gated.merges)")
+                }
+                if deinflectionLocks > 0 && traceEnabled {
+                    CustomLogger.shared.info("Boundary refinement skipped: deinflection hard-stop locks=\(deinflectionLocks)")
+                }
+
+                func hasAmbiguousDictionaryCandidates(spans: [TextSpan], hardCuts: [Int], trie: LexiconTrie) -> Bool {
+                    guard spans.count >= 2 else { return false }
+                    let cutSet = Set(hardCuts)
+
+                    func isContiguous(_ a: TextSpan, _ b: TextSpan) -> Bool {
+                        NSMaxRange(a.range) == b.range.location
+                    }
+
+                    func crossesHardCut(endOfTokenAt leftIndex: Int) -> Bool {
+                        let cutPos = NSMaxRange(spans[leftIndex].range)
+                        return cutSet.contains(cutPos)
+                    }
+
+                    func isHardStopToken(surface: String) -> Bool {
+                        if surface.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) }) { return true }
+                        if surface.unicodeScalars.contains(where: { CharacterSet.punctuationCharacters.contains($0) || CharacterSet.symbols.contains($0) }) { return true }
+                        return false
+                    }
+
+                    // Any start index with 2+ dictionary-valid multi-token options implies ambiguity.
+                    let maxTokens = 4
+                    for i in 0..<spans.count {
+                        let tokenSurface = spans[i].surface
+                        if isHardStopToken(surface: tokenSurface) { continue }
+
+                        var validMultiTokenCount = 0
+                        var union = spans[i].range
+                        var j = i
+                        while (j + 1) < spans.count && (j - i + 1) < maxTokens {
+                            guard isContiguous(spans[j], spans[j + 1]) else { break }
+                            guard crossesHardCut(endOfTokenAt: j) == false else { break }
+
+                            let nextSurface = spans[j + 1].surface
+                            if isHardStopToken(surface: nextSurface) { break }
+
+                            j += 1
+                            union = NSUnionRange(union, spans[j].range)
+                            let surface = nsText.substring(with: union)
+                            if trie.containsWord(surface, requireKanji: false) {
+                                validMultiTokenCount += 1
+                                if validMultiTokenCount >= 2 { return true }
+                            }
+                        }
+                    }
+                    return false
+                }
+
+                let shouldRunRefinement: Bool
+                if let trie {
+                    shouldRunRefinement = (shouldSkipDueToVerbPhrase == false) && (deinflectionLocks == 0) && hasAmbiguousDictionaryCandidates(spans: workingSpans, hardCuts: combinedHardCuts, trie: trie)
+                } else {
+                    shouldRunRefinement = false
+                }
+
+                if shouldRunRefinement == false, traceEnabled, shouldSkipDueToVerbPhrase == false, deinflectionLocks == 0 {
+                    CustomLogger.shared.info("Boundary refinement skipped: no ambiguity or no trie")
+                }
+
+                if shouldRunRefinement {
+                    let snapshot = workingSpans
+                    let access = session.access
+                    let textString = text
+                    let hardCutsSnapshot = combinedHardCuts
+                    let trieSnapshot = trie
+                    spansForAttachment = await withCheckedContinuation { continuation in
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let localText = textString as NSString
+                            let refined = scorer.refine(text: localText, spans: snapshot, hardCuts: hardCutsSnapshot, access: access, trie: trieSnapshot)
+                            continuation.resume(returning: refined)
+                        }
+                    }
+                } else {
+                    spansForAttachment = workingSpans
+                }
+
+                boundariesAuthoritative = true
+            } else {
+                let traceEnabled: Bool = {
+                    ProcessInfo.processInfo.environment["EMBED_BOUNDARY_TRACE"] == "1"
+                }()
+                if traceEnabled {
+                    let status = EmbeddingFeatureGates.shared.metadataStatus()
+                    let reason = status.reason ?? "nil"
+                    CustomLogger.shared.info(
+                        "Embedding boundary refinement disabled. metadataOK=\(status.enabled) reason=\(reason)"
+                    )
+                }
+            }
+        }
+
         _ = elapsedMilliseconds(since: segmentationStart)
 
         let attachmentStart = CFAbsoluteTimeGetCurrent()
         let stage2 = await SpanReadingAttacher().attachReadings(
             text: text,
-            spans: adjustedSpans,
-            treatSpanBoundariesAsAuthoritative: (baseSpans != nil),
+            spans: spansForAttachment,
+            treatSpanBoundariesAsAuthoritative: boundariesAuthoritative,
             hardCuts: tokenBoundaries
         )
 
@@ -606,13 +777,21 @@ private extension FuriganaAttributedTextBuilder {
 
         if glyphRanges.count >= 2 {
             // Distribute padding across inter-glyph gaps.
+            // IMPORTANT: `.kern` affects spacing BETWEEN characters. Applying `.kern` to a
+            // single-character range is typically ineffective, so we apply one kern value
+            // across the full headword *excluding the final glyph*.
             let perGap = totalPad / CGFloat(max(1, glyphRanges.count - 1))
-            for r in glyphRanges.dropLast() {
-                adjustments.append(HeadwordSpacingAdjustment(range: r, kern: perGap))
+            if let first = glyphRanges.first, let last = glyphRanges.last {
+                let kernRangeLength = max(0, last.location - first.location)
+                if kernRangeLength > 0 {
+                    let kernRange = NSRange(location: first.location, length: kernRangeLength)
+                    adjustments.append(HeadwordSpacingAdjustment(range: kernRange, kern: perGap))
+                }
             }
         } else if let only = glyphRanges.first {
-            // Single glyph (common for lone kanji): fall back to trailing kern on the glyph.
-            adjustments.append(HeadwordSpacingAdjustment(range: only, kern: totalPad))
+            // Single glyph (common for lone kanji): TextKit kerning cannot widen a single glyph
+            // without affecting adjacent characters. Leave this unadjusted in TextKit mode.
+            _ = only
         }
 
         return adjustments

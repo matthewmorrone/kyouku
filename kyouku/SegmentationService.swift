@@ -40,6 +40,17 @@ actor SegmentationService {
 
     private var trieCache: LexiconTrie?
     private var trieInitTask: Task<LexiconTrie, Error>?
+    private var sokuonTerminalAllowedFormsCache: Set<String>?
+    private var sokuonInitTask: Task<Set<String>, Error>?
+
+    /// Returns the already-loaded in-memory trie if available.
+    ///
+    /// This must not trigger bootstrap work or touch SQLite; it is safe to call
+    /// from performance-sensitive downstream stages that only want an optional
+    /// dictionary surface existence check.
+    func cachedTrieIfAvailable() -> LexiconTrie? {
+        trieCache
+    }
 
     func segment(text: String) async throws -> [TextSpan] {
         guard text.isEmpty == false else { return [] }
@@ -52,12 +63,13 @@ actor SegmentationService {
 
         let trieInterval = signposter.beginInterval("TrieLoad")
         let trie = try await getTrie()
+        let sokuonAllowed = try await getSokuonTerminalAllowedForms()
         signposter.endInterval("TrieLoad", trieInterval)
 
         let nsText = text as NSString
 
         let rangesInterval = signposter.beginInterval("SegmentRanges")
-        let ranges = await segmentRanges(using: trie, text: nsText)
+        let ranges = await segmentRanges(using: trie, sokuonTerminalAllowedForms: sokuonAllowed, text: nsText)
         signposter.endInterval("SegmentRanges", rangesInterval)
 
         let mapInterval = signposter.beginInterval("MapRangesToSpans")
@@ -299,7 +311,22 @@ actor SegmentationService {
         return t
     }
 
-    private func segmentRanges(using trie: LexiconTrie, text: NSString) async -> [SegmentedRange] {
+    private func getSokuonTerminalAllowedForms() async throws -> Set<String> {
+        if let cached = sokuonTerminalAllowedFormsCache {
+            return cached
+        }
+        if let task = sokuonInitTask {
+            return try await task.value
+        }
+        let task = Task { try await LexiconProvider.shared.sokuonTerminalAllowedForms() }
+        sokuonInitTask = task
+        let value = try await task.value
+        sokuonTerminalAllowedFormsCache = value
+        sokuonInitTask = nil
+        return value
+    }
+
+    private func segmentRanges(using trie: LexiconTrie, sokuonTerminalAllowedForms: Set<String>, text: NSString) async -> [SegmentedRange] {
         let length = text.length
         guard length > 0 else { return [] }
 
@@ -400,6 +427,11 @@ actor SegmentationService {
 
         _ = await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: length, text: text, trie: trie, into: &ranges)
 
+        // Hard linguistic constraint:
+        // A normal lexical segment must not end on small っ/ッ (sokuon).
+        // Bind sokuon to the right by removing boundaries immediately after it.
+        ranges = enforceSokuonBinding(ranges: ranges, text: text, allowedTerminalForms: sokuonTerminalAllowedForms)
+
         let totalDuration = CFAbsoluteTimeGetCurrent() - profilingStart
         await MainActor.run {
             trie.endProfiling(totalDuration: totalDuration)
@@ -411,6 +443,134 @@ actor SegmentationService {
 #endif
 
         return ranges
+    }
+
+    private func enforceSokuonBinding(
+        ranges: [SegmentedRange],
+        text: NSString,
+        allowedTerminalForms: Set<String>
+    ) -> [SegmentedRange] {
+        guard ranges.count >= 2 else { return ranges }
+        let length = text.length
+
+        func startsWithSokuon(_ r: NSRange) -> Bool {
+            guard r.location != NSNotFound, r.length > 0, r.location < length else { return false }
+            let unit = text.character(at: r.location)
+            return unit == Self.smallTsuHiragana || unit == Self.smallTsuKatakana
+        }
+
+        func endsWithSokuon(_ r: NSRange) -> Bool {
+            let end = NSMaxRange(r)
+            guard end > r.location, end <= length else { return false }
+            let unit = text.character(at: end - 1)
+            return unit == Self.smallTsuHiragana || unit == Self.smallTsuKatakana
+        }
+
+        func isBoundaryScalar(_ scalar: UnicodeScalar) -> Bool {
+            Self.isWhitespaceOrNewline(scalar) || Self.isPunctuation(scalar)
+        }
+
+        func isAllowedTerminalForm(_ r: NSRange) -> Bool {
+            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= length else { return false }
+            let surface = text.substring(with: r).precomposedStringWithCanonicalMapping
+            return allowedTerminalForms.contains(surface)
+        }
+
+        func shouldMerge(left: SegmentedRange, right: SegmentedRange) -> Bool {
+            let leftEnd = NSMaxRange(left.range)
+            guard leftEnd > left.range.location else { return false }
+            guard endsWithSokuon(left.range) else { return false }
+            // If the sokuon-ending surface is explicitly allowlisted (interjection/onomatopoeia), keep the boundary.
+            if isAllowedTerminalForm(left.range) { return false }
+            // End-of-text is end-of-line: allowed.
+            if leftEnd >= length { return false }
+            // If the next char is a boundary (whitespace/newline/punctuation), allow terminal sokuon.
+            let nextUnit = text.character(at: leftEnd)
+            if let nextScalar = UnicodeScalar(nextUnit), isBoundaryScalar(nextScalar) {
+                return false
+            }
+            // Otherwise, bind to the right.
+            return true
+        }
+
+        // Pass 1: bind leading sokuon to the left when it would otherwise start a token.
+        // Example: "も" + "っ" + "と" should become "もっ" + "と" so the right-binding
+        // pass can then produce "もっと".
+        func bindLeadingSokuonToLeft(_ input: [SegmentedRange]) -> [SegmentedRange] {
+            guard input.count >= 2 else { return input }
+            var out: [SegmentedRange] = []
+            out.reserveCapacity(input.count)
+
+            for current in input {
+                guard startsWithSokuon(current.range), out.isEmpty == false else {
+                    out.append(current)
+                    continue
+                }
+
+                let prev = out[out.count - 1]
+                let prevEnd = NSMaxRange(prev.range)
+
+                // Never expand boundary singletons (kanji / whitespace / punctuation).
+                if prev.range.location != NSNotFound, prev.range.length > 0, prev.range.location < length {
+                    let prevFirstUnit = text.character(at: prev.range.location)
+                    if let prevFirstScalar = UnicodeScalar(prevFirstUnit) {
+                        if Self.isKanji(prevFirstUnit) || Self.isWhitespaceOrNewline(prevFirstScalar) || Self.isPunctuation(prevFirstScalar) {
+                            out.append(current)
+                            continue
+                        }
+                    }
+                }
+
+                // Don't bind across boundaries.
+                if prevEnd <= prev.range.location || prevEnd > length {
+                    out.append(current)
+                    continue
+                }
+                if prevEnd >= length {
+                    out.append(current)
+                    continue
+                }
+                let prevLastUnit = text.character(at: prevEnd - 1)
+                if let prevLastScalar = UnicodeScalar(prevLastUnit), isBoundaryScalar(prevLastScalar) {
+                    out.append(current)
+                    continue
+                }
+
+                // Merge the leading sokuon segment into the previous segment.
+                let merged = SegmentedRange(
+                    range: NSRange(location: prev.range.location, length: prev.range.length + current.range.length),
+                    isLexiconMatch: false
+                )
+                out[out.count - 1] = merged
+            }
+
+            return out
+        }
+
+        let leftBound = bindLeadingSokuonToLeft(ranges)
+
+        var out: [SegmentedRange] = []
+        out.reserveCapacity(leftBound.count)
+
+        var i = 0
+        while i < leftBound.count {
+            var current = leftBound[i]
+            i += 1
+
+            while i < leftBound.count, shouldMerge(left: current, right: leftBound[i]) {
+                let next = leftBound[i]
+                i += 1
+                let merged = SegmentedRange(
+                    range: NSRange(location: current.range.location, length: current.range.length + next.range.length),
+                    isLexiconMatch: false
+                )
+                current = merged
+            }
+
+            out.append(current)
+        }
+
+        return out
     }
 
 #if DEBUG
@@ -473,6 +633,8 @@ actor SegmentationService {
         // C) Non-lexicon ranges must be “boring” script grouping:
         //    - kanji, whitespace, punctuation => singletons
         //    - otherwise => maximal same-script runs
+        // Exception (hard constraint): we may merge across a script boundary only when
+        // the boundary would have ended immediately after small っ/ッ.
         for (i, seg) in ranges.enumerated() where seg.isLexiconMatch == false {
             let r = seg.range
             guard r.length > 0 else { continue }
@@ -493,15 +655,37 @@ actor SegmentationService {
                 continue
             }
 
-            // Same-script run
+            // Same-script run (or sokuon-bridged mixed-script run).
             let kind = Self.scriptKind(for: firstScalar)
             if r.length > 1 {
+                var prevKind: ScriptKind? = kind
+                var prevUnit: unichar = firstUnit
+
                 for j in start..<end {
                     let unit = text.character(at: j)
-                    guard let scalar = UnicodeScalar(unit) else { continue }
-                    assert(Self.isKanji(unit) == false, "Stage1 invariant failed: non-lexicon run contains kanji (\(start)..\(end))")
+                    guard let scalar = UnicodeScalar(unit) else {
+                        prevUnit = unit
+                        continue
+                    }
                     assert(Self.isWhitespaceOrNewline(scalar) == false && Self.isPunctuation(scalar) == false, "Stage1 invariant failed: non-lexicon run contains boundary chars (\(start)..\(end))")
-                    assert(Self.scriptKind(for: scalar) == kind, "Stage1 invariant failed: non-lexicon run crosses script kinds (\(start)..\(end))")
+
+                    // Kanji is normally a singleton; allow it only when bridged by sokuon.
+                    if Self.isKanji(unit) {
+                        if j > start {
+                            assert(prevUnit == Self.smallTsuHiragana || prevUnit == Self.smallTsuKatakana, "Stage1 invariant failed: non-lexicon run contains kanji without sokuon bridge")
+                        }
+                        prevUnit = unit
+                        prevKind = nil
+                        continue
+                    }
+
+                    let currentKind = Self.scriptKind(for: scalar)
+                    if let prevKind, currentKind != prevKind {
+                        // Script change must be immediately after small っ/ッ.
+                        assert(prevUnit == Self.smallTsuHiragana || prevUnit == Self.smallTsuKatakana, "Stage1 invariant failed: non-lexicon run crosses script kinds without sokuon bridge")
+                    }
+                    prevKind = currentKind
+                    prevUnit = unit
                 }
             }
 
@@ -539,6 +723,9 @@ actor SegmentationService {
         }
     }
 #endif
+
+    private static let smallTsuHiragana: unichar = 0x3063 // っ
+    private static let smallTsuKatakana: unichar = 0x30C3 // ッ
 
     private static func isKanji(_ unit: unichar) -> Bool {
         (0x4E00...0x9FFF).contains(Int(unit))

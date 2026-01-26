@@ -21,9 +21,11 @@ struct TokenActionPanel: View {
     let isSelectionCustomized: Bool
     let enableDragToDismiss: Bool
     let embedInMaterialBackground: Bool
+    let panelContainerHeight: CGFloat?
     let focusSplitMenu: Bool
     let onSplitFocusConsumed: () -> Void
     @State private var highlightedResultIndex = 0
+    @State private var highlightedReadingIndex = 0
     @GestureState private var dragOffset: CGFloat = 0
     @State private var isSplitMenuVisible = false
     @State private var leftBucketCount = 0
@@ -53,6 +55,7 @@ struct TokenActionPanel: View {
         isSelectionCustomized: Bool,
         enableDragToDismiss: Bool,
         embedInMaterialBackground: Bool,
+        containerHeight: CGFloat? = nil,
         focusSplitMenu: Bool = false,
         onSplitFocusConsumed: @escaping () -> Void = {}
     ) {
@@ -74,6 +77,7 @@ struct TokenActionPanel: View {
         self.isSelectionCustomized = isSelectionCustomized
         self.enableDragToDismiss = enableDragToDismiss
         self.embedInMaterialBackground = embedInMaterialBackground
+        self.panelContainerHeight = containerHeight
         self.focusSplitMenu = focusSplitMenu
         self.onSplitFocusConsumed = onSplitFocusConsumed
     }
@@ -81,7 +85,8 @@ struct TokenActionPanel: View {
     @ViewBuilder
     var body: some View {
         if enableDragToDismiss {
-            panelContent.highPriorityGesture(dismissGesture)
+            panelContent
+                .simultaneousGesture(dismissGesture)
         } else {
             panelContent
         }
@@ -276,6 +281,8 @@ struct TokenActionPanel: View {
     private func resetHighlightedResult() {
         if let preferred = preferredResultIndex() {
             highlightedResultIndex = preferred
+        } else if let preferredLemma = lemmaPreferredResultIndex() {
+            highlightedResultIndex = preferredLemma
         } else {
             highlightedResultIndex = 0
         }
@@ -289,6 +296,19 @@ struct TokenActionPanel: View {
         }
     }
 
+    private func lemmaPreferredResultIndex() -> Int? {
+        let lemmas = selection.annotatedSpan.lemmaCandidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+        guard lemmas.isEmpty == false else { return nil }
+
+        return lookup.results.firstIndex { entry in
+            let kanji = entry.kanji.trimmingCharacters(in: .whitespacesAndNewlines)
+            let kana = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return lemmas.contains(kanji) || (kana.isEmpty == false && lemmas.contains(kana))
+        }
+    }
+
     @ViewBuilder
     private var dictionaryScrollContainer: some View {
         let measuredResults = LookupResultsView(
@@ -296,6 +316,7 @@ struct TokenActionPanel: View {
             selection: selection,
             preferredReading: preferredReading,
             highlightedResultIndex: $highlightedResultIndex,
+            highlightedReadingIndex: $highlightedReadingIndex,
             onApplyReading: onApplyReading,
             onApplyCustomReading: onApplyCustomReading,
             onSaveWord: onSaveWord,
@@ -347,7 +368,10 @@ struct TokenActionPanel: View {
     }
 
     private var panelHeightLimit: CGFloat {
-        min(currentScreenHeight() * 0.7, 560)
+        let provided = panelContainerHeight ?? 0
+        let basis = provided > 0.5 ? provided : currentScreenHeight()
+        // Keep the panel compact so the paste area remains usable.
+        return min(basis * 0.55, 460)
     }
 
     private func currentScreenHeight() -> CGFloat {
@@ -368,12 +392,29 @@ struct TokenActionPanel: View {
     private var dismissGesture: some Gesture {
         DragGesture(minimumDistance: 10)
             .updating($dragOffset) { value, state, _ in
-                state = max(0, value.translation.height)
+                let height = value.translation.height
+                let width = value.translation.width
+                guard height > 0 else {
+                    state = 0
+                    return
+                }
+                guard abs(height) > abs(width) else {
+                    state = 0
+                    return
+                }
+                state = height
             }
             .onEnded { value in
-                let translation = value.translation.height
-                let predicted = value.predictedEndTranslation.height
-                guard translation > dismissTranslationThreshold || predicted > dismissTranslationThreshold else { return }
+                let translationH = value.translation.height
+                let translationW = value.translation.width
+                let predictedH = value.predictedEndTranslation.height
+                let predictedW = value.predictedEndTranslation.width
+
+                guard translationH > 0 else { return }
+                guard abs(translationH) > abs(translationW) else { return }
+                guard translationH > dismissTranslationThreshold || (predictedH > dismissTranslationThreshold && abs(predictedH) > abs(predictedW)) else {
+                    return
+                }
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     onDismiss()
                 }
@@ -480,6 +521,7 @@ private struct LookupResultsView: View {
     let selection: TokenSelectionContext
     let preferredReading: String?
     @Binding var highlightedResultIndex: Int
+    @Binding var highlightedReadingIndex: Int
     let onApplyReading: (DictionaryEntry) -> Void
     let onApplyCustomReading: ((String) -> Void)?
     let onSaveWord: (DictionaryEntry) -> Void
@@ -493,6 +535,62 @@ private struct LookupResultsView: View {
 
     @State private var highlightedEntryDetail: DictionaryEntryDetail? = nil
     @State private var highlightedEntryDetailTask: Task<Void, Never>? = nil
+
+    private enum PagingMode {
+        case none
+        case results(current: Int, total: Int)
+        case readings(current: Int, total: Int)
+    }
+
+    private struct PagingState {
+        let entry: DictionaryEntry
+        let mode: PagingMode
+
+        var hasPaging: Bool {
+            switch mode {
+            case .none: return false
+            case .results, .readings: return true
+            }
+        }
+
+        var positionText: String {
+            switch mode {
+            case .none:
+                return ""
+            case .results(let current, let total):
+                return "\(current)/\(total)"
+            case .readings(let current, let total):
+                return "\(current)/\(total)"
+            }
+        }
+    }
+
+    private var pagingState: PagingState? {
+        guard let highlighted = highlightedEntry else { return nil }
+
+        let resultsCount = lookup.results.count
+        let resultPaging = resultsCount > 1
+        if resultPaging {
+            let current = min(max(0, highlighted.index), max(0, resultsCount - 1)) + 1
+            return PagingState(
+                entry: highlighted.entry,
+                mode: .results(current: current, total: resultsCount)
+            )
+        }
+
+        let variants = readingVariants(for: highlighted.entry, detail: matchingHighlightedEntryDetail)
+        guard variants.count > 1 else {
+            return PagingState(entry: highlighted.entry, mode: .none)
+        }
+
+        let safe = min(max(0, highlightedReadingIndex), max(0, variants.count - 1))
+        let activeKana = variants.indices.contains(safe) ? variants[safe] : highlighted.entry.kana
+        let effectiveEntry = entryWithKanaVariant(highlighted.entry, kana: activeKana)
+        return PagingState(
+            entry: effectiveEntry,
+            mode: .readings(current: safe + 1, total: variants.count)
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -518,51 +616,116 @@ private struct LookupResultsView: View {
                         .font(.subheadline)
                         .multilineTextAlignment(.leading)
                 }
-            } else if let highlighted = highlightedEntry {
-                let hasPaging = lookup.results.count > 1
-                let positionText = hasPaging ? "\(highlighted.index + 1)/\(lookup.results.count)" : ""
+            } else if let state = pagingState {
                 let slotWidth: CGFloat = 18
                 let slotVerticalPadding: CGFloat = 48
 
-                dictionaryCard(entry: highlighted.entry, positionText: positionText)
-                    // Always reserve left/right space so single-result cards match the
-                    // multi-result layout, but without drawing arrows.
-                    .padding(.horizontal, slotWidth)
-                    .highPriorityGesture(horizontalSwipeGesture)
-                    // IMPORTANT: use overlays so the large hit-target padding does NOT
-                    // inflate the measured panel size.
-                    .overlay(alignment: .leading) {
-                        if hasPaging {
-                            pagerChevronOverlay(
-                                systemImage: "chevron.left",
-                                isDisabled: highlighted.index == 0,
-                                verticalPadding: slotVerticalPadding,
-                                action: goToPreviousResult
-                            )
-                            .frame(width: slotWidth)
-                        }
+                let prevDisabled: Bool = {
+                    switch state.mode {
+                    case .none:
+                        return true
+                    case .results:
+                        return highlightedResultIndex <= 0
+                    case .readings:
+                        return highlightedReadingIndex <= 0
                     }
-                    .overlay(alignment: .trailing) {
-                        if hasPaging {
-                            pagerChevronOverlay(
-                                systemImage: "chevron.right",
-                                isDisabled: highlighted.index >= lookup.results.count - 1,
-                                verticalPadding: slotVerticalPadding,
-                                action: goToNextResult
-                            )
-                            .frame(width: slotWidth)
-                        }
+                }()
+
+                let nextDisabled: Bool = {
+                    switch state.mode {
+                    case .none:
+                        return true
+                    case .results(_, let total):
+                        return highlightedResultIndex >= max(0, total - 1)
+                    case .readings(_, let total):
+                        return highlightedReadingIndex >= max(0, total - 1)
                     }
+                }()
+
+                let prevLabel: String = {
+                    switch state.mode {
+                    case .readings: return "Previous reading"
+                    default: return "Previous result"
+                    }
+                }()
+
+                let nextLabel: String = {
+                    switch state.mode {
+                    case .readings: return "Next reading"
+                    default: return "Next result"
+                    }
+                }()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    dictionaryCard(entry: state.entry, positionText: state.positionText)
+                        // Always reserve left/right space so single-result cards match the
+                        // multi-result layout, but without drawing arrows.
+                        .padding(.horizontal, slotWidth)
+                        .simultaneousGesture(horizontalSwipeGesture)
+                        // IMPORTANT: use overlays so the large hit-target padding does NOT
+                        // inflate the measured panel size.
+                        .overlay(alignment: .leading) {
+                            if state.hasPaging {
+                                pagerChevronOverlay(
+                                    systemImage: "chevron.left",
+                                    isDisabled: prevDisabled,
+                                    verticalPadding: slotVerticalPadding,
+                                    accessibilityLabel: prevLabel,
+                                    action: {
+                                        switch state.mode {
+                                        case .results:
+                                            goToPreviousResult()
+                                        case .readings:
+                                            goToPreviousReading()
+                                        case .none:
+                                            break
+                                        }
+                                    }
+                                )
+                                .frame(width: slotWidth)
+                            }
+                        }
+                        .overlay(alignment: .trailing) {
+                            if state.hasPaging {
+                                pagerChevronOverlay(
+                                    systemImage: "chevron.right",
+                                    isDisabled: nextDisabled,
+                                    verticalPadding: slotVerticalPadding,
+                                    accessibilityLabel: nextLabel,
+                                    action: {
+                                        switch state.mode {
+                                        case .results:
+                                            goToNextResult()
+                                        case .readings:
+                                            goToNextReading()
+                                        case .none:
+                                            break
+                                        }
+                                    }
+                                )
+                                .frame(width: slotWidth)
+                            }
+                        }
+
+                    // Purely additive, read-only semantic exploration.
+                    SemanticNeighborhoodExplorerView(lookup: lookup, topN: 30)
+                }
             }
         }
+        .contentShape(Rectangle())
         .onAppear {
             refreshHighlightedEntryDetail()
+            resetReadingIndexIfNeeded()
         }
         .onChange(of: highlightedResultIndex) { _, _ in
+            highlightedReadingIndex = 0
             refreshHighlightedEntryDetail()
+            resetReadingIndexIfNeeded()
         }
         .onChange(of: lookup.results) { _, _ in
+            highlightedReadingIndex = 0
             refreshHighlightedEntryDetail()
+            resetReadingIndexIfNeeded()
         }
 
         .alert("Custom reading", isPresented: $isCustomReadingPromptPresented) {
@@ -597,6 +760,7 @@ private struct LookupResultsView: View {
         systemImage: String,
         isDisabled: Bool,
         verticalPadding: CGFloat,
+        accessibilityLabel: String,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -609,7 +773,7 @@ private struct LookupResultsView: View {
         .foregroundColor(isDisabled ? Color.secondary.opacity(0.4) : .accentColor)
         .contentShape(Rectangle())
         .disabled(isDisabled)
-        .accessibilityLabel(systemImage == "chevron.left" ? "Previous result" : "Next result")
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private var horizontalSwipeGesture: some Gesture {
@@ -617,9 +781,17 @@ private struct LookupResultsView: View {
             .onEnded { value in
                 guard abs(value.translation.width) > abs(value.translation.height) else { return }
                 if value.translation.width < -30 {
-                    goToNextResult()
+                    if lookup.results.count > 1 {
+                        goToNextResult()
+                    } else {
+                        goToNextReading()
+                    }
                 } else if value.translation.width > 30 {
-                    goToPreviousResult()
+                    if lookup.results.count > 1 {
+                        goToPreviousResult()
+                    } else {
+                        goToPreviousReading()
+                    }
                 }
             }
     }
@@ -632,12 +804,105 @@ private struct LookupResultsView: View {
     private func goToNextResult() {
         guard highlightedResultIndex < max(0, lookup.results.count - 1) else { return }
         highlightedResultIndex += 1
+        highlightedReadingIndex = 0
+        resetReadingIndexIfNeeded()
+    }
+
+    private func goToPreviousReading() {
+        guard let entry = highlightedEntry?.entry else { return }
+        let variants = readingVariants(for: entry, detail: matchingHighlightedEntryDetail)
+        guard variants.count > 1 else { return }
+        guard highlightedReadingIndex > 0 else { return }
+        highlightedReadingIndex -= 1
+    }
+
+    private func goToNextReading() {
+        guard let entry = highlightedEntry?.entry else { return }
+        let variants = readingVariants(for: entry, detail: matchingHighlightedEntryDetail)
+        guard variants.count > 1 else { return }
+        guard highlightedReadingIndex < variants.count - 1 else { return }
+        highlightedReadingIndex += 1
+    }
+
+    private func resetReadingIndexIfNeeded() {
+        guard lookup.results.count <= 1 else {
+            highlightedReadingIndex = 0
+            return
+        }
+        guard let entry = highlightedEntry?.entry else {
+            highlightedReadingIndex = 0
+            return
+        }
+
+        let variants = readingVariants(for: entry, detail: matchingHighlightedEntryDetail)
+        guard variants.count > 1 else {
+            highlightedReadingIndex = 0
+            return
+        }
+
+        let preferred = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if preferred.isEmpty == false, let idx = variants.firstIndex(of: preferred) {
+            highlightedReadingIndex = idx
+            return
+        }
+
+        let tokenReading = (selection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if tokenReading.isEmpty == false, let idx = variants.firstIndex(of: tokenReading) {
+            highlightedReadingIndex = idx
+            return
+        }
+
+        let entryKana = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if entryKana.isEmpty == false, let idx = variants.firstIndex(of: entryKana) {
+            highlightedReadingIndex = idx
+            return
+        }
+
+        highlightedReadingIndex = 0
     }
 
     private var highlightedEntry: (entry: DictionaryEntry, index: Int)? {
         guard lookup.results.isEmpty == false else { return nil }
         let safeIndex = min(highlightedResultIndex, lookup.results.count - 1)
         return (lookup.results[safeIndex], safeIndex)
+    }
+
+    private var matchingHighlightedEntryDetail: DictionaryEntryDetail? {
+        guard let entry = highlightedEntry?.entry else { return nil }
+        guard let detail = highlightedEntryDetail, detail.entryID == entry.entryID else { return nil }
+        return detail
+    }
+
+    private func readingVariants(for entry: DictionaryEntry, detail: DictionaryEntryDetail?) -> [String] {
+        var variants: [String] = []
+        func add(_ raw: String) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return }
+            if variants.contains(trimmed) == false {
+                variants.append(trimmed)
+            }
+        }
+
+        if let detail {
+            for form in detail.kanaForms {
+                add(form.text)
+            }
+        }
+        if let kana = entry.kana {
+            add(kana)
+        }
+        return variants
+    }
+
+    private func entryWithKanaVariant(_ entry: DictionaryEntry, kana: String?) -> DictionaryEntry {
+        let trimmed = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return DictionaryEntry(
+            entryID: entry.entryID,
+            kanji: entry.kanji,
+            kana: (trimmed?.isEmpty == false) ? trimmed : nil,
+            gloss: entry.gloss,
+            isCommon: entry.isCommon
+        )
     }
 
     private func refreshHighlightedEntryDetail() {
@@ -655,6 +920,7 @@ private struct LookupResultsView: View {
 
             await MainActor.run {
                 highlightedEntryDetail = details.first
+                resetReadingIndexIfNeeded()
             }
         }
     }
@@ -675,24 +941,25 @@ private struct LookupResultsView: View {
         let surfaceHasKanji = tokenSurface.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
 
         // Treat the dictionary headword as the canonical lemma.
+        // NOTE: For some nouns, MeCab may provide a kana-only lemma (e.g. 一人 -> ひとり).
+        // In those cases we still want lemmaSurface to be the dictionary kanji headword so
+        // alternate dictionary readings (ひとり / いちにん) can be paged and displayed.
         let lemmaSurface: String = {
-            // If the selected surface is kana-only, prefer kana lemma (avoid showing kanji).
-            if surfaceHasKanji == false {
+            if surfaceHasKanji {
+                if entry.kanji.isEmpty == false {
+                    return entry.kanji
+                }
                 if let kana = entry.kana, kana.isEmpty == false {
                     return kana
+                }
+                // If the token lemma contains kanji, it can still be a useful fallback.
+                if tokenLemma.isEmpty == false, tokenLemma.unicodeScalars.contains(where: { (0x4E00...0x9FFF).contains($0.value) }) {
+                    return tokenLemma
                 }
                 return tokenSurface
             }
 
-            // Prefer MeCab's dictionary form when available (e.g. なりたくて -> なる).
-            if tokenLemma.isEmpty == false {
-                return tokenLemma
-            }
-
-            // Otherwise, prefer kanji headword when available.
-            if entry.kanji.isEmpty == false {
-                return entry.kanji
-            }
+            // If the selected surface is kana-only, prefer kana lemma (avoid showing kanji).
             if let kana = entry.kana, kana.isEmpty == false {
                 return kana
             }
@@ -802,34 +1069,9 @@ private struct LookupResultsView: View {
             }
 
             if let detail, detail.senses.isEmpty == false {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(detail.senses.prefix(2).enumerated()), id: \.element.id) { index, sense in
-                        let senseNumber = index + 1
-                        if let posLine = formattedTagsLine(from: sense.partsOfSpeech), posLine.isEmpty == false {
-                            Text(posLine)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .italic()
-                        }
-
-                        let glossText = sense.glosses
-                            .sorted(by: { $0.orderIndex < $1.orderIndex })
-                            .prefix(3)
-                            .map { $0.text }
-                            .joined(separator: "; ")
-                        if glossText.isEmpty == false {
-                            Text("\(senseNumber). \(glossText)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(3)
-                        }
-                    }
-                }
+                ExpandableSensesPreview(entryID: entry.entryID, senses: detail.senses)
             } else if entry.gloss.isEmpty == false {
-                Text(entry.gloss)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                ExpandableGlossPreview(entryID: entry.entryID, gloss: entry.gloss)
             }
 
             HStack(spacing: 12) {
@@ -867,7 +1109,7 @@ private struct LookupResultsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(DictionaryCardBackground(colorScheme: colorScheme))
         .overlay(alignment: .topTrailing) {
-            if (lookup.results.count > 1) && positionText.isEmpty == false {
+            if positionText.isEmpty == false {
                 Text(positionText)
                     .font(.caption2)
                     .fontWeight(.semibold)
@@ -895,6 +1137,125 @@ private struct LookupResultsView: View {
                 shape.stroke(border, lineWidth: 1)
             }
             .shadow(color: Color.black.opacity(shadowOpacity), radius: 10, x: 0, y: 4)
+        }
+    }
+
+    private struct ExpandableSensesPreview: View {
+        let entryID: Int64
+        let senses: [DictionaryEntrySense]
+
+        @State private var isExpanded: Bool = false
+
+        private let collapsedLimit: Int = 3
+
+        private var visibleSenses: ArraySlice<DictionaryEntrySense> {
+            if isExpanded { return senses[...] }
+            return senses.prefix(collapsedLimit)
+        }
+
+        private var hiddenCount: Int {
+            max(0, senses.count - collapsedLimit)
+        }
+
+        private func formattedTagsLine(from tags: [String]) -> String? {
+            guard tags.isEmpty == false else { return nil }
+            return tags.joined(separator: " · ")
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(visibleSenses.enumerated()), id: \.element.id) { index, sense in
+                        let senseNumber = index + 1
+                        if let posLine = formattedTagsLine(from: sense.partsOfSpeech), posLine.isEmpty == false {
+                            Text(posLine)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .italic()
+                        }
+
+                        let glossText = sense.glosses
+                            .sorted(by: { $0.orderIndex < $1.orderIndex })
+                            .prefix(3)
+                            .map { $0.text }
+                            .joined(separator: "; ")
+
+                        if glossText.isEmpty == false {
+                            Text("\(senseNumber). \(glossText)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
+                    }
+                }
+
+                if hiddenCount > 0 {
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
+                        Text(isExpanded ? "Show less" : "Show \(hiddenCount) more")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isExpanded ? "Show fewer definitions" : "Show more definitions")
+                }
+            }
+            // Reset per entry so paging between results doesn't keep prior expanded state.
+            .id(entryID)
+        }
+    }
+
+    private struct ExpandableGlossPreview: View {
+        let entryID: Int64
+        let gloss: String
+
+        @State private var isExpanded: Bool = false
+
+        private let collapsedLimit: Int = 3
+
+        private var pieces: [String] {
+            gloss
+                .split(separator: ";")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.isEmpty == false }
+        }
+
+        private var hiddenCount: Int {
+            max(0, pieces.count - collapsedLimit)
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                let shown = isExpanded ? pieces : Array(pieces.prefix(collapsedLimit))
+                if shown.isEmpty == false {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(shown.enumerated()), id: \.offset) { idx, text in
+                            Text("\(idx + 1). \(text)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
+                    }
+                }
+
+                if hiddenCount > 0 {
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
+                        Text(isExpanded ? "Show less" : "Show \(hiddenCount) more")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isExpanded ? "Show fewer definitions" : "Show more definitions")
+                }
+            }
+            .id(entryID)
         }
     }
 
