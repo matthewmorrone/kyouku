@@ -1980,6 +1980,51 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
     private var rubyDebugGlyphLayers: [DebugColorKey: CAShapeLayer] = [:]
 
+    private let rubyBisectorDebugContainerLayer: CALayer = {
+        let layer = CALayer()
+        layer.masksToBounds = false
+        layer.actions = [
+            "sublayers": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        return layer
+    }()
+
+    private func makeRubyBisectorLayer(strokeColor: UIColor, zPosition: CGFloat) -> CAShapeLayer {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = strokeColor.cgColor
+        layer.lineWidth = 1.5
+        layer.lineDashPattern = nil
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        layer.zPosition = zPosition
+        return layer
+    }
+
+    private lazy var rubyBisectorHeadwordAlignedLayer: CAShapeLayer = {
+        makeRubyBisectorLayer(strokeColor: UIColor.systemYellow.withAlphaComponent(0.98), zPosition: 62)
+    }()
+    private lazy var rubyBisectorHeadwordMisalignedLayer: CAShapeLayer = {
+        makeRubyBisectorLayer(strokeColor: UIColor.systemGreen.withAlphaComponent(0.98), zPosition: 63)
+    }()
+    private lazy var rubyBisectorRubyAlignedLayer: CAShapeLayer = {
+        makeRubyBisectorLayer(strokeColor: UIColor.systemYellow.withAlphaComponent(0.98), zPosition: 64)
+    }()
+    private lazy var rubyBisectorRubyMisalignedLayer: CAShapeLayer = {
+        makeRubyBisectorLayer(strokeColor: UIColor.systemGreen.withAlphaComponent(0.98), zPosition: 65)
+    }()
+
     private func installHeadwordDebugContainerIfNeeded() {
         if headwordDebugRectsContainerLayer.superlayer == nil {
             headwordDebugRectsContainerLayer.contentsScale = traitCollection.displayScale
@@ -1993,6 +2038,21 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             rubyDebugGlyphBoundsContainerLayer.contentsScale = traitCollection.displayScale
             rubyDebugGlyphBoundsContainerLayer.zPosition = 60
             layer.addSublayer(rubyDebugGlyphBoundsContainerLayer)
+        }
+    }
+
+    private func installRubyBisectorDebugContainerIfNeeded() {
+        if rubyBisectorDebugContainerLayer.superlayer == nil {
+            rubyBisectorDebugContainerLayer.contentsScale = traitCollection.displayScale
+            rubyBisectorDebugContainerLayer.zPosition = 62
+            layer.addSublayer(rubyBisectorDebugContainerLayer)
+        }
+
+        if rubyBisectorHeadwordAlignedLayer.superlayer == nil {
+            rubyBisectorDebugContainerLayer.addSublayer(rubyBisectorHeadwordAlignedLayer)
+            rubyBisectorDebugContainerLayer.addSublayer(rubyBisectorHeadwordMisalignedLayer)
+            rubyBisectorDebugContainerLayer.addSublayer(rubyBisectorRubyAlignedLayer)
+            rubyBisectorDebugContainerLayer.addSublayer(rubyBisectorRubyMisalignedLayer)
         }
     }
 
@@ -2079,6 +2139,18 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }
         rubyDebugGlyphLayers.removeAll()
         rubyDebugGlyphBoundsContainerLayer.isHidden = true
+    }
+
+    private func resetRubyBisectorDebugLayers() {
+        rubyBisectorDebugContainerLayer.isHidden = true
+        rubyBisectorHeadwordAlignedLayer.path = nil
+        rubyBisectorHeadwordMisalignedLayer.path = nil
+        rubyBisectorRubyAlignedLayer.path = nil
+        rubyBisectorRubyMisalignedLayer.path = nil
+        rubyBisectorHeadwordAlignedLayer.isHidden = true
+        rubyBisectorHeadwordMisalignedLayer.isHidden = true
+        rubyBisectorRubyAlignedLayer.isHidden = true
+        rubyBisectorRubyMisalignedLayer.isHidden = true
     }
 
     private func resolvedColorForSemanticSpan(_ span: SemanticSpan) -> UIColor? {
@@ -2236,6 +2308,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             if self.rubyDebugRectsEnabled {
                 self.updateRubyDebugRects()
                 self.updateRubyDebugGlyphBounds()
+                self.updateRubyHeadwordBisectors()
             }
         }
     }
@@ -2250,6 +2323,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }
         if rubyDebugRectsEnabled {
             updateRubyDebugGlyphBounds()
+            updateRubyHeadwordBisectors()
         }
     }
 
@@ -2392,6 +2466,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             layer.addSublayer(rubyDebugRectsLayer)
             rubyDebugRectsLayer.isHidden = false
             installRubyDebugGlyphContainerIfNeeded()
+            installRubyBisectorDebugContainerIfNeeded()
         }
 
         if headwordDebugRectsEnabled {
@@ -2556,13 +2631,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 layer.addSublayer(rubyDebugRectsLayer)
             }
             installRubyDebugGlyphContainerIfNeeded()
+            installRubyBisectorDebugContainerIfNeeded()
             updateRubyDebugRects()
             updateRubyDebugGlyphBounds()
+            updateRubyHeadwordBisectors()
             rubyDebugRectsLayer.isHidden = false
         } else {
             rubyDebugRectsLayer.path = nil
             rubyDebugRectsLayer.isHidden = true
             resetRubyDebugGlyphLayers()
+            resetRubyBisectorDebugLayers()
         }
 
         if headwordDebugRectsEnabled {
@@ -3050,6 +3128,100 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         )
     }
 
+    private func updateRubyHeadwordBisectors() {
+        guard rubyDebugRectsEnabled else {
+            resetRubyBisectorDebugLayers()
+            return
+        }
+        guard rubyAnnotationVisibility == .visible else {
+            resetRubyBisectorDebugLayers()
+            return
+        }
+        installRubyBisectorDebugContainerIfNeeded()
+
+        // Content-space overlay.
+        rubyBisectorDebugContainerLayer.frame = CGRect(origin: .zero, size: contentSize)
+
+        guard let rubyLayers = rubyOverlayContainerLayer.sublayers, rubyLayers.isEmpty == false else {
+            resetRubyBisectorDebugLayers()
+            return
+        }
+
+        // Use visible line rects when available; in debug mode we only need what the user sees.
+        let lineRectsInContent = textKit2LineTypographicRectsInContentCoordinates(visibleOnly: true)
+
+        let alignedHeadwordPath = CGMutablePath()
+        let misalignedHeadwordPath = CGMutablePath()
+        let alignedRubyPath = CGMutablePath()
+        let misalignedRubyPath = CGMutablePath()
+
+        let tolerance: CGFloat = 0.75
+        let maxLayers = min(rubyLayers.count, 1024)
+
+        for i in 0..<maxLayers {
+            guard let ruby = rubyLayers[i] as? CATextLayer else { continue }
+            let rubyRect = ruby.frame
+            guard rubyRect.isNull == false, rubyRect.isEmpty == false else { continue }
+
+            guard let loc = ruby.value(forKey: "rubyRangeLocation") as? Int,
+                  let len = ruby.value(forKey: "rubyRangeLength") as? Int,
+                  loc != NSNotFound,
+                  len > 0 else {
+                continue
+            }
+
+            let range = NSRange(location: loc, length: len)
+            let baseRects = textKit2AnchorRectsInContentCoordinates(for: range, lineRectsInContent: lineRectsInContent)
+            guard baseRects.isEmpty == false else { continue }
+            let unions = unionRectsByLine(baseRects)
+            guard unions.isEmpty == false else { continue }
+
+            // Select the base union on the same visual line as the ruby rect.
+            let baseUnion: CGRect = {
+                guard let rubyLineIndex = bestMatchingLineIndex(for: rubyRect, candidates: lineRectsInContent) else {
+                    return unions[0]
+                }
+                for u in unions {
+                    if bestMatchingLineIndex(for: u, candidates: lineRectsInContent) == rubyLineIndex {
+                        return u
+                    }
+                }
+                return unions[0]
+            }()
+
+            let baseCenterX = baseUnion.midX
+            let rubyCenterX = rubyRect.midX
+            let aligned = abs(baseCenterX - rubyCenterX) <= tolerance
+
+            // Headword bisector (per ruby run / per-kanji).
+            let headwordPath = aligned ? alignedHeadwordPath : misalignedHeadwordPath
+            headwordPath.move(to: CGPoint(x: baseCenterX, y: baseUnion.minY))
+            headwordPath.addLine(to: CGPoint(x: baseCenterX, y: baseUnion.maxY))
+
+            // Ruby bisector.
+            let rubyPath = aligned ? alignedRubyPath : misalignedRubyPath
+            rubyPath.move(to: CGPoint(x: rubyCenterX, y: rubyRect.minY))
+            rubyPath.addLine(to: CGPoint(x: rubyCenterX, y: rubyRect.maxY))
+        }
+
+        func apply(_ layer: CAShapeLayer, _ path: CGPath) {
+            layer.frame = rubyBisectorDebugContainerLayer.bounds
+            layer.path = path
+            layer.isHidden = path.isEmpty
+        }
+
+        apply(rubyBisectorHeadwordAlignedLayer, alignedHeadwordPath)
+        apply(rubyBisectorHeadwordMisalignedLayer, misalignedHeadwordPath)
+        apply(rubyBisectorRubyAlignedLayer, alignedRubyPath)
+        apply(rubyBisectorRubyMisalignedLayer, misalignedRubyPath)
+
+        rubyBisectorDebugContainerLayer.isHidden =
+            alignedHeadwordPath.isEmpty &&
+            misalignedHeadwordPath.isEmpty &&
+            alignedRubyPath.isEmpty &&
+            misalignedRubyPath.isEmpty
+    }
+
     override func draw(_ rect: CGRect) {
         super.draw(rect)
     }
@@ -3120,8 +3292,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // Content-space anchors for content-space overlays (no contentOffset involvement).
         let lineRectsInContent = textKit2LineTypographicRectsInContentCoordinates()
 
-        var layers: [CALayer] = []
-        layers.reserveCapacity(min(2048, cachedRubyRuns.count * 2))
+        struct RubyPlacementProposal {
+            let lineIndex: Int
+            var frame: CGRect
+            let preferredCenterX: CGFloat
+        }
+
+        var proposals: [RubyPlacementProposal] = []
+        proposals.reserveCapacity(min(2048, cachedRubyRuns.count))
+        var proposalRuns: [RubyRun] = []
+        proposalRuns.reserveCapacity(min(2048, cachedRubyRuns.count))
 
         for run in cachedRubyRuns {
             let baseRectsInContent = textKit2AnchorRectsInContentCoordinates(for: run.range, lineRectsInContent: lineRectsInContent)
@@ -3213,6 +3393,45 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             // This avoids the ruby being occluded by the text layer when overlays are below it.
             let y = (baseUnionInContent.minY - gap) - size.height
 
+            let initialFrame = CGRect(x: x, y: y, width: size.width, height: size.height)
+            let lineIndex: Int = bestMatchingLineIndex(for: baseUnionInContent, candidates: lineRectsInContent)
+                ?? (Int.min + proposals.count)
+            let preferredCenterX: CGFloat = x + (size.width / 2.0)
+            proposals.append(.init(lineIndex: lineIndex, frame: initialFrame, preferredCenterX: preferredCenterX))
+            proposalRuns.append(run)
+        }
+
+        // Collision resolution (single-pass, deterministic): within each visual line,
+        // shift ruby frames to the right to prevent overlap.
+        // Constraints:
+        // - Preserve ordering
+        // - Never modify widths/heights
+        // - Only adjust frame.origin.x
+        if proposals.isEmpty == false {
+            let indicesByLine = Dictionary(grouping: proposals.indices, by: { proposals[$0].lineIndex })
+            for lineIndex in indicesByLine.keys.sorted() {
+                guard let lineIndices = indicesByLine[lineIndex], lineIndices.isEmpty == false else { continue }
+                let ordered = lineIndices.sorted { proposals[$0].frame.minX < proposals[$1].frame.minX }
+                var cursorX: CGFloat = -CGFloat.greatestFiniteMagnitude
+                for i in ordered {
+                    let minX = proposals[i].frame.minX
+                    if minX < cursorX {
+                        proposals[i].frame.origin.x += (cursorX - minX)
+                    }
+                    cursorX = proposals[i].frame.maxX
+                }
+            }
+        }
+
+        var layers: [CALayer] = []
+        layers.reserveCapacity(min(2048, proposals.count))
+
+        for (idx, proposal) in proposals.enumerated() {
+            let run = proposalRuns[idx]
+
+            let rubyPointSize = max(1.0, run.fontSize)
+            let rubyFont = (self.font ?? UIFont.systemFont(ofSize: rubyPointSize)).withSize(rubyPointSize)
+
             let textLayer = CATextLayer()
             textLayer.contentsScale = traitCollection.displayScale
             textLayer.string = run.reading
@@ -3249,7 +3468,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 textLayer.setValue(span.range.location, forKey: "rubySpanLocation")
                 textLayer.setValue(span.range.length, forKey: "rubySpanLength")
             }
-            textLayer.frame = CGRect(x: x, y: y, width: size.width, height: size.height)
+            textLayer.frame = proposal.frame
             textLayer.actions = [
                 "position": NSNull(),
                 "bounds": NSNull(),
