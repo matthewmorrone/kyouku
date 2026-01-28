@@ -2,6 +2,8 @@ import SwiftUI
 import Foundation
 
 struct ExtractWordsView: View {
+    @AppStorage("extractPropagateTokenEdits") private var propagateTokenEdits: Bool = false
+
     private struct DictionaryPanelHeightPreferenceKey: PreferenceKey {
         static var defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -107,6 +109,10 @@ struct ExtractWordsView: View {
                         }
                         .font(.subheadline)
                         Spacer()
+
+                        Toggle("Apply edits to all", isOn: $propagateTokenEdits)
+                            .font(.subheadline)
+                            .toggleStyle(.switch)
                     }
 
                     Divider()

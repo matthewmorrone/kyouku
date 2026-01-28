@@ -287,12 +287,13 @@ final class DictionaryLookupViewModel: ObservableObject {
 
         // Only commit if this request is still the active one.
         // This avoids stale writes when rapid taps trigger overlapping Tasks.
-        switch phase {
-        case .resolving(let active) where active == requestID:
-            commitOutcome(outcome, requestID: requestID, selection: selection)
-        case .ready, .idle, .resolving:
-            break
+        // If the user dismissed the panel (reset -> `.idle`) or a newer lookup began,
+        // do not publish stale results back into `presented`.
+        guard case .resolving(let activeID) = phase, activeID == requestID else {
+            return
         }
+
+        commitOutcome(outcome, requestID: requestID, selection: selection)
     }
 
     func lookup(term: String, mode: DictionarySearchMode = .japanese) async {

@@ -1770,6 +1770,28 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
     }()
     private var rubyOverlayDirty: Bool = true
     private var lastRubyOverlayLayoutSignature: Int = 0
+    private var suppressTextKit2LayoutCallbacks: Bool = false
+    private var rubyOverlayRelayoutScheduled: Bool = false
+
+    private func scheduleRubyOverlayRelayoutFromTextKit2() {
+        guard rubyAnnotationVisibility == .visible else { return }
+        guard cachedRubyRuns.isEmpty == false else { return }
+        guard rubyOverlayRelayoutScheduled == false else { return }
+        rubyOverlayRelayoutScheduled = true
+
+        // TextKit 2 is often viewport-lazy. When new fragments are laid out (e.g. after scrolling
+        // or after a settings-driven geometry nudge), our prior ruby overlay frames can be stale.
+        // Coalesce to next runloop to avoid thrashing during incremental layout.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.rubyOverlayRelayoutScheduled = false
+            guard self.rubyAnnotationVisibility == .visible else { return }
+            guard self.cachedRubyRuns.isEmpty == false else { return }
+            self.rubyOverlayDirty = true
+            self.needsHighlightUpdate = true
+            self.setNeedsLayout()
+        }
+    }
 
     // NOTE: TextKit 2 segment rects have proven to be coordinate-space sensitive.
     // Keep this off by default until fully verified across devices/simulator.
@@ -2397,6 +2419,11 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 queue: .main
             ) { [weak self] _ in
                 guard let self else { return }
+                // Settings toggles (e.g. debug line bands) frequently coincide with viewport-lazy
+                // TextKit 2 reflow. Force a ruby overlay invalidation so furigana doesn't remain
+                // stuck in a pre-layout coordinate space.
+                self.rubyOverlayDirty = true
+                self.needsHighlightUpdate = true
                 self.setNeedsLayout()
                 self.layoutIfNeeded()
             }
@@ -3083,6 +3110,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }
 
         // Ensure TextKit 2 has laid out the whole document so segment rects are stable.
+        suppressTextKit2LayoutCallbacks = true
+        defer { suppressTextKit2LayoutCallbacks = false }
         layoutIfNeeded()
         if let tlm = textLayoutManager {
             tlm.ensureLayout(for: tlm.documentRange)
@@ -3866,14 +3895,26 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // Option A: ruby envelope highlight.
         // Use the union of base selection rects + ruby overlay layer bounds so the
         // highlight background matches the *visual* token width (never narrower than furigana).
-        let baseRectsInView = baseHighlightRects(in: range)
+        let baseRectsInContent: [CGRect] = {
+            if #available(iOS 15.0, *) {
+                let rects = baseHighlightRectsInContentCoordinates(in: range)
+                if rects.isEmpty == false { return rects }
+            }
+
+            // Fallback: selection rects are view-coordinate; convert to content-coordinate.
+            let rectsInView = baseHighlightRects(in: range)
+            guard rectsInView.isEmpty == false else { return [] }
+            let offset = contentOffset
+            return rectsInView.map { $0.offsetBy(dx: offset.x, dy: offset.y) }
+        }()
+
+        var highlightRectsInContent = unionRectsByLine(baseRectsInContent)
         let baseRectUnionInContent: CGRect = {
             var u = CGRect.null
-            for r in baseRectsInView {
+            for r in highlightRectsInContent {
                 u = u.isNull ? r : u.union(r)
             }
-            guard u.isNull == false else { return .null }
-            return u.offsetBy(dx: contentOffset.x, dy: contentOffset.y)
+            return u
         }()
 
         let rubyHighlightTokenIndex: Int? = {
@@ -3894,14 +3935,33 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             return u
         }()
 
-        var highlightRect = baseRectUnionInContent
         if rubyRectUnionInContent.isNull == false {
-            highlightRect = highlightRect.isNull ? rubyRectUnionInContent : highlightRect.union(rubyRectUnionInContent)
+            // Attach ruby bounds to the closest base line below it (or append if no good match).
+            let rubyMaxY = rubyRectUnionInContent.maxY
+            let maxSnapDistance = max(8, rubyHighlightHeadroom + 8)
+            if let best = highlightRectsInContent.enumerated().min(by: { a, b in
+                abs(a.element.minY - rubyMaxY) < abs(b.element.minY - rubyMaxY)
+            }) {
+                let dy = abs(best.element.minY - rubyMaxY)
+                if dy <= maxSnapDistance {
+                    highlightRectsInContent[best.offset] = highlightRectsInContent[best.offset].union(rubyRectUnionInContent)
+                } else {
+                    highlightRectsInContent.append(rubyRectUnionInContent)
+                }
+            } else {
+                highlightRectsInContent = [rubyRectUnionInContent]
+            }
         }
 
-        let highlightRectPreInsets = highlightRect
+        let highlightRectPreInsets: CGRect = {
+            var u = CGRect.null
+            for r in highlightRectsInContent {
+                u = u.isNull ? r : u.union(r)
+            }
+            return u
+        }()
 
-        guard highlightRect.isNull == false, highlightRect.isEmpty == false else {
+        guard highlightRectPreInsets.isNull == false, highlightRectPreInsets.isEmpty == false else {
             baseHighlightLayer.path = nil
             rubyHighlightLayer.path = nil
             return
@@ -3917,13 +3977,25 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         rubyEnvelopeDebugFinalUnionLayer.frame = highlightOverlayContainerLayer.bounds
 
         let insets = selectionHighlightInsets
-
         if insets != .zero {
-            highlightRect.origin.x += insets.left
-            highlightRect.origin.y += insets.top
-            highlightRect.size.width -= (insets.left + insets.right)
-            highlightRect.size.height -= (insets.top + insets.bottom)
+            highlightRectsInContent = highlightRectsInContent.compactMap { r in
+                var rr = r
+                rr.origin.x += insets.left
+                rr.origin.y += insets.top
+                rr.size.width -= (insets.left + insets.right)
+                rr.size.height -= (insets.top + insets.bottom)
+                guard rr.isNull == false, rr.isEmpty == false, rr.width > 0, rr.height > 0 else { return nil }
+                return rr
+            }
         }
+
+        let highlightRectFinal: CGRect = {
+            var u = CGRect.null
+            for r in highlightRectsInContent {
+                u = u.isNull ? r : u.union(r)
+            }
+            return u
+        }()
 
         // Temporary diagnostic: remove after ruby-envelope highlight is verified.
         // Always-on: no env vars, no external tracing required.
@@ -3934,7 +4006,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             "baseUnion=\(rectString(baseRectUnionInContent)) " +
             "rubyUnion=\(rectString(rubyRectUnionInContent)) " +
             "finalPreInsets=\(rectString(highlightRectPreInsets)) " +
-            "final=\(rectString(highlightRect))"
+            "final=\(rectString(highlightRectFinal))"
         )
 
         // Temporary diagnostic: remove after ruby-envelope highlight is verified.
@@ -3952,15 +4024,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         rubyEnvelopeDebugRubyUnionLayer.path = (rubyRectUnionInContent.isNull || rubyRectUnionInContent.isEmpty)
             ? nil
             : UIBezierPath(rect: rubyRectUnionInContent).cgPath
-        rubyEnvelopeDebugFinalUnionLayer.path = (highlightRect.isNull || highlightRect.isEmpty)
+        rubyEnvelopeDebugFinalUnionLayer.path = (highlightRectFinal.isNull || highlightRectFinal.isEmpty)
             ? nil
-            : UIBezierPath(rect: highlightRect).cgPath
+            : UIBezierPath(rect: highlightRectFinal).cgPath
 
-        if highlightRect.width > 0, highlightRect.height > 0 {
-            baseHighlightLayer.path = UIBezierPath(roundedRect: highlightRect, cornerRadius: 6).cgPath
-        } else {
-            baseHighlightLayer.path = nil
+        let highlightPath = CGMutablePath()
+        for r in highlightRectsInContent {
+            highlightPath.addPath(UIBezierPath(roundedRect: r, cornerRadius: 6).cgPath)
         }
+        baseHighlightLayer.path = highlightPath.isEmpty ? nil : highlightPath
 
         // Envelope highlight already includes ruby bounds.
         rubyHighlightLayer.path = nil
@@ -4948,6 +5020,14 @@ extension TokenOverlayTextView: NSTextLayoutManagerDelegate {
         let docStart = textLayoutManager.documentRange.location
         let charIndex = tcm.offset(from: docStart, to: location)
         return shouldAllowWordBreakBeforeCharacter(at: charIndex)
+    }
+
+    func textLayoutManager(_ textLayoutManager: NSTextLayoutManager, didCompleteLayoutFor textRange: NSTextRange) {
+        // TextKit 2 can lay out fragments lazily; if we render ruby overlays before a fragment's
+        // final coordinates are known, a subset of lines can appear mis-positioned until a later
+        // navigation/geometry event forces relayout. Coalesce an overlay refresh after layout.
+        guard suppressTextKit2LayoutCallbacks == false else { return }
+        scheduleRubyOverlayRelayoutFromTextKit2()
     }
 }
 

@@ -51,6 +51,22 @@ final class TokenBoundariesStore: ObservableObject {
 		save()
 	}
 
+	func addHardCuts(noteID: UUID, utf16Indices: [Int], text: String) {
+		guard utf16Indices.isEmpty == false else { return }
+		let length = (text as NSString).length
+		guard length > 0 else { return }
+
+		var existing = Set(hardCutsByNote[noteID] ?? [])
+		let beforeCount = existing.count
+		for idx in utf16Indices {
+			guard idx > 0, idx < length else { continue }
+			existing.insert(idx)
+		}
+		guard existing.count != beforeCount else { return }
+		hardCutsByNote[noteID] = existing.sorted()
+		save()
+	}
+
 	func removeHardCut(noteID: UUID, utf16Index: Int) {
 		guard var cuts = hardCutsByNote[noteID], cuts.isEmpty == false else { return }
 		let before = cuts.count

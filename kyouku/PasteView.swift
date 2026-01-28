@@ -166,6 +166,7 @@ struct PasteView: View {
     @AppStorage("pasteViewLastOpenedNoteID") private var lastOpenedNoteIDRaw: String = ""
     @AppStorage("extractHideDuplicateTokens") private var hideDuplicateTokens: Bool = false
     @AppStorage("extractHideCommonParticles") private var hideCommonParticles: Bool = false
+    @AppStorage("extractPropagateTokenEdits") private var propagateTokenEdits: Bool = false
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
@@ -1075,15 +1076,8 @@ struct PasteView: View {
             if let presented = inlineLookup.presented,
                let selection = presented.selection,
                selection.range.length > 0 {
-                let isBusy: Bool = {
-                    if case .resolving(let currentID) = inlineLookup.phase {
-                        return currentID != presented.requestID
-                    }
-                    return false
-                }()
-
                 inlineDismissScrim
-                inlineTokenActionPanel(for: selection, isBusy: isBusy)
+                inlineTokenActionPanel(for: selection)
             }
         }
     }
@@ -1123,7 +1117,7 @@ struct PasteView: View {
         incrementalSelectedCharacterRange = nil
     }
 
-    private func inlineTokenActionPanel(for selection: TokenSelectionContext, isBusy: Bool) -> some View {
+    private func inlineTokenActionPanel(for selection: TokenSelectionContext) -> some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -1166,17 +1160,10 @@ struct PasteView: View {
                     focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
                     onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
                 )
-                .disabled(isBusy)
-                .overlay {
-                    if isBusy {
-                        // Non-layout-affecting "busy" indicator while resolving a new selection.
-                        ProgressView()
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-                            .allowsHitTesting(false)
-                    }
-                }
+                // IMPORTANT: do not disable the panel while resolving a new selection.
+                // Users must be able to drag-dismiss or tap-dismiss even if the next
+                // lookup is still in flight. The panel renders a built-in busy indicator
+                // when stale presented content is shown during `.resolving`.
                 .id("token-action-panel-\(overrideSignature)")
                 .padding(.horizontal, 0)
                 .padding(.bottom, 0)
@@ -2379,7 +2366,13 @@ struct PasteView: View {
     private func mergeSpan(at index: Int, direction: MergeDirection) {
         let wasShowingTokensPopover = showTokensPopover
         guard let mergeRange = stage1MergeRange(forSemanticIndex: index, direction: direction) else { return }
-        guard let union = applySpanMerge(mergeRange: mergeRange, actionName: "Merge Tokens") else { return }
+        let union: NSRange? = {
+            if propagateTokenEdits {
+                return applySpanMergeEverywhere(mergeRange: mergeRange, actionName: "Merge Tokens")
+            }
+            return applySpanMerge(mergeRange: mergeRange, actionName: "Merge Tokens")
+        }()
+        guard let union else { return }
         persistentSelectionRange = union
         pendingSelectionRange = union
         let mergedIndex = mergeRange.lowerBound
@@ -2539,7 +2532,13 @@ struct PasteView: View {
         let wasShowingTokensPopover = showTokensPopover
         guard let selection = tokenSelection else { return }
         guard let mergeRange = stage1MergeRange(forSemanticIndex: selection.tokenIndex, direction: direction) else { return }
-        guard let union = applySpanMerge(mergeRange: mergeRange, actionName: "Merge Tokens") else { return }
+        let union: NSRange? = {
+            if propagateTokenEdits {
+                return applySpanMergeEverywhere(mergeRange: mergeRange, actionName: "Merge Tokens")
+            }
+            return applySpanMerge(mergeRange: mergeRange, actionName: "Merge Tokens")
+        }()
+        guard let union else { return }
         persistentSelectionRange = union
         pendingSelectionRange = union
         pendingSplitFocusSelectionID = nil
@@ -2634,7 +2633,11 @@ struct PasteView: View {
         // across it.
         if stage1Index == nil {
             // (Should be rare because the search above typically finds a containing span.)
-            tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
+            if propagateTokenEdits {
+                applyHardCutEverywhere(splitUTF16Index: splitUTF16Index)
+            } else {
+                tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
+            }
             triggerFuriganaRefreshIfNeeded(reason: "Split Token", recomputeSpans: true)
             return
         }
@@ -2644,12 +2647,157 @@ struct PasteView: View {
         let localOffset = splitUTF16Index - spanRange.location
 
         if localOffset <= 0 || localOffset >= spanRange.length {
-            tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
+            if propagateTokenEdits {
+                applyHardCutEverywhere(splitUTF16Index: splitUTF16Index)
+            } else {
+                tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
+            }
             triggerFuriganaRefreshIfNeeded(reason: "Split Token", recomputeSpans: true)
             return
         }
 
-        applySpanSplit(spanIndex: spanIndex, range: spanRange, offset: localOffset, actionName: "Split Token")
+        if propagateTokenEdits {
+            applySpanSplitEverywhere(range: spanRange, offset: localOffset, actionName: "Split Token")
+        } else {
+            applySpanSplit(spanIndex: spanIndex, range: spanRange, offset: localOffset, actionName: "Split Token")
+        }
+    }
+
+    private func applySpanMergeEverywhere(mergeRange: Range<Int>, actionName: String) -> NSRange? {
+        guard let spans = furiganaSpans else { return nil }
+        guard mergeRange.count >= 2 else { return nil }
+        guard mergeRange.lowerBound >= 0, mergeRange.upperBound <= spans.count else { return nil }
+
+        let baseSpans = spans.map(\.span)
+        let pattern: [String] = mergeRange.map { baseSpans[$0].surface }
+        guard pattern.isEmpty == false else { return nil }
+
+        // Selected union (used to keep selection stable).
+        var selectedUnion = baseSpans[mergeRange.lowerBound].range
+        for i in mergeRange.dropFirst() {
+            selectedUnion = NSUnionRange(selectedUnion, baseSpans[i].range)
+        }
+
+        let nsText = inputText as NSString
+        guard selectedUnion.location != NSNotFound, selectedUnion.length > 0 else { return nil }
+        guard NSMaxRange(selectedUnion) <= nsText.length else { return nil }
+
+        func matches(at i: Int) -> Bool {
+            guard i >= 0 else { return false }
+            guard i + pattern.count <= baseSpans.count else { return false }
+            for j in 0..<pattern.count {
+                let a = baseSpans[i + j]
+                if a.surface != pattern[j] { return false }
+                if j > 0 {
+                    let prev = baseSpans[i + j - 1]
+                    if NSMaxRange(prev.range) != a.range.location { return false }
+                }
+            }
+            return true
+        }
+
+        var newSpans: [TextSpan] = []
+        newSpans.reserveCapacity(baseSpans.count)
+
+        var i = 0
+        while i < baseSpans.count {
+            if matches(at: i) {
+                var union = baseSpans[i].range
+                for j in 1..<pattern.count {
+                    union = NSUnionRange(union, baseSpans[i + j].range)
+                }
+                if union.location != NSNotFound, union.length > 0, NSMaxRange(union) <= nsText.length {
+                    let mergedSurface = nsText.substring(with: union)
+                    newSpans.append(TextSpan(range: union, surface: mergedSurface, isLexiconMatch: false))
+                    i += pattern.count
+                    continue
+                }
+            }
+
+            newSpans.append(baseSpans[i])
+            i += 1
+        }
+
+        replaceSpans(newSpans, actionName: actionName)
+        return selectedUnion
+    }
+
+    private func applySpanSplitEverywhere(range: NSRange, offset: Int, actionName: String) {
+        guard let spans = furiganaSpans else { return }
+        guard range.length > 1 else { return }
+        guard offset > 0, offset < range.length else { return }
+
+        let nsText = inputText as NSString
+        guard nsText.length > 0 else { return }
+        guard NSMaxRange(range) <= nsText.length else { return }
+
+        let targetSurface = nsText.substring(with: range)
+        guard targetSurface.isEmpty == false else { return }
+
+        let baseSpans = spans.map(\.span)
+        var newSpans: [TextSpan] = []
+        newSpans.reserveCapacity(baseSpans.count + 16)
+
+        for span in baseSpans {
+            if span.surface == targetSurface, span.range.length > 1, offset > 0, offset < span.range.length {
+                let leftRange = NSRange(location: span.range.location, length: offset)
+                let rightRange = NSRange(location: span.range.location + offset, length: span.range.length - offset)
+                if leftRange.length > 0, rightRange.length > 0, NSMaxRange(rightRange) <= nsText.length {
+                    let leftSurface = nsText.substring(with: leftRange)
+                    let rightSurface = nsText.substring(with: rightRange)
+                    newSpans.append(TextSpan(range: leftRange, surface: leftSurface, isLexiconMatch: false))
+                    newSpans.append(TextSpan(range: rightRange, surface: rightSurface, isLexiconMatch: false))
+                    continue
+                }
+            }
+            newSpans.append(span)
+        }
+
+        replaceSpans(newSpans, actionName: actionName)
+    }
+
+    private func applyHardCutEverywhere(splitUTF16Index: Int) {
+        let noteID = activeNoteID
+        let text = inputText
+        guard let spans = furiganaSpans?.map(\.span), spans.isEmpty == false else {
+            tokenBoundaries.addHardCut(noteID: noteID, utf16Index: splitUTF16Index, text: text)
+            return
+        }
+
+        // Identify the boundary's left/right token surfaces.
+        var leftSurface: String? = nil
+        var rightSurface: String? = nil
+        for i in 0..<(spans.count - 1) {
+            let a = spans[i]
+            let b = spans[i + 1]
+            if NSMaxRange(a.range) == splitUTF16Index, b.range.location == splitUTF16Index {
+                leftSurface = a.surface
+                rightSurface = b.surface
+                break
+            }
+        }
+
+        guard let leftSurface, let rightSurface else {
+            tokenBoundaries.addHardCut(noteID: noteID, utf16Index: splitUTF16Index, text: text)
+            return
+        }
+
+        var indices: [Int] = []
+        indices.reserveCapacity(32)
+        for i in 0..<(spans.count - 1) {
+            let a = spans[i]
+            let b = spans[i + 1]
+            guard a.surface == leftSurface, b.surface == rightSurface else { continue }
+            let boundary = NSMaxRange(a.range)
+            guard boundary == b.range.location else { continue }
+            indices.append(boundary)
+        }
+
+        if indices.isEmpty {
+            tokenBoundaries.addHardCut(noteID: noteID, utf16Index: splitUTF16Index, text: text)
+        } else {
+            tokenBoundaries.addHardCuts(noteID: noteID, utf16Indices: indices, text: text)
+        }
     }
 
     private func resetSelectionOverrides() {
