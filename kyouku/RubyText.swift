@@ -1020,7 +1020,12 @@ struct RubyText: UIViewRepresentable {
             }()
 
             let baseSub = mutable.attributedSubstring(from: range)
-            let baseWidth = measureTypographicWidth(baseSub)
+            let baseForMeasurement = NSMutableAttributedString(attributedString: baseSub)
+            if baseForMeasurement.length > 0,
+               baseForMeasurement.attribute(.font, at: 0, effectiveRange: nil) == nil {
+                baseForMeasurement.addAttribute(.font, value: baseFont, range: NSRange(location: 0, length: baseForMeasurement.length))
+            }
+            let baseWidth = measureTypographicWidth(baseForMeasurement)
 
             let rubyFont = baseFont.withSize(max(1.0, rubyFontSize))
             let rubyAttr = NSAttributedString(string: reading, attributes: [.font: rubyFont])
@@ -3082,10 +3087,17 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             textLayer.isWrapped = false
             textLayer.font = rubyFont
             textLayer.fontSize = run.fontSize
-            // Tag the layer with the ruby-bearing UTF-16 range so highlight can bind to
-            // the exact ruby bounds (instead of a generic headroom box).
+            // Tag the layer for hit-testing and highlight binding.
+            // Ruby layers are keyed by token/span identity, not source NSRange; range-based
+            // filtering can return no ruby rects depending on the active source↔display mapping.
             textLayer.setValue(run.range.location, forKey: "rubyRangeLocation")
             textLayer.setValue(run.range.length, forKey: "rubyRangeLength")
+            let sourceLoc = sourceIndex(fromDisplayIndex: run.range.location)
+            if let (tokenIndex, span) = semanticSpans.spanContext(containingUTF16Index: sourceLoc) {
+                textLayer.setValue(tokenIndex, forKey: "rubyTokenIndex")
+                textLayer.setValue(span.range.location, forKey: "rubySpanLocation")
+                textLayer.setValue(span.range.length, forKey: "rubySpanLength")
+            }
             textLayer.frame = CGRect(x: x, y: y, width: size.width, height: size.height)
             textLayer.actions = [
                 "position": NSNull(),
@@ -3723,12 +3735,38 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // Avoid forcing a full-document TextKit 2 layout here; geometry helpers ensure layout
         // only for the relevant selection range.
 
-        // Content-space highlight geometry so UIKit scrolls it automatically.
-        // TextKit 2 segment rects can be per-glyph; union by line so selected tokens
-        // don't appear visually split into multiple boxes.
-        let rects = unionRectsByLine(baseHighlightRectsInContentCoordinates(in: range))
+        // Option A: ruby envelope highlight.
+        // Use the union of base selection rects + ruby overlay layer bounds so the
+        // highlight background matches the *visual* token width (never narrower than furigana).
+        let baseRectsInView = baseHighlightRects(in: range)
+        let baseRectUnionInContent: CGRect = {
+            var u = CGRect.null
+            for r in baseRectsInView {
+                u = u.isNull ? r : u.union(r)
+            }
+            guard u.isNull == false else { return .null }
+            return u.offsetBy(dx: contentOffset.x, dy: contentOffset.y)
+        }()
 
-        guard rects.isEmpty == false else {
+        let rubyRectsInContent: [CGRect] = {
+            let sourceLoc = sourceIndex(fromDisplayIndex: range.location)
+            guard let (tokenIndex, _) = semanticSpans.spanContext(containingUTF16Index: sourceLoc) else { return [] }
+            return rubyHighlightRectsInContentCoordinates(forTokenIndex: tokenIndex)
+        }()
+        let rubyRectUnionInContent: CGRect = {
+            var u = CGRect.null
+            for r in rubyRectsInContent {
+                u = u.isNull ? r : u.union(r)
+            }
+            return u
+        }()
+
+        var highlightRect = baseRectUnionInContent
+        if rubyRectUnionInContent.isNull == false {
+            highlightRect = highlightRect.isNull ? rubyRectUnionInContent : highlightRect.union(rubyRectUnionInContent)
+        }
+
+        guard highlightRect.isNull == false, highlightRect.isEmpty == false else {
             baseHighlightLayer.path = nil
             rubyHighlightLayer.path = nil
             return
@@ -3737,56 +3775,23 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // Keep highlight overlays attached to the same scrolling container as ruby overlays.
         highlightOverlayContainerLayer.frame = CGRect(origin: .zero, size: contentSize)
 
-        let basePath = CGMutablePath()
         let insets = selectionHighlightInsets
 
-        // Prefer a "tight" glyph height (excludes lineSpacing/leading) so highlights
-        // hug the text and don't include extra space below the line.
-        let glyphHeight: CGFloat? = {
-            guard let font else { return nil }
-            let h = font.ascender - font.descender
-            return h.isFinite && h > 0 ? h : nil
-        }()
-
-        for rect in rects {
-            // `baseHighlightRects` returns glyph-enclosing rects in view coordinates.
-            // When paragraph lineSpacing is used, these rects can include extra vertical
-            // slack. Clamp to a tight glyph height anchored at the top of the rect.
-            var highlightRect = rect
-            if let glyphHeight {
-                let h = min(glyphHeight, highlightRect.height)
-                highlightRect.size.height = h
-                highlightRect.origin.y = rect.minY
-            }
-
-            if insets != .zero {
-                highlightRect.origin.x += insets.left
-                highlightRect.origin.y += insets.top
-                highlightRect.size.width -= (insets.left + insets.right)
-                highlightRect.size.height -= (insets.top + insets.bottom)
-            }
-            guard highlightRect.width > 0, highlightRect.height > 0 else { continue }
-
-            basePath.addPath(UIBezierPath(roundedRect: highlightRect, cornerRadius: 4).cgPath)
+        if insets != .zero {
+            highlightRect.origin.x += insets.left
+            highlightRect.origin.y += insets.top
+            highlightRect.size.width -= (insets.left + insets.right)
+            highlightRect.size.height -= (insets.top + insets.bottom)
         }
 
-        baseHighlightLayer.path = basePath.isEmpty ? nil : basePath
-
-        // Optional ruby headroom highlight (also content-space).
-        if rubyAnnotationVisibility == .visible && rubyHighlightHeadroom > 0 && selectionHasRuby(for: range) {
-            let rubyRects = rubyHighlightRectsInContentCoordinates(in: range)
-            if rubyRects.isEmpty {
-                rubyHighlightLayer.path = nil
-            } else {
-                let rubyPath = CGMutablePath()
-                for rect in rubyRects {
-                    rubyPath.addPath(UIBezierPath(roundedRect: rect, cornerRadius: 4).cgPath)
-                }
-                rubyHighlightLayer.path = rubyPath
-            }
+        if highlightRect.width > 0, highlightRect.height > 0 {
+            baseHighlightLayer.path = UIBezierPath(roundedRect: highlightRect, cornerRadius: 6).cgPath
         } else {
-            rubyHighlightLayer.path = nil
+            baseHighlightLayer.path = nil
         }
+
+        // Envelope highlight already includes ruby bounds.
+        rubyHighlightLayer.path = nil
     }
 
     private func baseHighlightRectsInContentCoordinates(in characterRange: NSRange) -> [CGRect] {
@@ -3801,12 +3806,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         return textKit2SegmentRectsInContentCoordinates(for: characterRange)
     }
 
-    private func rubyHighlightRectsInContentCoordinates(in selectionRange: NSRange) -> [CGRect] {
-        guard let attributedText else { return [] }
-        guard selectionRange.location != NSNotFound, selectionRange.length > 0 else { return [] }
-        guard NSMaxRange(selectionRange) <= attributedText.length else { return [] }
+    private func rubyHighlightRectsInContentCoordinates(forTokenIndex tokenIndex: Int) -> [CGRect] {
+        guard attributedText != nil else { return [] }
         guard rubyAnnotationVisibility == .visible else { return [] }
-        guard rubyHighlightHeadroom > 0 else { return [] }
 
         // Strategy 1 binding: highlight ruby using the actual overlay layer bounds.
         // This guarantees the highlight matches the furigana text exactly.
@@ -3817,15 +3819,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
         for layer in layers {
             guard let textLayer = layer as? CATextLayer else { continue }
-            guard let loc = textLayer.value(forKey: "rubyRangeLocation") as? Int,
-                  let len = textLayer.value(forKey: "rubyRangeLength") as? Int else {
+            guard let layerTokenIndex = textLayer.value(forKey: "rubyTokenIndex") as? Int else {
                 continue
             }
-            let runRange = NSRange(location: loc, length: len)
-            guard runRange.location != NSNotFound, runRange.length > 0 else { continue }
-
-            // Only highlight ruby that overlaps the selected token range.
-            if NSIntersectionRange(runRange, selectionRange).length <= 0 { continue }
+            if layerTokenIndex != tokenIndex { continue }
 
             let r = textLayer.frame
             if r.isNull == false, r.isEmpty == false {
@@ -3893,7 +3890,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         let baseXInView = baseWidestLine?.minX ?? 0
 
         // Ruby: use actual overlay layer frames (content-space) converted to view-space.
-        let rubyRectsInContent = rubyHighlightRectsInContentCoordinates(in: range)
+        let rubyRectsInContent = rubyHighlightRectsInContentCoordinates(forTokenIndex: selection.tokenIndex)
         let offset = contentOffset
         let rubyRectsInView = rubyRectsInContent.map { $0.offsetBy(dx: -offset.x, dy: -offset.y) }
         let rubyUnions = unionRectsByLine(rubyRectsInView)
