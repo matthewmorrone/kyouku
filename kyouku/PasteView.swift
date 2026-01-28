@@ -38,6 +38,7 @@ struct PasteView: View {
     @EnvironmentObject var readingOverrides: ReadingOverridesStore
     @EnvironmentObject var tokenBoundaries: TokenBoundariesStore
     @Environment(\.undoManager) private var undoManager
+    @Environment(\.appColorTheme) private var appColorTheme
 
     @State private var inputText: String = ""
     @State private var currentNote: Note? = nil
@@ -208,12 +209,15 @@ struct PasteView: View {
         return set
     }()
     private var alternateTokenPalette: [UIColor] {
-        [
-            UIColor(hexString: alternateTokenColorAHex) ?? .systemBlue,
-            UIColor(hexString: alternateTokenColorBHex) ?? .systemPink
-        ]
+        // Honor user overrides when provided; otherwise prefer theme defaults.
+        let defaultA = UIColor(appColorTheme.palette.tokenAlternateA)
+        let defaultB = UIColor(appColorTheme.palette.tokenAlternateB)
+
+        let chosenA = UIColor(hexString: alternateTokenColorAHex) ?? defaultA
+        let chosenB = UIColor(hexString: alternateTokenColorBHex) ?? defaultB
+        return [chosenA, chosenB]
     }
-    private var unknownTokenColor: UIColor { UIColor.systemOrange }
+    private var unknownTokenColor: UIColor { UIColor(appColorTheme.palette.unknownToken) }
     private var tokenHighlightsEnabled: Bool {
         guard incrementalLookupEnabled == false else { return false }
         return alternateTokenColors || highlightUnknownTokens
@@ -1432,7 +1436,7 @@ struct PasteView: View {
                             titleEditDraft = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Color.appTextSecondary)
                                 .font(.title3)
                         }
                         .buttonStyle(.plain)
@@ -3782,7 +3786,7 @@ extension PasteView {
             }
             .padding(14)
         }
-        .background(Color(UIColor.systemBackground))
+        .background(Color.appBackground)
         .onAppear {
             incrementalSheetDetent = incrementalPreferredSheetDetent
         }
@@ -3800,13 +3804,13 @@ extension PasteView {
 
                 Text(page.gloss)
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(Color.appTextSecondary)
                     .lineLimit(2)
 
                 if let kanaList = page.kanaList, kanaList.isEmpty == false {
                     Text(kanaList)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(Color.appTextSecondary)
                         .lineLimit(1)
                 }
             }

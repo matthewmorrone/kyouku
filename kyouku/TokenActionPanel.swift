@@ -487,7 +487,7 @@ private struct SplitMenuView: View {
 
                 Image(systemName: "arrow.left.arrow.right")
                     .font(.title3)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.appTextSecondary)
 
                 bucketButton(text: rightText, alignment: .leading, isEnabled: leftBucketCount > 0) {
                     moveCharacterLeftToRight()
@@ -511,7 +511,7 @@ private struct SplitMenuView: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(uiColor: .tertiarySystemBackground))
+                .fill(Color.appSurface)
         )
         .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
@@ -528,7 +528,7 @@ private struct SplitMenuView: View {
         .disabled(isEnabled == false)
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isEnabled ? Color.accentColor : Color.secondary.opacity(0.4), lineWidth: 1.5)
+                .stroke(isEnabled ? Color.appAccent : Color.appTextSecondary.opacity(0.5), lineWidth: 1.5)
         )
     }
 

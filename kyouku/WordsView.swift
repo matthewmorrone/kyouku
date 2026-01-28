@@ -166,6 +166,7 @@ struct WordsView: View {
                 }
             }
         }
+        .appThemedRoot()
         .task(id: searchTaskID) {
             await performLookup()
         }
@@ -251,6 +252,7 @@ struct WordsView: View {
                         .navigationTitle("Word")
                 }
             }
+            .appThemedRoot()
         }
     }
 
@@ -301,11 +303,11 @@ struct WordsView: View {
         }
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
+                .fill(Color.appSurface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color(uiColor: .separator).opacity(0.35), lineWidth: 1)
+                .stroke(Color.appBorder, lineWidth: 1)
         )
         .padding(.horizontal)
         .padding(.top, 12)
@@ -318,10 +320,12 @@ struct WordsView: View {
             List {
                 dictionarySection
             }
+            .appThemedScrollBackground()
         } else {
             List(selection: $selectedWordIDs) {
                 savedSection
             }
+            .appThemedScrollBackground()
         }
     }
 
@@ -331,14 +335,14 @@ struct WordsView: View {
             HStack() {
                 ProgressView()
                 Text("Searching …")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.appTextSecondary)
             }
         } else if let error = lookup.errorMessage, error.isEmpty == false {
             Text(error)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.appTextSecondary)
         } else if lookup.results.isEmpty {
             Text("No matches found for \(trimmedSearchText).")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.appTextSecondary)
         } else {
             ForEach(mergedLookupResults) { row in
                 NavigationLink {
@@ -362,7 +366,7 @@ struct WordsView: View {
     private var savedSection: some View {
         if store.words.isEmpty {
             Text("Saved entries appear here. Save a dictionary result to get started.")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.appTextSecondary)
         } else {
             ForEach(sortedWords) { word in
                 if isEditing {

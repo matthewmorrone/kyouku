@@ -8,6 +8,9 @@ struct SettingsView: View {
     @EnvironmentObject private var notesStore: NotesStore
     @EnvironmentObject private var readingOverrides: ReadingOverridesStore
 
+    @Environment(\.appColorTheme) private var appColorTheme
+    @AppStorage(AppColorThemeID.storageKey) private var appColorThemeRaw: String = AppColorThemeID.defaultValue.rawValue
+
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
@@ -127,6 +130,7 @@ struct SettingsView: View {
                 NavigationLink("SQL Playground") {
                     SQLPlaygroundView()
                 }
+                appThemeSection
                 textAppearanceSection
                 furiganaBehaviorSection
                 tokenHighlightSection
@@ -144,6 +148,7 @@ struct SettingsView: View {
                     .tint(.red)
                 }
             }
+            .appThemedScrollBackground()
             .navigationTitle("Settings")
             .fileImporter(
                 isPresented: $isImporting,
@@ -180,6 +185,41 @@ struct SettingsView: View {
             .onChange(of: wotdHour) { _, _ in Task { await rescheduleWordOfTheDay() } }
             .onChange(of: wotdMinute) { _, _ in Task { await rescheduleWordOfTheDay() } }
         }
+        .appThemedRoot()
+    }
+
+    private var appThemeSection: some View {
+        Section("App Theme") {
+            Picker("Theme", selection: $appColorThemeRaw) {
+                ForEach(AppColorThemeID.allCases) { themeID in
+                    Text(themeID.displayName).tag(themeID.rawValue)
+                }
+            }
+
+            HStack(spacing: 10) {
+                themeSwatch(appColorTheme.palette.accent)
+                themeSwatch(appColorTheme.palette.highlight)
+                themeSwatch(appColorTheme.palette.textPrimary)
+                themeSwatch(appColorTheme.palette.surface)
+                themeSwatch(appColorTheme.palette.background)
+                Spacer()
+                Text(appColorTheme.displayName)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Theme preview")
+        }
+    }
+
+    private func themeSwatch(_ color: Color) -> some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(color)
+            .frame(width: 18, height: 18)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.appBorder, lineWidth: 1)
+            )
     }
 
     private var textAppearanceSection: some View {

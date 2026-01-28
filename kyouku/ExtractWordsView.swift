@@ -111,6 +111,7 @@ struct ExtractWordsView: View {
                         Spacer()
 
                         Toggle("Apply edits to all", isOn: $propagateTokenEdits)
+                            .labelsHidden()
                             .font(.subheadline)
                             .toggleStyle(.switch)
                     }

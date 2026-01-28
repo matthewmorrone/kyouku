@@ -49,7 +49,7 @@ struct FuriganaRenderingHost: View {
             // We keep both panes alive at all times and only toggle visibility.
             // SwiftUI `if` conditionals would destroy/recreate the UIViewRepresentables,
             // which resets scroll offsets and can effectively "tear out" scroll sync state.
-            let paneBackground = isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground)
+            let paneBackground = isEditing ? Color.appSurface : Color.appBackground
             ZStack(alignment: .topLeading) {
                 Group {
                     if text.isEmpty {
@@ -77,9 +77,9 @@ struct FuriganaRenderingHost: View {
                     .allowsHitTesting(isEditing)
                     .accessibilityHidden(isEditing == false)
             }
-            .background(isEditing ? Color(UIColor.secondarySystemBackground) : Color(.systemBackground))
+            .background(isEditing ? Color.appSurface : Color.appBackground)
             .cornerRadius(12)
-            .roundedBorder(Color(.white), cornerRadius: 12)
+            .roundedBorder(Color.appBorder, cornerRadius: 12)
         }
     }
 

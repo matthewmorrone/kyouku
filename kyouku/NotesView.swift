@@ -56,7 +56,7 @@ struct NotesView: View {
                                 if notesPreviewLineCount > 0 {
                                     Text(note.text)
                                         .font(.subheadline)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(Color.appTextSecondary)
                                         .lineLimit(notesPreviewLineCount)
                                 }
                             }
@@ -140,6 +140,7 @@ struct NotesView: View {
                     }
                 }
             }
+            .appThemedScrollBackground()
             .navigationTitle("Notes")
             .environment(\.editMode, $editModeState)
             .overlay(alignment: .bottom) {
@@ -219,6 +220,7 @@ struct NotesView: View {
                 Text("Enter a new title for this note.")
             }
         }
+        .appThemedRoot()
     }
 
     private func handleDeleteNotes(deleteWords: Bool) {

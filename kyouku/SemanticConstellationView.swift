@@ -24,7 +24,7 @@ struct SemanticConstellationView: View {
             ZStack {
                 // Background
                 RoundedRectangle(cornerRadius: 16)
-                    .fill(Color(UIColor.secondarySystemBackground))
+                    .fill(Color.appSurface)
 
                 // Nodes
                 ForEach(Array(sentenceRanges.indices), id: \.self) { i in
@@ -51,16 +51,16 @@ struct SemanticConstellationView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         Circle().fill(nodeFillColor(hasEmbedding: true, isSelected: false)).frame(width: 10, height: 10)
-                        Text("Embedded").font(.caption).foregroundColor(.secondary)
+                        Text("Embedded").font(.caption).foregroundStyle(Color.appTextSecondary)
                     }
                     HStack(spacing: 8) {
                         Circle().fill(nodeFillColor(hasEmbedding: false, isSelected: false)).frame(width: 10, height: 10)
-                        Text("No embedding").font(.caption).foregroundColor(.secondary)
+                        Text("No embedding").font(.caption).foregroundStyle(Color.appTextSecondary)
                     }
                     HStack(spacing: 8) {
                         Circle().fill(nodeFillColor(hasEmbedding: true, isSelected: true)).frame(width: 12, height: 12)
                             .overlay(Circle().stroke(nodeStrokeColor(isSelected: true), lineWidth: 2))
-                        Text("Current sentence").font(.caption).foregroundColor(.secondary)
+                        Text("Current sentence").font(.caption).foregroundStyle(Color.appTextSecondary)
                     }
                 }
                 .padding(12)
@@ -86,7 +86,7 @@ struct SemanticConstellationView: View {
     }
 
     private func nodeStrokeColor(isSelected: Bool) -> Color {
-        isSelected ? Color(UIColor.systemYellow) : Color(UIColor.black).opacity(0.15)
+        isSelected ? Color.appHighlight : Color.appBorder
     }
 
     private func resolvedPositions(count: Int) -> [CGPoint] {

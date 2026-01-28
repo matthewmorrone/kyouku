@@ -101,21 +101,22 @@ struct FlashcardsView: View {
                 Text("This will stop the current review session.")
             }
         }
+        .appThemedRoot()
     }
     
     private var header: some View {
         HStack {
             Text("\(index + 1) / \(session.count)")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.appTextSecondary)
             Spacer()
             HStack(spacing: 12) {
                 Label("\(sessionAgain)", systemImage: "arrow.uturn.left.circle")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.appTextSecondary)
                 Label("\(sessionCorrect)", systemImage: "checkmark.circle.fill")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.appTextSecondary)
             }
         }
     }

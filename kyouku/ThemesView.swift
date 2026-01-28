@@ -28,7 +28,7 @@ struct ThemesView: View {
                                     .font(.headline)
                                 Text("\(cluster.noteCount) note\(cluster.noteCount == 1 ? "" : "s")")
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color.appTextSecondary)
                             }
                         }
                         .padding(.vertical, 4)
@@ -36,6 +36,7 @@ struct ThemesView: View {
                 }
             }
         }
+        .appThemedScrollBackground()
         .navigationTitle("Themes")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -68,13 +69,14 @@ private struct ThemeNotesListView: View {
                             .font(.headline)
                         Text(note.text)
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.appTextSecondary)
                             .lineLimit(3)
                     }
                     .padding(.vertical, 4)
                 }
             }
         }
+        .appThemedScrollBackground()
         .navigationTitle(cluster.label)
         .navigationBarTitleDisplayMode(.inline)
     }

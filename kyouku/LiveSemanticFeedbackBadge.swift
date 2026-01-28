@@ -17,7 +17,7 @@ struct LiveSemanticFeedbackBadge: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                .stroke(Color.appBorder, lineWidth: 1)
         )
     }
 
@@ -29,12 +29,12 @@ struct LiveSemanticFeedbackBadge: View {
         return HStack(spacing: 8) {
             Text(label)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.appTextSecondary)
                 .frame(width: 34, alignment: .leading)
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.12))
+                    RoundedRectangle(cornerRadius: 4).fill(Color.appSoftFill)
                     RoundedRectangle(cornerRadius: 4).fill(tint.opacity(0.75))
                         .frame(width: max(2, proxy.size.width * CGFloat(value01)))
                 }

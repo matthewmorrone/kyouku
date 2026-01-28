@@ -26,7 +26,7 @@ private struct ReadOnlySelectableTextView: UIViewRepresentable {
 
         view.text = text
         view.font = font
-        view.textColor = .label
+        view.textColor = .appTextPrimary
         return view
     }
 
@@ -37,8 +37,8 @@ private struct ReadOnlySelectableTextView: UIViewRepresentable {
         if uiView.font != font {
             uiView.font = font
         }
-        if uiView.textColor != .label {
-            uiView.textColor = .label
+        if uiView.textColor != .appTextPrimary {
+            uiView.textColor = .appTextPrimary
         }
     }
 }
@@ -67,10 +67,10 @@ struct SQLPlaygroundView: View {
                     font: UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
                 )
                 .frame(height: topHeight)
-                .background(Color(.secondarySystemBackground))
+                .background(Color.appSurface)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.secondary.opacity(0.5), lineWidth: 1)
+                    .stroke(Color.appBorder, lineWidth: 1)
                 )
                 .padding([.horizontal, .top])
 
@@ -82,10 +82,10 @@ struct SQLPlaygroundView: View {
                     .focused($isEditorFocused)
                     .frame(height: bottomHeight)
                     .padding(8)
-                    .background(Color(.secondarySystemBackground))
+                    .background(Color.appSurface)
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.secondary.opacity(0.5), lineWidth: 1)
+                            .stroke(Color.appBorder, lineWidth: 1)
                     )
                         .padding([.horizontal, .bottom])
             }
@@ -108,6 +108,7 @@ struct SQLPlaygroundView: View {
                 await reloadTablesIfNeeded()
             }
         }
+        .appThemedRoot()
     }
 
     private var tablePickerBar: some View {
@@ -144,7 +145,7 @@ struct SQLPlaygroundView: View {
             if let tablesErrorMessage, tablesErrorMessage.isEmpty == false {
                 Text(tablesErrorMessage)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.appTextSecondary)
             }
         }
     }

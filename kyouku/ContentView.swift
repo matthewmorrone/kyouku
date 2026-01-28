@@ -9,9 +9,15 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var router: AppRouter
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(AppColorThemeID.storageKey) private var appColorThemeRaw: String = AppColorThemeID.defaultValue.rawValue
+
+    private var appColorTheme: AppColorTheme {
+        AppColorTheme.from(rawValue: appColorThemeRaw, colorScheme: colorScheme)
+    }
 
     var body: some View {
-        TabView(selection: $router.selectedTab) {
+        let tabView = TabView(selection: $router.selectedTab) {
             PasteView()
                 .tabItem {
                     Label("Paste", systemImage: "text.page")
@@ -41,6 +47,17 @@ struct ContentView: View {
                     Label("Settings", systemImage: "gearshape")
                 }
                 .tag(AppTab.settings)
+        }
+
+        if appColorTheme.id == .systemDefault {
+            tabView
+                .environment(\.appColorTheme, appColorTheme)
+                .appThemedRoot(themeID: appColorTheme.id)
+        } else {
+            tabView
+                .tint(appColorTheme.palette.accent)
+                .environment(\.appColorTheme, appColorTheme)
+                .appThemedRoot(themeID: appColorTheme.id)
         }
     }
 }
