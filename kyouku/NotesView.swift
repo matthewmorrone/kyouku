@@ -18,8 +18,10 @@ struct NotesView: View {
     @AppStorage("notesPreviewLineCount") private var notesPreviewLineCount: Int = 3
 
     @State private var pendingDeleteOffsets: IndexSet? = nil
+    @State private var pendingDeleteNoteTitle: String? = nil
     @State private var showDeleteAlert: Bool = false
     @State private var pendingDeleteHasAssociatedWords: Bool = false
+    @State private var deleteAssociatedWords: Bool = false
     @State private var editModeState: EditMode = .inactive
     @State private var showRenameAlert: Bool = false
     @State private var renameTarget: Note? = nil
@@ -97,8 +99,12 @@ struct NotesView: View {
                                     // Trigger existing delete flow by setting pending offsets for this single note
                                 if let index = notesStore.notes.firstIndex(where: { $0.id == note.id }) {
                                     pendingDeleteOffsets = IndexSet(integer: index)
+                                    pendingDeleteNoteTitle = (note.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                                        ? note.title
+                                        : "Untitled"
                                     let noteID = notesStore.notes[index].id
                                     pendingDeleteHasAssociatedWords = store.words.contains { $0.sourceNoteID == noteID }
+                                    deleteAssociatedWords = false
                                     showDeleteAlert = true
                                 }
                             } label: {
@@ -121,6 +127,15 @@ struct NotesView: View {
                             }
                         }
                         pendingDeleteHasAssociatedWords = hasAssociatedWords
+                        if offsets.count == 1, let only = offsets.first, only < notesStore.notes.count {
+                            let note = notesStore.notes[only]
+                            pendingDeleteNoteTitle = (note.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                                ? note.title
+                                : "Untitled"
+                        } else {
+                            pendingDeleteNoteTitle = nil
+                        }
+                        deleteAssociatedWords = false
                         showDeleteAlert = true
                     }
                 }
@@ -145,6 +160,7 @@ struct NotesView: View {
                             .font(.title2)
                     }
                 }
+                /*
                 ToolbarItem(placement: .topBarLeading) {
                     NavigationLink {
                         ThemesView()
@@ -154,6 +170,7 @@ struct NotesView: View {
                     }
                     .accessibilityLabel("Themes")
                 }
+                */
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         withAnimation {
@@ -169,26 +186,27 @@ struct NotesView: View {
                     }
                 }
             }
-            .confirmationDialog("Delete note?", isPresented: $showDeleteAlert, titleVisibility: .visible) {
-                if pendingDeleteHasAssociatedWords {
-                    Button("Delete note and associated words", role: .destructive) {
-                        handleDeleteNotes(deleteWords: true)
+            // NOTE: `.confirmationDialog` uses a popover on iPad (arrow + anchor), which is
+            // often positioned poorly for context-menu actions. Present a true alert instead.
+            .background(
+                DeleteNotesAlertPresenter(
+                    isPresented: $showDeleteAlert,
+                    noteCount: pendingDeleteOffsets?.count ?? 0,
+                    noteTitle: pendingDeleteNoteTitle,
+                    hasAssociatedWords: pendingDeleteHasAssociatedWords,
+                    deleteAssociatedWords: $deleteAssociatedWords,
+                    onCancel: {
+                        pendingDeleteOffsets = nil
+                        pendingDeleteHasAssociatedWords = false
+                        deleteAssociatedWords = false
+                        pendingDeleteNoteTitle = nil
+                    },
+                    onConfirmDelete: {
+                        handleDeleteNotes(deleteWords: pendingDeleteHasAssociatedWords && deleteAssociatedWords)
+                        pendingDeleteNoteTitle = nil
                     }
-                }
-                Button(pendingDeleteHasAssociatedWords ? "Delete note only" : "Delete note", role: .destructive) {
-                    handleDeleteNotes(deleteWords: false)
-                }
-                Button("Cancel", role: .cancel) {
-                    pendingDeleteOffsets = nil
-                    pendingDeleteHasAssociatedWords = false
-                }
-            } message: {
-                if pendingDeleteHasAssociatedWords {
-                    Text("Do you also want to delete any words saved from this note?")
-                } else {
-                    Text("This will delete the selected note(s).")
-                }
-            }
+                )
+            )
             .alert("Rename Note", isPresented: $showRenameAlert, presenting: renameTarget) { note in
                 TextField("Title", text: $renameText)
                 Button("Save") {
@@ -259,6 +277,169 @@ struct NotesView: View {
         }
         toastDismissWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
+    }
+}
+
+private struct DeleteNotesAlertPresenter: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
+    let noteCount: Int
+    let noteTitle: String?
+    let hasAssociatedWords: Bool
+    @Binding var deleteAssociatedWords: Bool
+    let onCancel: () -> Void
+    let onConfirmDelete: () -> Void
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        UIViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        guard isPresented else {
+            // If our alert is still presented, dismiss it.
+            if let alert = context.coordinator.alert, alert.presentingViewController != nil {
+                alert.dismiss(animated: true)
+            }
+            context.coordinator.alert = nil
+            context.coordinator.toggleController = nil
+            return
+        }
+
+        // Avoid presenting twice.
+        if let alert = context.coordinator.alert {
+            // Keep the embedded toggle in sync if SwiftUI state changes while the alert is up.
+            context.coordinator.toggleController?.apply(
+                isOn: deleteAssociatedWords,
+                enabled: hasAssociatedWords,
+                onChanged: { newValue in
+                    deleteAssociatedWords = newValue
+                }
+            )
+            // Ensure the message stays accurate if association state changes.
+            let message: String = {
+                if hasAssociatedWords {
+                    return "This will delete the selected note(s). You can also delete any words saved from them."
+                }
+                return "This will delete the selected note(s)."
+            }()
+            if alert.message != message {
+                alert.message = message
+            }
+            return
+        }
+
+        let title: String = {
+            if noteCount == 1, let noteTitle, noteTitle.isEmpty == false {
+                return "Delete \"\(noteTitle)\"?"
+            }
+            if noteCount > 1 {
+                return "Delete \(noteCount) notes?"
+            }
+            return "Delete note?"
+        }()
+        let message: String = {
+            if hasAssociatedWords {
+                return "This will delete the selected note(s). You can also delete any words saved from them."
+            }
+            return "This will delete the selected note(s)."
+        }()
+
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+
+        if hasAssociatedWords {
+            // Embed a checkbox-like control (UISwitch) inside the alert using a dedicated content VC.
+            // This avoids brittle constraints against private UIAlertController subviews and prevents
+            // spacing/hit-testing issues.
+            let toggleController = AssociatedWordsToggleViewController()
+            toggleController.apply(
+                isOn: deleteAssociatedWords,
+                enabled: true,
+                onChanged: { newValue in
+                    deleteAssociatedWords = newValue
+                }
+            )
+            // Undocumented but common and stable: supplies a custom content view in `.alert` style.
+            alert.setValue(toggleController, forKey: "contentViewController")
+            context.coordinator.toggleController = toggleController
+        } else {
+            context.coordinator.toggleController = nil
+        }
+
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+            onCancel()
+            isPresented = false
+        })
+        alert.addAction(UIAlertAction(title: "Delete", style: .destructive) { _ in
+            onConfirmDelete()
+            isPresented = false
+        })
+
+        context.coordinator.alert = alert
+        uiViewController.present(alert, animated: true)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        var alert: UIAlertController? = nil
+        var toggleController: AssociatedWordsToggleViewController? = nil
+    }
+}
+
+private final class AssociatedWordsToggleViewController: UIViewController {
+    private let label = UILabel()
+    private let toggle = UISwitch()
+    private var onChanged: ((Bool) -> Void)? = nil
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        view.preservesSuperviewLayoutMargins = true
+        // Match UIAlertController's internal margins more closely.
+        view.layoutMargins = UIEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
+
+        label.text = "Delete associated words"
+        label.font = UIFont.systemFont(ofSize: 15)
+        label.numberOfLines = 1
+
+        let container = UIStackView(arrangedSubviews: [label, UIView(), toggle])
+        container.axis = .horizontal
+        container.alignment = .center
+        container.spacing = 12
+        container.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(container)
+
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: view.layoutMarginsGuide.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: view.layoutMarginsGuide.trailingAnchor),
+            container.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
+            container.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -6)
+        ])
+
+        toggle.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.onChanged?(self.toggle.isOn)
+        }, for: .valueChanged)
+
+        preferredContentSize = CGSize(width: 0, height: 44)
+    }
+
+    func apply(isOn: Bool, enabled: Bool, onChanged: @escaping (Bool) -> Void) {
+        self.onChanged = onChanged
+        if isViewLoaded {
+            toggle.isOn = isOn
+            toggle.isEnabled = enabled
+            label.textColor = enabled ? UIColor.label : UIColor.secondaryLabel
+            view.alpha = enabled ? 1.0 : 0.65
+        } else {
+            // Ensure initial state is applied when view loads.
+            loadViewIfNeeded()
+            toggle.isOn = isOn
+            toggle.isEnabled = enabled
+            label.textColor = enabled ? UIColor.label : UIColor.secondaryLabel
+            view.alpha = enabled ? 1.0 : 0.65
+        }
     }
 }
 

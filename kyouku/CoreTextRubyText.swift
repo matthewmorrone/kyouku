@@ -196,15 +196,36 @@ private extension CoreTextRubyRenderView {
 
             let glyphRanges = composedNonWhitespaceRanges(in: ns, range: range)
             if glyphRanges.count >= 2 {
-                let perGap = overhang / CGFloat(max(1, glyphRanges.count - 1))
+                // Bias-free distribution:
+                // - Keep spacing inside the headword (avoid a visible gap after the last glyph).
+                // - Cap per-gap kern for 2-glyph words.
+                // - Use `.expansion` to absorb remaining width without introducing gaps.
+                let internalGapCount = max(1, glyphRanges.count - 1)
+                let perGapRaw = overhang / CGFloat(internalGapCount)
+                let maxPerGap = max(0.0, baseFont.pointSize * 0.22)
+                let perGap = min(perGapRaw, maxPerGap)
                 for r in glyphRanges.dropLast() {
-                    mutable.addAttribute(.kern, value: perGap, range: r)
+                    if perGap > 0.001 {
+                        mutable.addAttribute(.kern, value: perGap, range: r)
+                    }
+                }
+
+                let appliedByKern = perGap * CGFloat(internalGapCount)
+                let remaining = max(0.0, overhang - appliedByKern)
+                if remaining > 0.01, baseWidth > 0.01 {
+                    let expansion = min(0.20, remaining / baseWidth)
+                    if expansion > 0.0005 {
+                        mutable.addAttribute(.expansion, value: expansion, range: range)
+                    }
                 }
             } else if let only = glyphRanges.first {
-                // Single glyph: add an invisible width attachment AFTER the glyph.
-                // This guarantees the layout width increases even if trailing kern would be ignored.
-                let insertAt = NSMaxRange(only)
-                attachmentsToInsert.append((insertAt: insertAt, width: overhang, startKey: range.location))
+                // Single glyph: prefer expansion to avoid introducing a visible trailing gap.
+                if baseWidth > 0.01 {
+                    let expansion = min(0.20, overhang / baseWidth)
+                    if expansion > 0.0005 {
+                        mutable.addAttribute(.expansion, value: expansion, range: only)
+                    }
+                }
             }
         }
 

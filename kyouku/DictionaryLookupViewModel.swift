@@ -12,10 +12,25 @@ import Darwin
 
 @MainActor
 final class DictionaryLookupViewModel: ObservableObject {
+    /// High-level lookup lifecycle used to gate presentation.
+    ///
+    /// IMPORTANT: The goal is to avoid layout-janky intermediate states (e.g. empty -> loading -> empty -> loading)
+    /// by treating selection lookup + deinflection + lemma fallbacks as a single transaction.
+    enum LookupPhase: Equatable {
+        case idle
+        /// Resolving a specific request. `requestID` is used to suppress redundant lookups.
+        case resolving(requestID: String)
+        /// Lookup completed (successfully or with no hits). Use `results`/`errorMessage` for details.
+        case ready(requestID: String)
+    }
+
     @Published var query: String = ""
     @Published var results: [DictionaryEntry] = []
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
+
+    /// Presentation gate for the inline panel. Keep this as the *primary* layout-driving signal.
+    @Published private(set) var phase: LookupPhase = .idle
 
     /// The term (surface or lemma) that actually produced the current `results`, if any.
     ///
@@ -24,6 +39,9 @@ final class DictionaryLookupViewModel: ObservableObject {
     @Published var resolvedEmbeddingTerm: String? = nil
 
     private let deinflectionCache = DeinflectionCache()
+
+    // Used to suppress redundant lookups (e.g., repeat tap on same token selection).
+    private var lastCompletedRequestID: String? = nil
 
     private static let lookupTraceEnabled: Bool = {
         ProcessInfo.processInfo.environment["DICT_LOOKUP_TRACE"] == "1"
@@ -74,28 +92,193 @@ final class DictionaryLookupViewModel: ObservableObject {
         return nil
     }
 
-    func lookup(term: String, mode: DictionarySearchMode = .japanese) async {
-        let primaryKeys = DictionaryKeyPolicy.keys(forDisplayKey: term)
-        query = primaryKeys.displayKey
+    private struct LookupOutcome {
+        let displayQuery: String
+        let resolvedEmbeddingTerm: String?
+        let results: [DictionaryEntry]
+        let errorMessage: String?
+    }
 
+    private func commitOutcome(_ outcome: LookupOutcome, requestID: String) {
+        // Batch all UI-relevant state writes together.
+        // Even though these are separate @Published properties, doing it synchronously in one place
+        // avoids drip-feeding intermediate layout states.
+        query = outcome.displayQuery
+        results = outcome.results
+        resolvedEmbeddingTerm = outcome.resolvedEmbeddingTerm
+        errorMessage = outcome.errorMessage
+        isLoading = false
+        phase = .ready(requestID: requestID)
+        lastCompletedRequestID = requestID
+    }
+
+    func reset() {
+        // Used by PasteView when clearing selection.
+        query = ""
+        results = []
         resolvedEmbeddingTerm = nil
+        errorMessage = nil
+        isLoading = false
+        phase = .idle
+        lastCompletedRequestID = nil
+    }
 
-        guard primaryKeys.lookupKey.isEmpty == false else {
-            results = []
-            errorMessage = nil
-            return
+    private func shouldSuppressLookup(for requestID: String) -> Bool {
+        if lastCompletedRequestID == requestID {
+            // Already completed and showing stable results for this selection.
+            return true
         }
+        if case .resolving(let active) = phase, active == requestID {
+            // Currently resolving this exact request.
+            return true
+        }
+        return false
+    }
+
+    /// Selection lookup + deinflection + lemma fallback in ONE transaction.
+    ///
+    /// This is the path used by PasteView to avoid UI jitter.
+    func lookupTransaction(
+        requestID: String,
+        selectedRange: NSRange,
+        inText text: String,
+        tokenSpans: [TextSpan],
+        lemmaFallbacks: [String],
+        mode: DictionarySearchMode = .japanese
+    ) async {
+        guard shouldSuppressLookup(for: requestID) == false else { return }
+
+        // Single presentation gate flip.
+        isLoading = true
+        errorMessage = nil
+        phase = .resolving(requestID: requestID)
+
+        let nsText = text as NSString
+        let displaySelection = (selectedRange.location != NSNotFound && selectedRange.length > 0 && selectedRange.location + selectedRange.length <= nsText.length)
+            ? nsText.substring(with: selectedRange)
+            : ""
+
+        // Compute everything off to the side; publish exactly once at the end.
+        let outcome: LookupOutcome
+        do {
+            // 1) Token-aligned selection lookup (surface -> deinflection).
+            let candidates = SelectionSpanResolver.candidates(selectedRange: selectedRange, tokenSpans: tokenSpans, text: nsText)
+            var triedLookupKeys: Set<String> = []
+            triedLookupKeys.reserveCapacity(candidates.count * 2)
+
+            func isReduplicationCandidate(_ candidate: SelectionSpanCandidate) -> (single: DictionaryKeyPolicy.Keys, leftSurface: String, rightSurface: String)? {
+                // Candidate must cover exactly two consecutive token spans.
+                guard let startIdx = tokenSpans.firstIndex(where: { $0.range.location == candidate.range.location }) else { return nil }
+                guard (startIdx + 1) < tokenSpans.count else { return nil }
+                let a = tokenSpans[startIdx]
+                let b = tokenSpans[startIdx + 1]
+                guard NSMaxRange(a.range) == b.range.location else { return nil }
+                guard NSMaxRange(b.range) == NSMaxRange(candidate.range) else { return nil }
+
+                let aKey = DictionaryKeyPolicy.lookupKey(for: a.surface)
+                let bKey = DictionaryKeyPolicy.lookupKey(for: b.surface)
+                guard aKey.isEmpty == false, aKey == bKey else { return nil }
+
+                return (DictionaryKeyPolicy.keys(forDisplayKey: a.surface), a.surface, b.surface)
+            }
+
+            var hitOutcome: LookupOutcome? = nil
+            if candidates.isEmpty == false {
+                for cand in candidates {
+                    // Reduplication structural preference (same logic as legacy selection lookup).
+                    if mode == .japanese, let redup = isReduplicationCandidate(cand) {
+                        let singleLookupKey = redup.single.lookupKey
+                        let singleRows: [DictionaryEntry] = (try? await Task.detached(priority: .userInitiated) {
+                            try await DictionarySQLiteStore.shared.lookup(term: singleLookupKey, limit: 1, mode: mode)
+                        }.value) ?? []
+
+                        if singleRows.isEmpty == false {
+                            let combinedRows: [DictionaryEntry] = (try? await Task.detached(priority: .userInitiated) {
+                                try await DictionarySQLiteStore.shared.lookup(term: cand.lookupKey, limit: 1, mode: mode)
+                            }.value) ?? []
+
+                            if combinedRows.isEmpty {
+                                let payload: (rows: [DictionaryEntry], priority: [Int64: Int]) = try await Task.detached(priority: .userInitiated) {
+                                    let rows = try await DictionarySQLiteStore.shared.lookup(term: singleLookupKey, limit: 50, mode: mode)
+                                    let ids = Array(Set(rows.map { $0.entryID }))
+                                    let priority = (try? await DictionarySQLiteStore.shared.fetchEntryPriorityScores(for: ids)) ?? [:]
+                                    return (rows, priority)
+                                }.value
+
+                                if payload.rows.isEmpty == false {
+                                    let ranked = rankResults(payload.rows, for: redup.single.displayKey, mode: mode, entryPriority: payload.priority)
+                                    hitOutcome = LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: redup.single.displayKey, results: ranked, errorMessage: nil)
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    if triedLookupKeys.contains(cand.lookupKey) { continue }
+                    triedLookupKeys.insert(cand.lookupKey)
+
+                    if let hit = try await lookupSurfaceThenDeinflect(displayKey: cand.displayKey, lookupKey: cand.lookupKey, mode: mode) {
+                        let ranked = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
+                        hitOutcome = LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: hit.displayKey, results: ranked, errorMessage: nil)
+                        break
+                    }
+                }
+            }
+
+            // 2) If no hits, try MeCab lemma fallbacks (treated as part of the same transaction).
+            if hitOutcome == nil {
+                let trimmedFallbacks = lemmaFallbacks
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { $0.isEmpty == false }
+
+                for lemma in trimmedFallbacks {
+                    // NOTE: We do NOT publish intermediate state between lemmas.
+                    let keys = DictionaryKeyPolicy.keys(forDisplayKey: lemma)
+                    guard keys.lookupKey.isEmpty == false else { continue }
+                    if let hit = try await lookupSurfaceThenDeinflect(displayKey: keys.displayKey, lookupKey: keys.lookupKey, mode: mode) {
+                        let ranked = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
+                        hitOutcome = LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: hit.displayKey, results: ranked, errorMessage: nil)
+                        break
+                    }
+                }
+            }
+
+            outcome = hitOutcome ?? LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: nil, results: [], errorMessage: nil)
+        } catch {
+            outcome = LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: nil, results: [], errorMessage: String(describing: error))
+        }
+
+        // Only commit if this request is still the active one.
+        // This avoids stale writes when rapid taps trigger overlapping Tasks.
+        switch phase {
+        case .resolving(let active) where active == requestID:
+            commitOutcome(outcome, requestID: requestID)
+        case .ready, .idle, .resolving:
+            break
+        }
+    }
+
+    func lookup(term: String, mode: DictionarySearchMode = .japanese) async {
+        // Keep legacy API behavior, but batch-publish state to avoid UI jitter.
+        let requestID = "term:\(mode):\(term.trimmingCharacters(in: .whitespacesAndNewlines))"
+        guard shouldSuppressLookup(for: requestID) == false else { return }
 
         isLoading = true
         errorMessage = nil
+        phase = .resolving(requestID: requestID)
 
+        let primaryKeys = DictionaryKeyPolicy.keys(forDisplayKey: term)
+        let outcome: LookupOutcome
         do {
+            guard primaryKeys.lookupKey.isEmpty == false else {
+                outcome = LookupOutcome(displayQuery: primaryKeys.displayKey, resolvedEmbeddingTerm: nil, results: [], errorMessage: nil)
+                commitOutcome(outcome, requestID: requestID)
+                return
+            }
+
             if let hit = try await lookupSurfaceThenDeinflect(displayKey: primaryKeys.displayKey, lookupKey: primaryKeys.lookupKey, mode: mode) {
-                let rankedRows = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
-                results = rankedRows
-                isLoading = false
-                errorMessage = nil
-                resolvedEmbeddingTerm = hit.displayKey
+                let ranked = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
+                outcome = LookupOutcome(displayQuery: primaryKeys.displayKey, resolvedEmbeddingTerm: hit.displayKey, results: ranked, errorMessage: nil)
 
                 if Self.lookupTraceEnabled {
                     if let trace = hit.deinflectionTrace {
@@ -104,18 +287,17 @@ final class DictionaryLookupViewModel: ObservableObject {
                         CustomLogger.shared.info("DictionaryLookup resolved display='\(hit.displayKey)' lookup='\(hit.lookupKey)' rows=\(hit.rows.count)")
                     }
                 }
-                return
+            } else {
+                outcome = LookupOutcome(displayQuery: primaryKeys.displayKey, resolvedEmbeddingTerm: nil, results: [], errorMessage: nil)
             }
         } catch {
-            results = []
-            errorMessage = String(describing: error)
-            isLoading = false
-            return
+            outcome = LookupOutcome(displayQuery: primaryKeys.displayKey, resolvedEmbeddingTerm: nil, results: [], errorMessage: String(describing: error))
         }
 
-        results = []
-        isLoading = false
-        resolvedEmbeddingTerm = nil
+        // Commit only if still relevant.
+        if case .resolving(let active) = phase, active == requestID {
+            commitOutcome(outcome, requestID: requestID)
+        }
     }
 
     // Backwards-compatible wrapper.
@@ -131,114 +313,17 @@ final class DictionaryLookupViewModel: ObservableObject {
         tokenSpans: [TextSpan],
         mode: DictionarySearchMode = .japanese
     ) async {
-        let nsText = text as NSString
-        let displaySelection = nsText.substring(with: selectedRange)
-        query = displaySelection
-
-        resolvedEmbeddingTerm = nil
-
-        let candidates = SelectionSpanResolver.candidates(selectedRange: selectedRange, tokenSpans: tokenSpans, text: nsText)
-        guard candidates.isEmpty == false else {
-            results = []
-            errorMessage = nil
-            return
-        }
-
-        isLoading = true
-        errorMessage = nil
-
-        var triedLookupKeys: Set<String> = []
-        triedLookupKeys.reserveCapacity(candidates.count * 2)
-
-        func isReduplicationCandidate(_ candidate: SelectionSpanCandidate) -> (single: DictionaryKeyPolicy.Keys, leftSurface: String, rightSurface: String)? {
-            // Candidate must cover exactly two consecutive token spans.
-            guard let startIdx = tokenSpans.firstIndex(where: { $0.range.location == candidate.range.location }) else { return nil }
-            guard (startIdx + 1) < tokenSpans.count else { return nil }
-            let a = tokenSpans[startIdx]
-            let b = tokenSpans[startIdx + 1]
-            guard NSMaxRange(a.range) == b.range.location else { return nil }
-            guard NSMaxRange(b.range) == NSMaxRange(candidate.range) else { return nil }
-
-            let aKey = DictionaryKeyPolicy.lookupKey(for: a.surface)
-            let bKey = DictionaryKeyPolicy.lookupKey(for: b.surface)
-            guard aKey.isEmpty == false, aKey == bKey else { return nil }
-
-            return (DictionaryKeyPolicy.keys(forDisplayKey: a.surface), a.surface, b.surface)
-        }
-
-        for cand in candidates {
-            do {
-                // Reduplication is structural: if X X and X is a dictionary entry while X X is not,
-                // prefer looking up X and do not treat X X as a lexical unit.
-                if mode == .japanese, let redup = isReduplicationCandidate(cand) {
-                    let singleLookupKey = redup.single.lookupKey
-                    // Only apply if single exists and combined does not.
-                    let singleRows: [DictionaryEntry] = (try? await Task.detached(priority: .userInitiated) {
-                        try await DictionarySQLiteStore.shared.lookup(term: singleLookupKey, limit: 1, mode: mode)
-                    }.value) ?? []
-
-                    if singleRows.isEmpty == false {
-                        let combinedRows: [DictionaryEntry] = (try? await Task.detached(priority: .userInitiated) {
-                            try await DictionarySQLiteStore.shared.lookup(term: cand.lookupKey, limit: 1, mode: mode)
-                        }.value) ?? []
-
-                        if combinedRows.isEmpty {
-                            if ProcessInfo.processInfo.environment["REDUP_TRACE"] == "1" {
-                                CustomLogger.shared.info("Selection lookup reduplication: skipping combined «\(cand.displayKey)» and looking up «\(redup.single.displayKey)»")
-                            }
-
-                            let payload: (rows: [DictionaryEntry], priority: [Int64: Int]) = try await Task.detached(priority: .userInitiated) {
-                                let rows = try await DictionarySQLiteStore.shared.lookup(term: singleLookupKey, limit: 50, mode: mode)
-                                let ids = Array(Set(rows.map { $0.entryID }))
-                                let priority = (try? await DictionarySQLiteStore.shared.fetchEntryPriorityScores(for: ids)) ?? [:]
-                                return (rows, priority)
-                            }.value
-
-                            if payload.rows.isEmpty == false {
-                                let rankedRows = rankResults(payload.rows, for: redup.single.displayKey, mode: mode, entryPriority: payload.priority)
-                                results = rankedRows
-                                isLoading = false
-                                errorMessage = nil
-                                return
-                            }
-                        }
-                    }
-                }
-
-                if triedLookupKeys.contains(cand.lookupKey) {
-                    continue
-                }
-                triedLookupKeys.insert(cand.lookupKey)
-
-                if let hit = try await lookupSurfaceThenDeinflect(displayKey: cand.displayKey, lookupKey: cand.lookupKey, mode: mode) {
-                    let rankedRows = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
-                    results = rankedRows
-                    isLoading = false
-                    errorMessage = nil
-                    resolvedEmbeddingTerm = hit.displayKey
-                    if Self.lookupTraceEnabled {
-                        if let trace = hit.deinflectionTrace {
-                            CustomLogger.shared.info("Selection lookup resolved via deinflection range=(\(cand.range.location),\(cand.range.length)) display='\(cand.displayKey)' -> lemma='\(hit.displayKey)' trace=[\(trace)] rows=\(hit.rows.count)")
-                        } else {
-                            CustomLogger.shared.info("Selection lookup resolved range=(\(cand.range.location),\(cand.range.length)) display='\(hit.displayKey)' lookup='\(hit.lookupKey)' rows=\(hit.rows.count)")
-                        }
-                    }
-                    return
-                }
-            } catch {
-                results = []
-                errorMessage = String(describing: error)
-                isLoading = false
-                return
-            }
-        }
-
-        results = []
-        isLoading = false
-        resolvedEmbeddingTerm = nil
-        if Self.lookupTraceEnabled {
-            CustomLogger.shared.info("Selection lookup: no hits for range=(\(selectedRange.location),\(selectedRange.length))")
-        }
+        // Legacy selection API remains, but is implemented via the transaction engine.
+        // Use a deterministic requestID that prevents redundant lookups.
+        let requestID = "sel:\(mode):\(selectedRange.location):\(selectedRange.length):\(text.hashValue)"
+        await lookupTransaction(
+            requestID: requestID,
+            selectedRange: selectedRange,
+            inText: text,
+            tokenSpans: tokenSpans,
+            lemmaFallbacks: [],
+            mode: mode
+        )
     }
 
     // Backwards-compatible wrapper.

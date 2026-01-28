@@ -259,8 +259,28 @@ struct RubyText: UIViewRepresentable {
         uiView.rubyBaselineGap = rubyBaselineGap
         uiView.rubyReservedTopMargin = (annotationVisibility == .removed) ? 0 : max(0, rubyHeadroom)
 
-        // Keep selection highlight geometry stable even when we don't reapply attributed text.
+        // IMPORTANT:
+        // TextKit 2 `NSTextLayoutFragment.topMargin` only reserves space above the *first* line
+        // of each fragment, not above every visual line. Paragraph-level spacing is the most
+        // reliable way to ensure *every* wrapped line has enough vertical room for ruby.
+        //
+        // Use a minimum line height that includes the ruby headroom.
+        let rubyMetricsEnabled = (annotationVisibility != .removed)
+
+        // Base font is also used for selection highlight geometry.
         let baseFont = UIFont.systemFont(ofSize: fontSize)
+
+        // Allocate vertical room for ruby on EVERY visual line (including soft wraps).
+        // TextKit 2 fragment `topMargin` cannot cover subsequent wrapped lines.
+        let effectiveLineSpacing: CGFloat = {
+            let base = max(0, extraGap)
+            guard rubyMetricsEnabled else { return base }
+            // Reserve at least the ruby headroom between baselines so ruby from the next line
+            // cannot collide with the base glyphs of the previous line.
+            return max(base, rubyHeadroom)
+        }()
+
+        // Keep selection highlight geometry stable even when we don't reapply attributed text.
         uiView.selectionHighlightInsets = selectionHighlightInsets(for: baseFont)
 
         var renderHasher = Hasher()
@@ -270,6 +290,9 @@ struct RubyText: UIViewRepresentable {
         renderHasher.combine(Int((lineHeightMultiple * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((extraGap * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((globalKerning * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(Int((rubyHeadroom * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(rubyMetricsEnabled ? 1 : 0)
+        renderHasher.combine(Int((effectiveLineSpacing * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(rubyHorizontalAlignment == .leading ? 1 : 0)
         renderHasher.combine(wrapLines ? 1 : 0)
         // Only treat `.removed` as a layout-affecting change; `.visible` vs
@@ -323,7 +346,9 @@ struct RubyText: UIViewRepresentable {
                 paragraph.lineBreakStrategy = wrapLines ? [.pushOut] : []
             }
             paragraph.lineHeightMultiple = max(0.8, lineHeightMultiple)
-            paragraph.lineSpacing = max(0, extraGap)
+            paragraph.lineSpacing = effectiveLineSpacing
+            paragraph.minimumLineHeight = 0
+            paragraph.maximumLineHeight = 0
             mutable.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
             mutable.addAttribute(.foregroundColor, value: UIColor.label, range: fullRange)
             mutable.addAttribute(.font, value: baseFont, range: fullRange)
@@ -1276,7 +1301,23 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         guard preferredWrapBreakIndices.isEmpty == false else { return true }
 
         if preferredWrapBreakIndices.contains(charIndex) {
+            if isRubyWidthSpacer(atDisplayIndex: charIndex - 1) {
+                return false
+            }
             return true
+        }
+
+        // Ruby headword padding uses invisible width spacer characters (U+FFFC with a CTRunDelegate).
+        // We must NOT create new generic breakpoints at spacer positions (that can split tokens).
+        // Instead, only allow breaking BEFORE a *leading* spacer run when it immediately precedes
+        // an allowed token boundary.
+        if isRubyWidthSpacer(atDisplayIndex: charIndex) {
+            let nextNonSpacer = nextNonSpacerDisplayIndex(startingAt: charIndex)
+            if nextNonSpacer != charIndex,
+               preferredWrapBreakIndices.contains(nextNonSpacer),
+               isLeadingRubyWidthSpacerRun(startingAt: charIndex, nextNonSpacer: nextNonSpacer) {
+                return true
+            }
         }
 
         // Always allow natural breaks after real whitespace/newlines.
@@ -1295,6 +1336,55 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         }
 
         return false
+    }
+
+    private func isRubyWidthSpacer(atDisplayIndex displayIndex: Int) -> Bool {
+        guard let attributedText else { return false }
+        let i = displayIndex
+        guard i >= 0, i < attributedText.length else { return false }
+
+        // Fast path: our spacers always use a CTRunDelegate for width.
+        if attributedText.attribute(kCTRunDelegateAttributeName as NSAttributedString.Key, at: i, effectiveRange: nil) != nil {
+            return true
+        }
+
+        // Fallback: also treat raw object-replacement as spacer.
+        let ns = attributedText.string as NSString
+        guard ns.length > 0, i < ns.length else { return false }
+        return ns.character(at: i) == 0xFFFC
+    }
+
+    private func nextNonSpacerDisplayIndex(startingAt displayIndex: Int) -> Int {
+        guard let attributedText else { return displayIndex }
+        var i = max(0, displayIndex)
+        let upper = attributedText.length
+        while i < upper, isRubyWidthSpacer(atDisplayIndex: i) {
+            i += 1
+        }
+        return i
+    }
+
+    private func hasRubyReadingAttribute(atDisplayIndex displayIndex: Int) -> Bool {
+        guard let attributedText else { return false }
+        let i = displayIndex
+        guard i >= 0, i < attributedText.length else { return false }
+        return attributedText.attribute(.rubyReadingText, at: i, effectiveRange: nil) != nil
+    }
+
+    private func isLeadingRubyWidthSpacerRun(startingAt spacerIndex: Int, nextNonSpacer: Int) -> Bool {
+        // Leading spacer(s): immediately followed by a ruby-bearing headword character.
+        // Trailing spacer(s): immediately preceded by a ruby-bearing headword character.
+        guard hasRubyReadingAttribute(atDisplayIndex: nextNonSpacer) else { return false }
+
+        // Find the previous non-spacer character (if any) so we can reject trailing spacers.
+        var prev = spacerIndex - 1
+        while prev >= 0, isRubyWidthSpacer(atDisplayIndex: prev) {
+            prev -= 1
+        }
+        if prev >= 0, hasRubyReadingAttribute(atDisplayIndex: prev) {
+            return false
+        }
+        return true
     }
 
     @available(iOS 15.0, *)

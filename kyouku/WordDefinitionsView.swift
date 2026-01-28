@@ -40,6 +40,9 @@ struct WordDefinitionsView: View {
     @State private var detectedGrammar: [DetectedGrammarPattern] = []
     @State private var similarWords: [String] = []
 
+    @State private var componentPreviewPart: TokenPart? = nil
+    @State private var componentToOpen: TokenPart? = nil
+
     private struct ListAssignmentTarget: Identifiable, Hashable {
         let id = UUID()
         let surface: String
@@ -107,20 +110,36 @@ struct WordDefinitionsView: View {
             // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
 
             if tokenParts.count > 1 {
-                Section("Parts") {
-                    ForEach(tokenParts) { part in
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text(part.surface)
-                                .font(.body.weight(.semibold))
-                            if let kana = part.kana?.trimmingCharacters(in: .whitespacesAndNewlines), kana.isEmpty == false, kana != part.surface {
-                                Text("(\(kana))")
-                                    .font(.callout)
+                Section("Components") {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("From")
+                            .foregroundStyle(.secondary)
+
+                        ForEach(Array(tokenParts.enumerated()), id: \.offset) { idx, part in
+                            if idx > 0 {
+                                Text("+")
                                     .foregroundStyle(.secondary)
                             }
-                            Spacer(minLength: 0)
+
+                            Button {
+                                componentPreviewPart = part
+                            } label: {
+                                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                                    Text(part.surface)
+                                        .font(.body.weight(.semibold))
+                                    if let kana = part.kana?.trimmingCharacters(in: .whitespacesAndNewlines), kana.isEmpty == false, kana != part.surface {
+                                        Text("\(kana)")
+                                            .font(.callout)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .textSelection(.enabled)
+
+                        Spacer(minLength: 0)
                     }
+                    .textSelection(.enabled)
                 }
             }
 
@@ -258,6 +277,25 @@ struct WordDefinitionsView: View {
                 }
             }
         }
+        .sheet(item: $componentPreviewPart) { part in
+            ComponentPreviewSheet(part: part) { selectedPart in
+                componentPreviewPart = nil
+                DispatchQueue.main.async {
+                    componentToOpen = selectedPart
+                }
+            }
+        }
+        .navigationDestination(item: $componentToOpen) { part in
+            WordDefinitionsView(
+                surface: part.surface,
+                kana: part.kana,
+                contextSentence: contextSentence,
+                lemmaCandidates: [],
+                tokenPartOfSpeech: nil,
+                sourceNoteID: sourceNoteID,
+                tokenParts: []
+            )
+        }
     }
 
     // MARK: Header
@@ -268,6 +306,17 @@ struct WordDefinitionsView: View {
     }
 
     // MARK: Definitions
+    private func isCommonEntry(_ entry: DictionaryEntry) -> Bool {
+        if let detail = entryDetails.first(where: { $0.entryID == entry.entryID }) {
+            return detail.isCommon
+        }
+        return entry.isCommon
+    }
+
+    private func commonFirstStable(_ entries: [DictionaryEntry]) -> [DictionaryEntry] {
+        entries.filter { isCommonEntry($0) } + entries.filter { isCommonEntry($0) == false }
+    }
+
     private var definitionRows: [DefinitionRow] {
         let headword = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard headword.isEmpty == false else { return [] }
@@ -297,7 +346,9 @@ struct WordDefinitionsView: View {
             return false
         }
 
-        guard relevant.isEmpty == false else { return [] }
+        let relevantOrdered = commonFirstStable(relevant)
+
+        guard relevantOrdered.isEmpty == false else { return [] }
 
         if isKanji {
             // Rows per distinct kana reading, folding hiragana/katakana variants
@@ -309,7 +360,7 @@ struct WordDefinitionsView: View {
                 var entries: [DictionaryEntry]
             }
             var byReadingKey: [String: Bucket] = [:]
-            for (idx, entry) in relevant.enumerated() {
+            for (idx, entry) in relevantOrdered.enumerated() {
                 let raw = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard raw.isEmpty == false else { continue }
                 let key = kanaFoldToHiragana(raw)
@@ -341,13 +392,14 @@ struct WordDefinitionsView: View {
             }
         } else {
             // Single kana row with all meanings.
-            let pages = pagesForEntries(relevant)
+            let pages = pagesForEntries(relevantOrdered)
             guard pages.isEmpty == false else { return [] }
             return [DefinitionRow(headword: headword, reading: headword, pages: pages)]
         }
     }
 
     private func pagesForEntries(_ entries: [DictionaryEntry]) -> [DefinitionPage] {
+        let entries = commonFirstStable(entries)
         // Preserve first-seen ordering across all gloss parts.
         var order: [String] = []
         var buckets: [String: DictionaryEntry] = [:]
@@ -933,19 +985,25 @@ struct WordDefinitionsView: View {
                     }
                 }
             }
-            entries = merged
-            let details = await loadEntryDetails(for: merged)
-            if coarseTokenPOS() != nil {
-                entryDetails = details.sorted { lhs, rhs in
-                    let lhsTier = lhs.senses.contains(where: senseMatchesTokenPOS) ? 0 : 1
-                    let rhsTier = rhs.senses.contains(where: senseMatchesTokenPOS) ? 0 : 1
-                    if lhsTier != rhsTier { return lhsTier < rhsTier }
-                    if lhs.isCommon != rhs.isCommon { return lhs.isCommon && rhs.isCommon == false }
-                    return lhs.entryID < rhs.entryID
+            // Display requirement: common entries should appear before non-common ones.
+            // Preserve the existing relative order within each group.
+            let mergedCommonFirst = merged.filter { $0.isCommon } + merged.filter { $0.isCommon == false }
+            entries = mergedCommonFirst
+            let details = await loadEntryDetails(for: mergedCommonFirst)
+            let baseOrderedDetails: [DictionaryEntryDetail] = {
+                // Keep any existing ordering, but optionally push POS-matching senses higher.
+                if coarseTokenPOS() != nil {
+                    return details.sorted { lhs, rhs in
+                        let lhsTier = lhs.senses.contains(where: senseMatchesTokenPOS) ? 0 : 1
+                        let rhsTier = rhs.senses.contains(where: senseMatchesTokenPOS) ? 0 : 1
+                        if lhsTier != rhsTier { return lhsTier < rhsTier }
+                        return lhs.entryID < rhs.entryID
+                    }
                 }
-            } else {
-                entryDetails = details
-            }
+                return details
+            }()
+            // Final display requirement: common entries should all appear before non-common ones.
+            entryDetails = baseOrderedDetails.filter { $0.isCommon } + baseOrderedDetails.filter { $0.isCommon == false }
 
             let sentenceTerms = sentenceLookupTerms(primaryTerms: terms, entryDetails: details)
             do {
@@ -994,11 +1052,23 @@ struct WordDefinitionsView: View {
     }
 
     private func sentenceLookupTerms(primaryTerms: [String], entryDetails: [DictionaryEntryDetail]) -> [String] {
+        let partTerms: Set<String> = {
+            var s: Set<String> = []
+            for part in tokenParts {
+                let surface = part.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                if surface.isEmpty == false { s.insert(surface) }
+                if let kana = part.kana?.trimmingCharacters(in: .whitespacesAndNewlines), kana.isEmpty == false { s.insert(kana) }
+            }
+            return s
+        }()
+
         var out: [String] = []
         func add(_ value: String?) {
             guard let value else { return }
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.isEmpty == false else { return }
+            // Avoid pulling in examples for component terms of a compound (e.g. 思考 + 回路).
+            guard partTerms.contains(trimmed) == false else { return }
             if out.contains(trimmed) == false { out.append(trimmed) }
         }
 
@@ -1071,12 +1141,24 @@ struct WordDefinitionsView: View {
             }
         }
 
-        add(surface)
-        add(kana)
-        for lemma in lemmaCandidates { add(lemma) }
-        if let first = entryDetails.first {
-            add(primaryHeadword(for: first))
-            add(first.kanaForms.first?.text)
+        // Keep highlighting aligned with sentence lookup terms (and avoid component-term highlighting).
+        let lookupAligned = sentenceLookupTerms(primaryTerms: [surface, kana].compactMap { $0 }, entryDetails: entryDetails)
+        for term in lookupAligned { add(term) }
+        // Lemma candidates can include component lemmas for compounds; filter those out.
+        let partTerms: Set<String> = {
+            var s: Set<String> = []
+            for part in tokenParts {
+                let surface = part.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                if surface.isEmpty == false { s.insert(surface) }
+                if let kana = part.kana?.trimmingCharacters(in: .whitespacesAndNewlines), kana.isEmpty == false { s.insert(kana) }
+            }
+            return s
+        }()
+        for lemma in lemmaCandidates {
+            let trimmed = lemma.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { continue }
+            guard partTerms.contains(trimmed) == false else { continue }
+            add(trimmed)
         }
 
         guard terms.isEmpty == false else { return AttributedString(sentence) }
@@ -1405,6 +1487,117 @@ private struct WordListAssignmentSheet: View {
         if let created = store.createList(name: name) {
             selectedListIDs.insert(created.id)
             newListName = ""
+        }
+    }
+}
+
+private struct ComponentPreviewSheet: View {
+    let part: WordDefinitionsView.TokenPart
+    let onOpenFullPage: (WordDefinitionsView.TokenPart) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var lookupViewModel = DictionaryLookupViewModel()
+
+    private var displayKana: String? {
+        let trimmed = part.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, trimmed.isEmpty == false, trimmed != part.surface else { return nil }
+        return trimmed
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(part.surface)
+                                .font(.title2.weight(.semibold))
+                            if let displayKana {
+                                Text(displayKana)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+
+                        if let first = lookupViewModel.results.first, first.gloss.isEmpty == false {
+                            Text(first.gloss)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(4)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                if lookupViewModel.isLoading {
+                    Section {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Loading…")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else if let error = lookupViewModel.errorMessage, error.isEmpty == false {
+                    Section {
+                        Text(error)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if lookupViewModel.results.isEmpty {
+                    Section {
+                        Text("No matches.")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Top matches") {
+                        ForEach(Array(lookupViewModel.results.prefix(5))) { entry in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(entry.kanji)
+                                        .font(.body.weight(.semibold))
+                                    if let kana = entry.kana, kana.isEmpty == false, kana != entry.kanji {
+                                        Text(kana)
+                                            .font(.callout)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                if entry.gloss.isEmpty == false {
+                                    Text(entry.gloss)
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(3)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Dictionary")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Open full page") {
+                        dismiss()
+                        DispatchQueue.main.async {
+                            onOpenFullPage(part)
+                        }
+                    }
+                    .font(.body.weight(.semibold))
+                }
+            }
+            .task(id: part.id) {
+                await lookupViewModel.lookup(term: part.surface, mode: .japanese)
+                if lookupViewModel.results.isEmpty, let kana = part.kana, kana.isEmpty == false, kana != part.surface {
+                    await lookupViewModel.lookup(term: kana, mode: .japanese)
+                }
+            }
         }
     }
 }

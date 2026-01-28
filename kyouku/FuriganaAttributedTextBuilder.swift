@@ -570,6 +570,13 @@ private extension FuriganaAttributedTextBuilder {
     private struct HeadwordSpacingAdjustment {
         let range: NSRange
         let kern: CGFloat
+        let expansion: CGFloat
+
+        init(range: NSRange, kern: CGFloat = 0, expansion: CGFloat = 0) {
+            self.range = range
+            self.kern = kern
+            self.expansion = expansion
+        }
     }
 
     private static let whitespaceAndNewlineSet = CharacterSet.whitespacesAndNewlines
@@ -776,22 +783,42 @@ private extension FuriganaAttributedTextBuilder {
         }
 
         if glyphRanges.count >= 2 {
-            // Distribute padding across inter-glyph gaps.
-            // IMPORTANT: `.kern` affects spacing BETWEEN characters. Applying `.kern` to a
-            // single-character range is typically ineffective, so we apply one kern value
-            // across the full headword *excluding the final glyph*.
-            let perGap = totalPad / CGFloat(max(1, glyphRanges.count - 1))
+            // Bias-free distribution:
+            // - Keep spacing *inside* the headword (avoid trailing padding that creates a visible
+            //   gap to the next character and looks right-shifted).
+            // - Cap per-gap kern so 2-glyph headwords don't get one giant internal gap.
+            // - Use `.expansion` on the run to absorb remaining width without introducing gaps.
+            let internalGapCount = max(1, glyphRanges.count - 1)
+            let perGapRaw = totalPad / CGFloat(internalGapCount)
+            let maxPerGap = max(0.0, baseFont.pointSize * 0.22)
+            let perGap = min(perGapRaw, maxPerGap)
+
             if let first = glyphRanges.first, let last = glyphRanges.last {
                 let kernRangeLength = max(0, last.location - first.location)
-                if kernRangeLength > 0 {
+                if kernRangeLength > 0, perGap > 0.001 {
                     let kernRange = NSRange(location: first.location, length: kernRangeLength)
                     adjustments.append(HeadwordSpacingAdjustment(range: kernRange, kern: perGap))
                 }
             }
+
+            let appliedByKern = perGap * CGFloat(internalGapCount)
+            let remaining = max(0.0, totalPad - appliedByKern)
+            if remaining > epsilon, baseWidth > 0.01 {
+                // Approximate: treat expansion as a fractional increase over the run width.
+                // Clamp to avoid visibly stretched glyphs.
+                let expansion = min(0.20, remaining / baseWidth)
+                if expansion > 0.0005 {
+                    adjustments.append(HeadwordSpacingAdjustment(range: headwordRange, expansion: expansion))
+                }
+            }
         } else if let only = glyphRanges.first {
-            // Single glyph (common for lone kanji): TextKit kerning cannot widen a single glyph
-            // without affecting adjacent characters. Leave this unadjusted in TextKit mode.
-            _ = only
+            // Single glyph: use expansion instead of trailing padding.
+            if baseWidth > 0.01 {
+                let expansion = min(0.20, totalPad / baseWidth)
+                if expansion > 0.0005 {
+                    adjustments.append(HeadwordSpacingAdjustment(range: only, expansion: expansion))
+                }
+            }
         }
 
         return adjustments
@@ -805,9 +832,12 @@ private extension FuriganaAttributedTextBuilder {
         for adjustment in adjustments {
             let key = adjustment.range.location
             if let existing = targets[key] {
-                if adjustment.kern > existing.kern {
-                    targets[key] = adjustment
-                }
+                let merged = HeadwordSpacingAdjustment(
+                    range: existing.range,
+                    kern: max(existing.kern, adjustment.kern),
+                    expansion: max(existing.expansion, adjustment.expansion)
+                )
+                targets[key] = merged
             } else {
                 targets[key] = adjustment
             }
@@ -821,11 +851,15 @@ private extension FuriganaAttributedTextBuilder {
         guard adjustments.isEmpty == false else { return }
         let length = attributed.length
         for adjustment in adjustments {
-            guard adjustment.kern > 0 else { continue }
             let range = adjustment.range
             guard range.location != NSNotFound, range.length > 0 else { continue }
             guard NSMaxRange(range) <= length else { continue }
-            attributed.addAttribute(.kern, value: adjustment.kern, range: range)
+            if adjustment.kern > 0.0005 {
+                attributed.addAttribute(.kern, value: adjustment.kern, range: range)
+            }
+            if adjustment.expansion > 0.0005 {
+                attributed.addAttribute(.expansion, value: adjustment.expansion, range: range)
+            }
         }
     }
 }

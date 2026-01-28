@@ -3,6 +3,10 @@ import UIKit
 import Foundation
 
 struct PasteView: View {
+    // NOTE: The semantic heatmap/constellation is intentionally disabled for now.
+    // Leave the code in place so we can revisit it later.
+    private static let sentenceHeatmapEnabledFlag: Bool = false
+
     @EnvironmentObject var notes: NotesStore
     private struct TokenActionPanelFramePreferenceKey: PreferenceKey {
         static var defaultValue: CGRect? = nil
@@ -148,6 +152,9 @@ struct PasteView: View {
     @AppStorage("readingWrapLines") private var wrapLines: Bool = false
     @AppStorage("readingAlternateTokenColors") private var alternateTokenColors: Bool = false
     @AppStorage("readingHighlightUnknownTokens") private var highlightUnknownTokens: Bool = false
+    // One-time migration to disable token overlay highlighting that can hurt responsiveness.
+    // Users can re-enable manually in the furigana options menu if desired.
+    @AppStorage("paste.migrated.disableTokenOverlayHighlighting.v1") private var didDisableTokenOverlayHighlightingV1: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage(FuriganaKnownWordSettings.modeKey) private var knownWordFuriganaModeRaw: String = FuriganaKnownWordSettings.defaultModeRawValue
@@ -408,16 +415,24 @@ struct PasteView: View {
                         }
                     }
                 }
-                updateSentenceHeatmapSelection(for: newSelection?.range)
+                // Tapping a token for dictionary lookup should NOT trigger the sentence-level
+                // semantic heatmap (embedding background blocks), which reads as a faint highlight
+                // across other tokens.
+                if newID != nil {
+                    clearSentenceHeatmap()
+                }
                 handleSelectionLookup()
             }
             .onChange(of: selectionController.persistentSelectionRange) { _, newRange in
                 guard incrementalLookupEnabled == false else { return }
-                updateSentenceHeatmapSelection(for: newRange)
+                // Do not drive the sentence heatmap off normal selection changes.
+                // Sentence selection is handled explicitly by the constellation sheet.
+                _ = newRange
             }
             .onChange(of: incrementalSelectedCharacterRange) { _, newRange in
                 guard incrementalLookupEnabled else { return }
-                updateSentenceHeatmapSelection(for: newRange)
+                // Do not drive the sentence heatmap off normal selection changes.
+                _ = newRange
             }
             .onChange(of: sheetSelection?.id) { (_: String?, newID: String?) in
                 guard dictionaryPopupEnabled else { return }
@@ -715,15 +730,17 @@ struct PasteView: View {
                 }
 
                 ControlCell {
-                    Button {
-                        hideKeyboard()
-                        isConstellationSheetPresented = true
-                    } label: {
-                        Image(systemName: "circle.dotted")
-                            .font(.title2)
+                    if Self.sentenceHeatmapEnabledFlag {
+                        Button {
+                            hideKeyboard()
+                            isConstellationSheetPresented = true
+                        } label: {
+                            Image(systemName: "circle.dotted")
+                                .font(.title2)
+                        }
+                        .accessibilityLabel("Constellation")
+                        .accessibilityHint("View sentence constellation")
                     }
-                    .accessibilityLabel("Constellation")
-                    .accessibilityHint("View sentence constellation")
                 }
 
                 ControlCell {
@@ -788,23 +805,37 @@ struct PasteView: View {
             }
             .controlSize(.small)
         }
-        .sheet(isPresented: $isConstellationSheetPresented) {
-            SemanticConstellationSheet(
-                sentenceRanges: sentenceRanges,
-                sentenceVectors: sentenceVectors,
-                selectedSentenceIndex: sentenceHeatmapSelectedIndex,
-                onSelectSentence: { range, _ in
-                    // Visual-only: select + scroll; do not trigger dictionary lookup.
-                    if incrementalLookupEnabled {
-                        incrementalSelectedCharacterRange = range
-                    } else {
-                        persistentSelectionRange = range
-                    }
-                    constellationScrollToSelectedRangeToken &+= 1
+        .sheet(
+            isPresented: $isConstellationSheetPresented,
+            onDismiss: {
+                clearSentenceHeatmap()
+            },
+            content: {
+                if Self.sentenceHeatmapEnabledFlag {
+                    SemanticConstellationSheet(
+                        sentenceRanges: sentenceRanges,
+                        sentenceVectors: sentenceVectors,
+                        selectedSentenceIndex: sentenceHeatmapSelectedIndex,
+                        onSelectSentence: { range, idx in
+                            // Visual-only: select + scroll; do not trigger dictionary lookup.
+                            sentenceHeatmapSelectedIndex = idx
+                            if let base = furiganaAttributedTextBase {
+                                furiganaAttributedText = applySentenceHeatmap(to: base)
+                            }
+                            if incrementalLookupEnabled {
+                                incrementalSelectedCharacterRange = range
+                            } else {
+                                persistentSelectionRange = range
+                            }
+                            constellationScrollToSelectedRangeToken &+= 1
+                        }
+                    )
+                    .presentationDetents([.medium, .large])
+                } else {
+                    EmptyView()
                 }
-            )
-            .presentationDetents([.medium, .large])
-        }
+            }
+        )
     }
 
     private func showToast(_ message: String) {
@@ -1036,19 +1067,34 @@ struct PasteView: View {
     @ViewBuilder
     private var inlineDictionaryOverlay: some View {
         if inlineDictionaryPanelEnabled {
-            if tokenSelection != nil {
+            // Presentation gate:
+            // Do not insert the panel into the SwiftUI tree until the lookup model has
+            // entered a stable phase. This prevents immediate empty → loading → results reflow.
+            let shouldPresent: Bool = {
+                switch inlineLookup.phase {
+                case .idle:
+                    return false
+                case .resolving:
+                    return false
+                case .ready:
+                    return true
+                }
+            }()
+
+            if tokenSelection != nil, shouldPresent {
                 inlineDismissScrim
             }
-            if let selection = tokenSelection, selection.range.length > 0 {
+            if let selection = tokenSelection, selection.range.length > 0, shouldPresent {
                 inlineTokenActionPanel(for: selection)
             }
         }
     }
 
     private var inlineDismissScrim: some View {
-        // When the inline dictionary panel is visible, we lightly dim the background.
+        // When the inline dictionary panel is visible, we used to dim the background.
+        // That can read as a “faint highlight” across non-selected tokens, so keep it clear.
         // IMPORTANT: keep this scrim non-interactive so it never blocks scrolling.
-        Color.black.opacity(0.02)
+        Color.clear
             .ignoresSafeArea()
             .allowsHitTesting(false)
             .transition(.opacity)
@@ -1115,14 +1161,16 @@ struct PasteView: View {
                     isSelectionCustomized: selectionIsCustomized(selection),
                     enableDragToDismiss: true,
                     embedInMaterialBackground: true,
-                    containerHeight: proxy.size.height,
+                    // The inline panel must respect the bottom safe area.
+                    // If we let it use the full container height, the action buttons can
+                    // end up under the tab bar / home indicator when the panel grows tall.
+                    containerHeight: proxy.size.height - proxy.safeAreaInsets.bottom,
                     focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
                     onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
                 )
                 .id("token-action-panel-\(overrideSignature)")
                 .padding(.horizontal, 0)
                 .padding(.bottom, 0)
-                .ignoresSafeArea(edges: .bottom)
                 .background(
                     GeometryReader { proxy in
                         Color.clear.preference(
@@ -1238,6 +1286,16 @@ struct PasteView: View {
         migrateBoundaryOverridesIfNeeded()
         pendingRouterResetNoteID = router.pendingResetNoteID
         processPendingRouterResetRequest()
+
+        // If token overlay highlighting was enabled in a previous version, disable it once.
+        // This avoids the "faint highlight everywhere" look and reduces per-refresh work.
+        if didDisableTokenOverlayHighlightingV1 == false {
+            if alternateTokenColors || highlightUnknownTokens {
+                alternateTokenColors = false
+                highlightUnknownTokens = false
+            }
+            didDisableTokenOverlayHighlightingV1 = true
+        }
 
         if incrementalLookupEnabled {
             // New paste strategy: furigana + token highlighting disabled (pipeline remains).
@@ -1394,9 +1452,8 @@ struct PasteView: View {
         selectionController.clearSelection(resetPersistent: resetPersistent)
         isDictionarySheetPresented = false
         Task { @MainActor in
-            inlineLookup.results = []
-            inlineLookup.errorMessage = nil
-            inlineLookup.isLoading = false
+            // Reset in one shot so presentation can be gated on `lookup.phase`.
+            inlineLookup.reset()
         }
         if dictionaryPopupEnabled && hadSelection {
             CustomLogger.shared.debug("Dictionary popup hidden")
@@ -1492,9 +1549,7 @@ struct PasteView: View {
         // - Ordering is surface → deinflection → STOP (no lemma/reading fallbacks for UI determinism)
         guard let selection = tokenSelection else {
             Task { @MainActor in
-                inlineLookup.results = []
-                inlineLookup.errorMessage = nil
-                inlineLookup.isLoading = false
+                inlineLookup.reset()
             }
             return
         }
@@ -1502,9 +1557,20 @@ struct PasteView: View {
         let tokens = furiganaSpans?.map(\.span) ?? []
         let selectedRange = selection.range
         let currentText = inputText
+        let selectionID = selection.id
+        let lemmaFallbacks = selection.annotatedSpan.lemmaCandidates
 
-        Task { [tokens, selectedRange, currentText] in
-            await inlineLookup.lookup(selectedRange: selectedRange, inText: currentText, tokenSpans: tokens)
+        Task { [tokens, selectedRange, currentText, selectionID, lemmaFallbacks] in
+            // Treat surface/deinflection + lemma fallbacks as ONE transaction.
+            // The UI should not see intermediate empty/loading states.
+            await inlineLookup.lookupTransaction(
+                requestID: selectionID,
+                selectedRange: selectedRange,
+                inText: currentText,
+                tokenSpans: tokens,
+                lemmaFallbacks: lemmaFallbacks,
+                mode: .japanese
+            )
         }
     }
 
@@ -2896,12 +2962,23 @@ struct PasteView: View {
     }
 
     private func startSentenceHeatmapPrecomputeIfPossible(text: String, spans: [AnnotatedSpan]?) {
+        guard Self.sentenceHeatmapEnabledFlag else {
+            sentenceHeatmapTask?.cancel()
+            sentenceVectors = []
+            sentenceRanges = []
+            clearSentenceHeatmap()
+            return
+        }
+
         let nsText = text as NSString
         let ranges = SentenceRangeResolver.sentenceRanges(in: nsText)
         sentenceRanges = ranges
 
-        let currentSelectionRange: NSRange? = incrementalLookupEnabled ? incrementalSelectedCharacterRange : persistentSelectionRange
-        updateSentenceHeatmapSelection(for: currentSelectionRange)
+        // Do not infer heatmap selection from the current selection range; that makes
+        // dictionary taps paint background blocks across other tokens.
+        if sentenceHeatmapSelectedIndex == nil, let base = furiganaAttributedTextBase {
+            furiganaAttributedText = base
+        }
 
         guard let spans, spans.isEmpty == false, ranges.isEmpty == false else {
             sentenceVectors = []
@@ -3023,6 +3100,9 @@ struct PasteView: View {
 
     private func applySentenceHeatmap(to base: NSAttributedString?) -> NSAttributedString? {
         guard let base else { return nil }
+        guard Self.sentenceHeatmapEnabledFlag else { return base }
+        // Heatmap is a semantic exploration visual; don't show it during dictionary popup.
+        guard tokenSelection == nil else { return base }
         guard let selectedIndex = sentenceHeatmapSelectedIndex else { return base }
         guard sentenceRanges.isEmpty == false, sentenceVectors.count == sentenceRanges.count else { return base }
         guard sentenceVectors.indices.contains(selectedIndex), let selectedVec = sentenceVectors[selectedIndex] else { return base }
@@ -3081,6 +3161,13 @@ struct PasteView: View {
             blue: bb + (tb - bb) * u,
             alpha: 1
         )
+    }
+
+    private func clearSentenceHeatmap() {
+        sentenceHeatmapSelectedIndex = nil
+        if let base = furiganaAttributedTextBase {
+            furiganaAttributedText = base
+        }
     }
 
     struct LiveSemanticFeedback: Equatable {

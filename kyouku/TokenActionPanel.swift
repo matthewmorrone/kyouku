@@ -29,7 +29,6 @@ struct TokenActionPanel: View {
     @GestureState private var dragOffset: CGFloat = 0
     @State private var isSplitMenuVisible = false
     @State private var leftBucketCount = 0
-    @State private var dictionaryContentHeight: CGFloat = 0
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -129,8 +128,10 @@ struct TokenActionPanel: View {
             // Let entry cards run edge-to-edge; keep padding for action controls.
             dictionaryScrollContainer
                 .padding(.horizontal, -20)
+                .layoutPriority(0)
 
             actionRow
+                .layoutPriority(1)
             if isSplitMenuVisible {
                 SplitMenuView(
                     selectionCharacters: selectionCharacters,
@@ -324,33 +325,16 @@ struct TokenActionPanel: View {
             onShowDefinitions: onShowDefinitions
         )
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                GeometryReader { proxy in
-                    Color.clear
-                        .preference(key: DictionaryContentHeightPreferenceKey.self, value: proxy.size.height)
-                }
-            )
-            .onPreferenceChange(DictionaryContentHeightPreferenceKey.self) { newValue in
-                let clamped = max(0, newValue)
-                if abs(dictionaryContentHeight - clamped) > 0.5 {
-                    // Avoid AttributeGraph cycles by deferring state writes triggered
-                    // during measurement/layout.
-                    DispatchQueue.main.async {
-                        dictionaryContentHeight = clamped
-                    }
-                }
-            }
 
-        if let maxHeight = dictionaryScrollMaxHeight, dictionaryContentHeight > maxHeight {
-            ScrollView {
-                measuredResults
-                    .padding(.vertical, 4)
-            }
-            .frame(maxHeight: maxHeight, alignment: .top)
-            .scrollIndicators(.hidden)
-        } else {
-            measuredResults
-        }
+        // NOTE:
+        // We intentionally avoid `ViewThatFits` + `frame(maxHeight:)` here.
+        // In this panel's layout context (bottom-anchored overlay), those constraints can
+        // cause the dictionary section to expand vertically, creating a large empty gap
+        // before the action row. Shrink-wrap to intrinsic height so the card and buttons
+        // remain visually attached.
+        return measuredResults
+            .padding(.top, 4)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var dictionaryScrollMaxHeight: CGFloat? {
@@ -370,8 +354,12 @@ struct TokenActionPanel: View {
     private var panelHeightLimit: CGFloat {
         let provided = panelContainerHeight ?? 0
         let basis = provided > 0.5 ? provided : currentScreenHeight()
-        // Keep the panel compact so the paste area remains usable.
-        return min(basis * 0.55, 460)
+        // Expand to fit content (no scrolling in the popup), but leave a little
+        // space above so the user retains context and can still drag-dismiss.
+        let reservedTopSpace: CGFloat = 80
+        let maxAllowed = max(240, basis - reservedTopSpace)
+        // Prevent the panel from becoming comically tall on large screens.
+        return min(maxAllowed, 900)
     }
 
     private func currentScreenHeight() -> CGFloat {
@@ -708,7 +696,10 @@ private struct LookupResultsView: View {
                         }
 
                     // Purely additive, read-only semantic exploration.
-                    SemanticNeighborhoodExplorerView(lookup: lookup, topN: 30)
+                    // This can be compute-heavy; keep it opt-in for responsiveness.
+                    if ProcessInfo.processInfo.environment["SEMANTIC_EXPLORER"] == "1" {
+                        SemanticNeighborhoodExplorerView(lookup: lookup, topN: 30)
+                    }
                 }
             }
         }
@@ -908,6 +899,10 @@ private struct LookupResultsView: View {
     private func refreshHighlightedEntryDetail() {
         highlightedEntryDetailTask?.cancel()
         highlightedEntryDetail = nil
+
+        // Defer detail fetch until the main lookup has produced a stable result set.
+        // Fetching details is intentionally non-blocking and must not affect panel sizing.
+        guard lookup.isLoading == false else { return }
 
         guard let entry = highlightedEntry?.entry else { return }
         let entryID = entry.entryID
@@ -1299,14 +1294,6 @@ private struct LookupResultsView: View {
         components.append(contentsOf: sense.dialects)
         guard components.isEmpty == false else { return nil }
         return components.joined(separator: " · ")
-    }
-}
-
-private struct DictionaryContentHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 

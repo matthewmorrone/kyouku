@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct WordCreateView: View {
     @EnvironmentObject private var store: WordsStore
@@ -26,6 +27,11 @@ struct WordCreateView: View {
     @State private var isLoadingAutofill: Bool = false
     @State private var errorMessage: String? = nil
 
+    // Autofill should keep updating while the user types, but once the user edits
+    // English manually (including clearing it), we should never “snap back”.
+    @State private var isApplyingAutofill: Bool = false
+    @State private var meaningAutofillEnabled: Bool = true
+
     @State private var autofillDebounceTask: Task<Void, Never>? = nil
     @State private var autofillInFlightTask: Task<Void, Never>? = nil
     @State private var pendingAutofillSignature: String = ""
@@ -50,26 +56,39 @@ struct WordCreateView: View {
                 }
 
                 Section("Saved Entry") {
-                    TextField("Surface (kanji/kana)", text: $surface)
-                        .textInputAutocapitalization(.never)
-                        .disableAutocorrection(true)
+                    PreferredLanguageTextField(
+                        placeholder: "Kanji",
+                        text: $surface,
+                        preferredLanguagePrefixes: ["ja"],
+                        autocorrectionDisabled: true,
+                        autocapitalization: .none
+                    )
 
-                    TextField("Dictionary surface (optional)", text: $dictionarySurface)
-                        .textInputAutocapitalization(.never)
-                        .disableAutocorrection(true)
+                    PreferredLanguageTextField(
+                        placeholder: "Kana",
+                        text: $kana,
+                        preferredLanguagePrefixes: ["ja"],
+                        autocorrectionDisabled: true,
+                        autocapitalization: .none
+                    )
 
-                    TextField("Kana (reading)", text: $kana)
-                        .textInputAutocapitalization(.never)
-                        .disableAutocorrection(true)
+                    PreferredLanguageTextField(
+                        placeholder: "English",
+                        text: $meaning,
+                        preferredLanguagePrefixes: ["en"],
+                        autocorrectionDisabled: false,
+                        autocapitalization: .none
+                    )
 
-                    TextField("Meaning (English)", text: $meaning, axis: .vertical)
-                        .textInputAutocapitalization(.never)
-                        .disableAutocorrection(false)
-                        .lineLimit(2...6)
+                    PreferredLanguageTextField(
+                        placeholder: "Note (optional)",
+                        text: $note,
+                        preferredLanguagePrefixes: ["en", "ja"],
+                        autocorrectionDisabled: false,
+                        autocapitalization: .sentences
+                    )
 
-                    TextField("Note (optional)", text: $note, axis: .vertical)
-                        .lineLimit(2...6)
-
+                    /*
                     if isLoadingAutofill {
                         HStack(spacing: 10) {
                             ProgressView()
@@ -77,6 +96,7 @@ struct WordCreateView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                    */
                 }
 
                 Section("Add to list") {
@@ -105,7 +125,7 @@ struct WordCreateView: View {
                     Button("Save") {
                         saveNewWord()
                     }
-                    .disabled(surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled((surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && kana.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .onReceive(store.$lists) { lists in
@@ -126,11 +146,14 @@ struct WordCreateView: View {
             .onChange(of: surface) { _, _ in
                 scheduleAutofillIfNeeded()
             }
-            .onChange(of: dictionarySurface) { _, _ in
-                scheduleAutofillIfNeeded()
-            }
             .onChange(of: kana) { _, _ in
                 scheduleAutofillIfNeeded()
+            }
+            .onChange(of: meaning) { _, _ in
+                // If the user touches English, stop autofilling it forever.
+                if isApplyingAutofill == false {
+                    meaningAutofillEnabled = false
+                }
             }
             .alert("New List", isPresented: $isPromptingForNewListName) {
                 TextField("List name", text: $pendingNewListName)
@@ -156,9 +179,23 @@ struct WordCreateView: View {
     private func saveNewWord() {
         errorMessage = nil
 
-        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        var headword = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        var reading = kana.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If the user only provided Kana, treat that as the headword.
+        if headword.isEmpty, reading.isEmpty == false {
+            headword = reading
+            reading = ""
+        }
+
+        // Avoid storing redundant kana equal to the headword.
+        if reading == headword {
+            reading = ""
+        }
+
+        let s = headword
         guard s.isEmpty == false else {
-            errorMessage = "Surface is required."
+            errorMessage = "Kanji or Kana is required."
             return
         }
 
@@ -171,8 +208,7 @@ struct WordCreateView: View {
         let dsTrim = dictionarySurface.trimmingCharacters(in: .whitespacesAndNewlines)
         let ds: String? = dsTrim.isEmpty ? nil : dsTrim
 
-        let kTrim = kana.trimmingCharacters(in: .whitespacesAndNewlines)
-        let k: String? = kTrim.isEmpty ? nil : kTrim
+        let k: String? = reading.isEmpty ? nil : reading
 
         let nTrim = note.trimmingCharacters(in: .whitespacesAndNewlines)
         let n: String? = nTrim.isEmpty ? nil : nTrim
@@ -238,24 +274,30 @@ struct WordCreateView: View {
     }
 
     private func scheduleAutofillIfNeeded() {
-        // Only fill missing fields; never overwrite user edits.
-        let needsMeaning = meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Autofill should:
+        // - keep updating English while typing, until the user edits English
+        // - fill missing Kanji/Kana when possible
+        let needsMeaning = meaningAutofillEnabled
+        let needsSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let needsKana = kana.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let needsDictionarySurface = dictionarySurface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        guard needsMeaning || needsKana || needsDictionarySurface else { return }
+        guard needsMeaning || needsSurface || needsKana else { return }
 
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ds = dictionarySurface.trimmingCharacters(in: .whitespacesAndNewlines)
         let k = kana.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Avoid autofilling off of extremely short kana (e.g. "た"), which can match many entries.
         let kanaCandidateIsUsable = (k.isEmpty || k.count >= 2)
         guard kanaCandidateIsUsable else { return }
 
-        // Need at least one usable candidate.
-        guard s.isEmpty == false || ds.isEmpty == false || k.isEmpty == false else { return }
+        // If surface is kana-only, apply the same short-candidate rule.
+        let surfaceCandidateIsUsable = (s.isEmpty || looksLikeKanaOnly(s) == false || s.count >= 2)
+        guard surfaceCandidateIsUsable else { return }
 
-        let signature = "s=\(s)|ds=\(ds)|k=\(k)"
+        // Need at least one usable candidate.
+        guard s.isEmpty == false || k.isEmpty == false else { return }
+
+        // Signature should be based on user inputs only, not derived/autofilled state.
+        let signature = "s=\(s)|k=\(k)"
         pendingAutofillSignature = signature
 
         autofillDebounceTask?.cancel()
@@ -309,12 +351,11 @@ struct WordCreateView: View {
         }
 
         var candidates: [String] = []
-        let ds = dictionarySurface.trimmingCharacters(in: .whitespacesAndNewlines)
-        if ds.isEmpty == false { candidates.append(ds) }
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.isEmpty == false { candidates.append(s) }
         let k = kana.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Prefer Kana if the user provided it.
         if k.isEmpty == false { candidates.append(k) }
+        if s.isEmpty == false { candidates.append(s) }
 
         var seen = Set<String>()
         candidates = candidates.filter { seen.insert($0).inserted }
@@ -324,9 +365,9 @@ struct WordCreateView: View {
             for cand in candidates {
                 let keys = DictionaryKeyPolicy.keys(forDisplayKey: cand)
                 guard keys.lookupKey.isEmpty == false else { continue }
-                let rows = try await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 1)
-                if let first = rows.first {
-                    found = first
+                let rows = try await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 20)
+                if let best = bestAutofillMatch(in: rows, forQuery: keys.lookupKey) {
+                    found = best
                     break
                 }
             }
@@ -344,24 +385,29 @@ struct WordCreateView: View {
             let proposedMeaning = firstGloss(entry.gloss)
 
             await MainActor.run {
+                isApplyingAutofill = true
+                defer { isApplyingAutofill = false }
+
                 if onlyMissing {
                     if surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, proposedSurface.isEmpty == false {
                         surface = proposedSurface
                     }
-                    if dictionarySurface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, proposedDictionarySurface.isEmpty == false {
+                    if proposedDictionarySurface.isEmpty == false {
                         dictionarySurface = proposedDictionarySurface
                     }
                     if kana.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let proposedKana, proposedKana.isEmpty == false {
                         kana = proposedKana
                     }
-                    if meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, proposedMeaning.isEmpty == false {
+                    if meaningAutofillEnabled, proposedMeaning.isEmpty == false {
                         meaning = proposedMeaning
                     }
                 } else {
                     if proposedSurface.isEmpty == false { surface = proposedSurface }
                     dictionarySurface = proposedDictionarySurface
                     if let proposedKana, proposedKana.isEmpty == false { kana = proposedKana }
-                    meaning = proposedMeaning
+                    if meaningAutofillEnabled {
+                        meaning = proposedMeaning
+                    }
                 }
             }
         } catch {
@@ -371,9 +417,178 @@ struct WordCreateView: View {
         }
     }
 
+    private func looksLikeKanaOnly(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return false }
+
+        for scalar in trimmed.unicodeScalars {
+            // Allow the long vowel mark and common punctuation used in kana words.
+            if scalar == "ー" || scalar == "・" { continue }
+
+            switch scalar.value {
+            case 0x3040...0x309F, // Hiragana
+                 0x30A0...0x30FF, // Katakana
+                 0xFF66...0xFF9F: // Half-width katakana
+                continue
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    private func bestAutofillMatch(in rows: [DictionaryEntry], forQuery query: String) -> DictionaryEntry? {
+        guard rows.isEmpty == false else { return nil }
+
+        func lcp(_ a: String, _ b: String) -> Int {
+            let ascalars = Array(a.unicodeScalars)
+            let bscalars = Array(b.unicodeScalars)
+            let n = min(ascalars.count, bscalars.count)
+            var i = 0
+            while i < n {
+                if ascalars[i] != bscalars[i] { break }
+                i += 1
+            }
+            return i
+        }
+
+        func scoreSurface(_ surface: String, query: String) -> (rank: Int, lcp: Int, diff: Int) {
+            let l = lcp(surface, query)
+
+            if surface == query {
+                return (0, l, 0)
+            }
+            if surface.hasPrefix(query) {
+                return (1, l, abs(surface.count - query.count))
+            }
+            if query.hasPrefix(surface) {
+                return (2, l, abs(surface.count - query.count))
+            }
+            if surface.contains(query) {
+                return (3, l, abs(surface.count - query.count))
+            }
+            return (4, l, abs(surface.count - query.count))
+        }
+
+        var best: (entry: DictionaryEntry, score: (Int, Int, Int))? = nil
+        for entry in rows {
+            var surfaces: [String] = []
+            if entry.kanji.isEmpty == false {
+                surfaces.append(entry.kanji)
+            }
+            if let k = entry.kana, k.isEmpty == false {
+                surfaces.append(k)
+            }
+            if surfaces.isEmpty {
+                continue
+            }
+
+            let bestSurfaceScore = surfaces
+                .map { scoreSurface($0, query: query) }
+                .min { a, b in
+                    if a.rank != b.rank { return a.rank < b.rank }
+                    if a.lcp != b.lcp { return a.lcp > b.lcp }
+                    return a.diff < b.diff
+                }!
+
+            let tupleScore: (Int, Int, Int) = (bestSurfaceScore.rank, -bestSurfaceScore.lcp, bestSurfaceScore.diff)
+            if let current = best {
+                if tupleScore < current.score {
+                    best = (entry, tupleScore)
+                }
+            } else {
+                best = (entry, tupleScore)
+            }
+        }
+
+        return best?.entry ?? rows.first
+    }
+
     private func firstGloss(_ gloss: String) -> String {
         gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
             .first
             .map(String.init) ?? gloss
+    }
+}
+
+private final class PreferredLanguageUITextField: UITextField {
+    var preferredLanguagePrefixes: [String] = []
+
+    override var textInputMode: UITextInputMode? {
+        guard preferredLanguagePrefixes.isEmpty == false else {
+            return super.textInputMode
+        }
+
+        for mode in UITextInputMode.activeInputModes {
+            guard let primary = mode.primaryLanguage else { continue }
+            if preferredLanguagePrefixes.contains(where: { primary.hasPrefix($0) }) {
+                return mode
+            }
+        }
+
+        return super.textInputMode
+    }
+}
+
+private struct PreferredLanguageTextField: UIViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+    let preferredLanguagePrefixes: [String]
+    let autocorrectionDisabled: Bool
+    let autocapitalization: UITextAutocapitalizationType
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeUIView(context: Context) -> PreferredLanguageUITextField {
+        let textField = PreferredLanguageUITextField(frame: .zero)
+        textField.delegate = context.coordinator
+        textField.placeholder = placeholder
+        textField.text = text
+        textField.preferredLanguagePrefixes = preferredLanguagePrefixes
+        textField.autocorrectionType = autocorrectionDisabled ? .no : .yes
+        textField.autocapitalizationType = autocapitalization
+        textField.spellCheckingType = autocorrectionDisabled ? .no : .default
+        textField.smartDashesType = .no
+        textField.smartQuotesType = .no
+        textField.smartInsertDeleteType = .no
+        textField.returnKeyType = .done
+        textField.enablesReturnKeyAutomatically = false
+        textField.clearButtonMode = .whileEditing
+        textField.borderStyle = .none
+        textField.backgroundColor = .clear
+        textField.textColor = .label
+        textField.font = UIFont.preferredFont(forTextStyle: .body)
+        textField.adjustsFontForContentSizeCategory = true
+        textField.addTarget(context.coordinator, action: #selector(Coordinator.textDidChange(_:)), for: .editingChanged)
+        return textField
+    }
+
+    func updateUIView(_ uiView: PreferredLanguageUITextField, context: Context) {
+        if uiView.text != text {
+            uiView.text = text
+        }
+        uiView.placeholder = placeholder
+        uiView.preferredLanguagePrefixes = preferredLanguagePrefixes
+        uiView.autocorrectionType = autocorrectionDisabled ? .no : .yes
+        uiView.autocapitalizationType = autocapitalization
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        private var text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        @objc func textDidChange(_ sender: UITextField) {
+            text.wrappedValue = sender.text ?? ""
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            textField.resignFirstResponder()
+            return false
+        }
     }
 }
