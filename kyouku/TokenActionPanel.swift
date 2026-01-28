@@ -29,6 +29,7 @@ struct TokenActionPanel: View {
     @GestureState private var dragOffset: CGFloat = 0
     @State private var isSplitMenuVisible = false
     @State private var leftBucketCount = 0
+    @State private var lastPresentedRequestID: String? = nil
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -148,15 +149,15 @@ struct TokenActionPanel: View {
         .padding(.vertical, 20)
         .frame(maxWidth: .infinity)
         .onAppear {
+            lastPresentedRequestID = lookup.presented?.requestID
             resetSplitControls()
             resetHighlightedResult()
             focusSplitMenuIfNeeded(focusSplitMenu)
         }
-        .onChange(of: selection) { _, _ in
+        .onChange(of: lookup.presented?.requestID) { _, newValue in
+            guard newValue != lastPresentedRequestID else { return }
+            lastPresentedRequestID = newValue
             resetSplitControls()
-            resetHighlightedResult()
-        }
-        .onChange(of: lookup.results) { _, _ in
             resetHighlightedResult()
         }
         .onChange(of: focusSplitMenu) { _, newValue in
@@ -172,7 +173,7 @@ struct TokenActionPanel: View {
             actionIconButton(label: "Merge with next token", systemImage: "arrow.right.to.line.square", enabled: canMergeNext, action: onMergeNext)
 
             // Split controls should not appear for single-character selections.
-            if selection.range.length > 1 {
+            if effectiveSelection.range.length > 1 {
                 actionIconButton(
                     label: "Adjust split",
                     systemImage: "scissors",
@@ -218,7 +219,33 @@ struct TokenActionPanel: View {
     }
 
     private var selectionCharacters: [Character] {
-        Array(selection.surface)
+        Array(effectiveSelection.surface)
+    }
+
+    // Render from the stable `presented` snapshot when available.
+    // This keeps the panel content stable while a new lookup is `.resolving`.
+    private var effectivePresented: DictionaryLookupViewModel.PresentedLookup? {
+        lookup.presented
+    }
+
+    private var effectiveSelection: TokenSelectionContext {
+        effectivePresented?.selection ?? selection
+    }
+
+    private var effectiveResults: [DictionaryEntry] {
+        effectivePresented?.results ?? lookup.results
+    }
+
+    // Stale content activity indicator:
+    // When a new lookup starts, `phase` flips to `.resolving(newID)` but `presented` stays
+    // on the previous request until the new lookup commits. Keep rendering the old content,
+    // but show a subtle indicator so slow lookups still feel responsive.
+    private var isShowingStalePresentedWhileResolving: Bool {
+        guard let presentedID = lookup.presented?.requestID else { return false }
+        if case .resolving(let activeID) = lookup.phase {
+            return activeID != presentedID
+        }
+        return false
     }
 
     private func toggleSplitMenu() {
@@ -291,19 +318,19 @@ struct TokenActionPanel: View {
 
     private func preferredResultIndex() -> Int? {
         guard let raw = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines), raw.isEmpty == false else { return nil }
-        return lookup.results.firstIndex { entry in
+        return effectiveResults.firstIndex { entry in
             let candidate = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
             return candidate == raw
         }
     }
 
     private func lemmaPreferredResultIndex() -> Int? {
-        let lemmas = selection.annotatedSpan.lemmaCandidates
+        let lemmas = effectiveSelection.annotatedSpan.lemmaCandidates
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.isEmpty == false }
         guard lemmas.isEmpty == false else { return nil }
 
-        return lookup.results.firstIndex { entry in
+        return effectiveResults.firstIndex { entry in
             let kanji = entry.kanji.trimmingCharacters(in: .whitespacesAndNewlines)
             let kana = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return lemmas.contains(kanji) || (kana.isEmpty == false && lemmas.contains(kana))
@@ -314,7 +341,7 @@ struct TokenActionPanel: View {
     private var dictionaryScrollContainer: some View {
         let measuredResults = LookupResultsView(
             lookup: lookup,
-            selection: selection,
+            selection: effectiveSelection,
             preferredReading: preferredReading,
             highlightedResultIndex: $highlightedResultIndex,
             highlightedReadingIndex: $highlightedReadingIndex,
@@ -332,9 +359,21 @@ struct TokenActionPanel: View {
         // cause the dictionary section to expand vertically, creating a large empty gap
         // before the action row. Shrink-wrap to intrinsic height so the card and buttons
         // remain visually attached.
-        return measuredResults
+        measuredResults
             .padding(.top, 4)
             .fixedSize(horizontal: false, vertical: true)
+            .opacity(isShowingStalePresentedWhileResolving ? 0.7 : 1)
+            .overlay(alignment: .topTrailing) {
+                if isShowingStalePresentedWhileResolving {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .padding(8)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .padding(.trailing, 8)
+                        .padding(.top, 8)
+                        .allowsHitTesting(false)
+                }
+            }
     }
 
     private var dictionaryScrollMaxHeight: CGFloat? {
@@ -553,10 +592,27 @@ private struct LookupResultsView: View {
         }
     }
 
+    // Stable snapshot the UI should render. This stays unchanged while a new lookup is resolving.
+    private var presented: DictionaryLookupViewModel.PresentedLookup? {
+        lookup.presented
+    }
+
+    private var effectiveSelection: TokenSelectionContext {
+        presented?.selection ?? selection
+    }
+
+    private var effectiveResults: [DictionaryEntry] {
+        presented?.results ?? []
+    }
+
+    private var effectiveError: String? {
+        presented?.errorMessage
+    }
+
     private var pagingState: PagingState? {
         guard let highlighted = highlightedEntry else { return nil }
 
-        let resultsCount = lookup.results.count
+        let resultsCount = effectiveResults.count
         let resultPaging = resultsCount > 1
         if resultPaging {
             let current = min(max(0, highlighted.index), max(0, resultsCount - 1)) + 1
@@ -582,24 +638,16 @@ private struct LookupResultsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if lookup.isLoading {
-                statusCard {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Searching…")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } else if let error = lookup.errorMessage, error.isEmpty == false {
+            if let error = effectiveError, error.isEmpty == false {
                 statusCard {
                     Text(error)
                         .foregroundStyle(.secondary)
                         .font(.subheadline)
                         .multilineTextAlignment(.leading)
                 }
-            } else if lookup.results.isEmpty {
+            } else if effectiveResults.isEmpty {
                 statusCard {
-                    Text("No matches for \(selection.surface). Try editing the selection or typing a different term in the Dictionary tab.")
+                    Text("No matches for \(effectiveSelection.surface). Try editing the selection or typing a different term in the Dictionary tab.")
                         .foregroundStyle(.secondary)
                         .font(.subheadline)
                         .multilineTextAlignment(.leading)
@@ -713,7 +761,7 @@ private struct LookupResultsView: View {
             refreshHighlightedEntryDetail()
             resetReadingIndexIfNeeded()
         }
-        .onChange(of: lookup.results) { _, _ in
+        .onChange(of: lookup.presented?.requestID) { _, _ in
             highlightedReadingIndex = 0
             refreshHighlightedEntryDetail()
             resetReadingIndexIfNeeded()
@@ -731,7 +779,7 @@ private struct LookupResultsView: View {
                 onApplyCustomReading?(trimmed)
             }
         } message: {
-            Text(selection.surface)
+            Text(effectiveSelection.surface)
         }
     }
 
@@ -772,13 +820,13 @@ private struct LookupResultsView: View {
             .onEnded { value in
                 guard abs(value.translation.width) > abs(value.translation.height) else { return }
                 if value.translation.width < -30 {
-                    if lookup.results.count > 1 {
+                    if effectiveResults.count > 1 {
                         goToNextResult()
                     } else {
                         goToNextReading()
                     }
                 } else if value.translation.width > 30 {
-                    if lookup.results.count > 1 {
+                    if effectiveResults.count > 1 {
                         goToPreviousResult()
                     } else {
                         goToPreviousReading()
@@ -793,7 +841,7 @@ private struct LookupResultsView: View {
     }
 
     private func goToNextResult() {
-        guard highlightedResultIndex < max(0, lookup.results.count - 1) else { return }
+        guard highlightedResultIndex < max(0, effectiveResults.count - 1) else { return }
         highlightedResultIndex += 1
         highlightedReadingIndex = 0
         resetReadingIndexIfNeeded()
@@ -816,7 +864,7 @@ private struct LookupResultsView: View {
     }
 
     private func resetReadingIndexIfNeeded() {
-        guard lookup.results.count <= 1 else {
+        guard effectiveResults.count <= 1 else {
             highlightedReadingIndex = 0
             return
         }
@@ -837,7 +885,7 @@ private struct LookupResultsView: View {
             return
         }
 
-        let tokenReading = (selection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokenReading = (effectiveSelection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if tokenReading.isEmpty == false, let idx = variants.firstIndex(of: tokenReading) {
             highlightedReadingIndex = idx
             return
@@ -853,9 +901,9 @@ private struct LookupResultsView: View {
     }
 
     private var highlightedEntry: (entry: DictionaryEntry, index: Int)? {
-        guard lookup.results.isEmpty == false else { return nil }
-        let safeIndex = min(highlightedResultIndex, lookup.results.count - 1)
-        return (lookup.results[safeIndex], safeIndex)
+        guard effectiveResults.isEmpty == false else { return nil }
+        let safeIndex = min(highlightedResultIndex, effectiveResults.count - 1)
+        return (effectiveResults[safeIndex], safeIndex)
     }
 
     private var matchingHighlightedEntryDetail: DictionaryEntryDetail? {
@@ -900,9 +948,14 @@ private struct LookupResultsView: View {
         highlightedEntryDetailTask?.cancel()
         highlightedEntryDetail = nil
 
-        // Defer detail fetch until the main lookup has produced a stable result set.
-        // Fetching details is intentionally non-blocking and must not affect panel sizing.
-        guard lookup.isLoading == false else { return }
+        // Defer detail fetch while a different request is in-flight.
+        // We keep showing the last `presented` snapshot during `.resolving`; avoid fetching
+        // details that are likely to be replaced moments later.
+        if case .resolving(let active) = lookup.phase,
+           let presentedID = presented?.requestID,
+           active != presentedID {
+            return
+        }
 
         guard let entry = highlightedEntry?.entry else { return }
         let entryID = entry.entryID

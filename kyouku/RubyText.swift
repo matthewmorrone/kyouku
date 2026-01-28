@@ -86,6 +86,9 @@ struct RubyText: UIViewRepresentable {
     }
 
     var attributed: NSAttributedString
+    /// Preferred base font PostScript name.
+    /// If nil/empty/unavailable, falls back to system.
+    var fontName: String? = nil
     var fontSize: CGFloat
     var lineHeightMultiple: CGFloat
     var extraGap: CGFloat
@@ -135,6 +138,13 @@ struct RubyText: UIViewRepresentable {
         }
     }
 
+    private func resolvedBaseFont(ofSize size: CGFloat) -> UIFont {
+        if let fontName, fontName.isEmpty == false, let font = UIFont(name: fontName, size: size) {
+            return font
+        }
+        return UIFont.systemFont(ofSize: size)
+    }
+
     func makeUIView(context: Context) -> TokenOverlayTextView {
         let textView = TokenOverlayTextView()
         textView.isEditable = false
@@ -155,7 +165,7 @@ struct RubyText: UIViewRepresentable {
         textView.clipsToBounds = true
         textView.layer.masksToBounds = true
         textView.tintColor = .systemBlue
-        textView.font = UIFont.systemFont(ofSize: fontSize)
+        textView.font = resolvedBaseFont(ofSize: fontSize)
         textView.padHeadwordSpacing = padHeadwordSpacing
         textView.setContentCompressionResistancePriority(.required, for: .vertical)
         textView.setContentHuggingPriority(.defaultHigh, for: .vertical)
@@ -199,7 +209,8 @@ struct RubyText: UIViewRepresentable {
         let priorTextContainerInset = uiView.textContainerInset
         let wasSelectable = uiView.isSelectable
 
-        uiView.font = UIFont.systemFont(ofSize: fontSize)
+        let baseFont = resolvedBaseFont(ofSize: fontSize)
+        uiView.font = baseFont
         uiView.tintColor = .systemBlue
         uiView.rubyAnnotationVisibility = annotationVisibility
         uiView.isEditable = false
@@ -245,7 +256,7 @@ struct RubyText: UIViewRepresentable {
                 fontSize * 0.6 + extraGap,
                 RubyText.requiredVerticalHeadroomForRuby(
                     in: attributed,
-                    baseFont: UIFont.systemFont(ofSize: fontSize),
+                    baseFont: baseFont,
                     defaultRubyFontSize: defaultRubyFontSize,
                     rubyBaselineGap: rubyBaselineGap
                 )
@@ -266,9 +277,6 @@ struct RubyText: UIViewRepresentable {
         //
         // Use a minimum line height that includes the ruby headroom.
         let rubyMetricsEnabled = (annotationVisibility != .removed)
-
-        // Base font is also used for selection highlight geometry.
-        let baseFont = UIFont.systemFont(ofSize: fontSize)
 
         // Allocate vertical room for ruby on EVERY visual line (including soft wraps).
         // TextKit 2 fragment `topMargin` cannot cover subsequent wrapped lines.
@@ -884,7 +892,7 @@ struct RubyText: UIViewRepresentable {
         rubyBaselineGap: CGFloat
     ) -> CGFloat {
         guard attributed.length > 0 else {
-            let rubyFont = UIFont.systemFont(ofSize: max(1, defaultRubyFontSize))
+            let rubyFont = baseFont.withSize(max(1, defaultRubyFontSize))
             return max(0, rubyFont.lineHeight + rubyBaselineGap)
         }
         let full = NSRange(location: 0, length: attributed.length)
@@ -897,11 +905,11 @@ struct RubyText: UIViewRepresentable {
                 return nil
             }()
             guard let rubySize, rubySize.isFinite else { return }
-            let rubyFont = UIFont.systemFont(ofSize: max(1.0, rubySize))
+            let rubyFont = baseFont.withSize(max(1.0, rubySize))
             maxRubyHeight = max(maxRubyHeight, rubyFont.lineHeight)
         }
         if maxRubyHeight <= 0 {
-            let rubyFont = UIFont.systemFont(ofSize: max(1, defaultRubyFontSize))
+            let rubyFont = baseFont.withSize(max(1, defaultRubyFontSize))
             maxRubyHeight = rubyFont.lineHeight
         }
         // Reserve the ruby font height plus a small gap to visually separate from the base glyphs.
@@ -1014,7 +1022,7 @@ struct RubyText: UIViewRepresentable {
             let baseSub = mutable.attributedSubstring(from: range)
             let baseWidth = measureTypographicWidth(baseSub)
 
-            let rubyFont = UIFont.systemFont(ofSize: rubyFontSize)
+            let rubyFont = baseFont.withSize(max(1.0, rubyFontSize))
             let rubyAttr = NSAttributedString(string: reading, attributes: [.font: rubyFont])
             let rubyWidth = measureTypographicWidth(rubyAttr)
 
@@ -3016,7 +3024,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 return unionsInContent[0]
             }()
 
-            let rubyFont = UIFont.systemFont(ofSize: run.fontSize)
+            let rubyPointSize = max(1.0, run.fontSize)
+            let rubyFont = (self.font ?? UIFont.systemFont(ofSize: rubyPointSize)).withSize(rubyPointSize)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: rubyFont,
                 .foregroundColor: run.color
@@ -3183,7 +3192,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             let unions = unionRectsByLine(baseRects)
             guard unions.isEmpty == false else { continue }
 
-            let rubyFont = UIFont.systemFont(ofSize: run.fontSize)
+            let rubyPointSize = max(1.0, run.fontSize)
+            let rubyFont = (self.font ?? UIFont.systemFont(ofSize: rubyPointSize)).withSize(rubyPointSize)
             let baseColor = run.color
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: rubyFont,

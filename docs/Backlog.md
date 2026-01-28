@@ -1,16 +1,9 @@
 # Backlog
 
-## Known bugs
-- [x] make the confirmation dialog for note deletion not be a popover, it's never in the right spot and the arrow points to the wrong place. also, make the "delete associated words" a checkbox within it that's defaulted to off
-- [x] remove the "themes" button in the notes view
-- [ ] looking up english words no longer works
-
 ## Dictionary issues
-- [x] is it possible to auto switch to correct keyboard when available?
-- [x] don't want "dictionary surface" on the new word screen
-- [x] enter button on the new word screen should dismiss keyboard
-- [x] on the word details page, entries that are "common" should all appear before those that are not
+- [ ] looking up english words no longer works
 - [ ] wouldn't it make more sense if example sentences were grouped by meaning/sense used?
+- [ ] show part of speech
 - [ ] when a token is made up of multiple parts, list parts 
 - [ ] in the example sentences, the corresponding English word should be highlighted too
 - [ ] leverage embeddings in deciding whether to include example sentences, shouldn’t just be by string matching 
@@ -23,7 +16,6 @@
 - [ ] custom reading popup should be prefilled and set to japanese keyboard
 
 ## Performance / UX issues
-- [ ] issues with jumpy dictionary popup in paste area
 - [ ] Make saving to the words list more responsive 
 - [ ] Clicking the star button doesn’t always trigger bookmarking, but the bookmark button always does
 

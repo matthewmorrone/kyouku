@@ -3,6 +3,7 @@ import UIKit
 
 @MainActor
 struct FuriganaRenderingHost: View {
+    @AppStorage("readingFontName") private var readingFontName: String = ""
     @State private var scrollSyncGroupID: String = UUID().uuidString
 
     @Binding var text: String
@@ -141,16 +142,22 @@ struct FuriganaRenderingHost: View {
         viewMetricsContext: RubyText.ViewMetricsContext?
     ) -> some View {
         let attributed = resolvedAttributedText
+        let baseUIFont: UIFont = {
+            let size = CGFloat(textSize)
+            if readingFontName.isEmpty == false, let font = UIFont(name: readingFontName, size: size) {
+                return font
+            }
+            return UIFont.systemFont(ofSize: size)
+        }()
         let insetOverhang: CGFloat = {
             guard padHeadwordSpacing else {
                 // When headword padding is disabled, allow ruby to overhang/clamp naturally.
                 return 0
             }
-            let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
             let defaultRubyFontSize = max(1, CGFloat(textSize) * 0.6)
             let rawOverhang = RubyText.requiredHorizontalInsetForRubyOverhang(
                 in: attributed,
-                baseFont: baseFont,
+                baseFont: baseUIFont,
                 defaultRubyFontSize: defaultRubyFontSize
             )
             return max(ceil(rawOverhang), 2)
@@ -185,6 +192,7 @@ struct FuriganaRenderingHost: View {
 
         return AnyView(RubyText(
             attributed: attributed,
+            fontName: readingFontName.isEmpty ? nil : readingFontName,
             fontSize: CGFloat(textSize),
             lineHeightMultiple: 1.0,
             extraGap: CGFloat(max(0, lineSpacing)),

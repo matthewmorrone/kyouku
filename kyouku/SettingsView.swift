@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import UserNotifications
+import UIKit
 
 struct SettingsView: View {
     @EnvironmentObject private var wordsStore: WordsStore
@@ -11,6 +12,9 @@ struct SettingsView: View {
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
     @AppStorage("readingGlobalKerningPixels") private var readingGlobalKerningPixels: Double = 0
+    /// Preferred base font PostScript name for reading text.
+    /// Empty string means "System".
+    @AppStorage("readingFontName") private var readingFontName: String = ""
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
@@ -70,6 +74,48 @@ struct SettingsView: View {
     private static let previewPlainLine = "かなだけのぎょうです。"
     private static let previewFuriganaLine = "京都で日本語を勉強しています。"
     private static let previewSampleTextValue = "\(previewPlainLine)\n\(previewFuriganaLine)"
+
+    private struct ReadingFontOption: Identifiable {
+        let id: String
+        let title: String
+        let postScriptName: String
+    }
+
+    private static let preferredJapaneseFontFamilies: [String] = [
+        "Hiragino Sans",
+        "Hiragino Mincho ProN",
+        "YuGothic",
+        "YuMincho",
+        "Klee",
+        "Tsukushi A Round Gothic",
+        "Tsukushi B Round Gothic"
+    ]
+
+    private var readingFontOptions: [ReadingFontOption] {
+        var options: [ReadingFontOption] = [
+            .init(id: "system", title: "System", postScriptName: "")
+        ]
+
+        var seen: Set<String> = [""]
+        for family in Self.preferredJapaneseFontFamilies {
+            let names = UIFont.fontNames(forFamilyName: family).sorted()
+            for postScriptName in names {
+                guard seen.contains(postScriptName) == false else { continue }
+                seen.insert(postScriptName)
+                options.append(
+                    .init(
+                        id: postScriptName,
+                        title: "\(family) — \(postScriptName)",
+                        postScriptName: postScriptName
+                    )
+                )
+            }
+        }
+
+        // If none of the preferred Japanese families are available (unlikely),
+        // keep the picker functional with just System.
+        return options
+    }
 
     private var previewText: String {
         Self.previewSampleTextValue
@@ -140,6 +186,7 @@ struct SettingsView: View {
         Section("Reading Appearance") {
             RubyText(
                 attributed: previewAttributedText,
+                fontName: readingFontName.isEmpty ? nil : readingFontName,
                 fontSize: CGFloat(pendingReadingTextSize),
                 lineHeightMultiple: 1.0,
                 extraGap: CGFloat(pendingReadingLineSpacing),
@@ -152,6 +199,12 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: 140, alignment: .leading)
             .padding(.vertical, 8)
+
+            Picker("Font", selection: $readingFontName) {
+                ForEach(readingFontOptions) { option in
+                    Text(option.title).tag(option.postScriptName)
+                }
+            }
 
             HStack {
                 Text("Text Size")

@@ -12,6 +12,23 @@ import Darwin
 
 @MainActor
 final class DictionaryLookupViewModel: ObservableObject {
+    /// A stable snapshot of what the UI should *present*.
+    ///
+    /// IMPORTANT:
+    /// - `phase` tracks the in-flight lookup lifecycle.
+    /// - `presented` is the last fully-resolved lookup that should remain on screen.
+    ///
+    /// When a new lookup starts we flip `phase` to `.resolving`, but we intentionally
+    /// keep `presented` unchanged so the inline panel stays mounted (no flicker).
+    struct PresentedLookup: Equatable {
+        let requestID: String
+        let selection: TokenSelectionContext?
+        let displayQuery: String
+        let resolvedEmbeddingTerm: String?
+        let results: [DictionaryEntry]
+        let errorMessage: String?
+    }
+
     /// High-level lookup lifecycle used to gate presentation.
     ///
     /// IMPORTANT: The goal is to avoid layout-janky intermediate states (e.g. empty -> loading -> empty -> loading)
@@ -28,6 +45,10 @@ final class DictionaryLookupViewModel: ObservableObject {
     @Published var results: [DictionaryEntry] = []
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
+
+    /// What the UI should render (stable, last-completed snapshot).
+    /// Do NOT clear this when starting a new lookup; only update it when a lookup completes.
+    @Published var presented: PresentedLookup? = nil
 
     /// Presentation gate for the inline panel. Keep this as the *primary* layout-driving signal.
     @Published private(set) var phase: LookupPhase = .idle
@@ -99,14 +120,28 @@ final class DictionaryLookupViewModel: ObservableObject {
         let errorMessage: String?
     }
 
-    private func commitOutcome(_ outcome: LookupOutcome, requestID: String) {
-        // Batch all UI-relevant state writes together.
-        // Even though these are separate @Published properties, doing it synchronously in one place
-        // avoids drip-feeding intermediate layout states.
+    private func commitOutcome(_ outcome: LookupOutcome, requestID: String, selection: TokenSelectionContext?) {
+        // Commit as a single end-of-transaction update:
+        // - swap the stable `presented` snapshot
+        // - mark the phase as ready
+        // This keeps the inline panel mounted during `.resolving` and updates content atomically.
+        let snapshot = PresentedLookup(
+            requestID: requestID,
+            selection: selection,
+            displayQuery: outcome.displayQuery,
+            resolvedEmbeddingTerm: outcome.resolvedEmbeddingTerm,
+            results: outcome.results,
+            errorMessage: outcome.errorMessage
+        )
+
+        presented = snapshot
+
+        // Keep legacy published fields in sync for non-inline consumers.
         query = outcome.displayQuery
         results = outcome.results
         resolvedEmbeddingTerm = outcome.resolvedEmbeddingTerm
         errorMessage = outcome.errorMessage
+
         isLoading = false
         phase = .ready(requestID: requestID)
         lastCompletedRequestID = requestID
@@ -121,6 +156,7 @@ final class DictionaryLookupViewModel: ObservableObject {
         isLoading = false
         phase = .idle
         lastCompletedRequestID = nil
+        presented = nil
     }
 
     private func shouldSuppressLookup(for requestID: String) -> Bool {
@@ -140,6 +176,7 @@ final class DictionaryLookupViewModel: ObservableObject {
     /// This is the path used by PasteView to avoid UI jitter.
     func lookupTransaction(
         requestID: String,
+        selection: TokenSelectionContext? = nil,
         selectedRange: NSRange,
         inText text: String,
         tokenSpans: [TextSpan],
@@ -252,7 +289,7 @@ final class DictionaryLookupViewModel: ObservableObject {
         // This avoids stale writes when rapid taps trigger overlapping Tasks.
         switch phase {
         case .resolving(let active) where active == requestID:
-            commitOutcome(outcome, requestID: requestID)
+            commitOutcome(outcome, requestID: requestID, selection: selection)
         case .ready, .idle, .resolving:
             break
         }
@@ -272,7 +309,7 @@ final class DictionaryLookupViewModel: ObservableObject {
         do {
             guard primaryKeys.lookupKey.isEmpty == false else {
                 outcome = LookupOutcome(displayQuery: primaryKeys.displayKey, resolvedEmbeddingTerm: nil, results: [], errorMessage: nil)
-                commitOutcome(outcome, requestID: requestID)
+                commitOutcome(outcome, requestID: requestID, selection: nil)
                 return
             }
 
@@ -296,7 +333,7 @@ final class DictionaryLookupViewModel: ObservableObject {
 
         // Commit only if still relevant.
         if case .resolving(let active) = phase, active == requestID {
-            commitOutcome(outcome, requestID: requestID)
+            commitOutcome(outcome, requestID: requestID, selection: nil)
         }
     }
 
@@ -318,6 +355,7 @@ final class DictionaryLookupViewModel: ObservableObject {
         let requestID = "sel:\(mode):\(selectedRange.location):\(selectedRange.length):\(text.hashValue)"
         await lookupTransaction(
             requestID: requestID,
+            selection: nil,
             selectedRange: selectedRange,
             inText: text,
             tokenSpans: tokenSpans,

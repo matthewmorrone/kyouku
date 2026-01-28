@@ -289,15 +289,12 @@ struct PasteView: View {
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { coreToolbar }
-            .alert("Set Title", isPresented: $isTitleEditAlertPresented) {
-                TextField("Title", text: $titleEditDraft)
-                Button("Cancel", role: .cancel) {
-                    // no-op
-                }
-                Button("Set") {
-                    applyTitleEditDraft()
+            .overlay {
+                if isTitleEditAlertPresented {
+                    titleEditModal
                 }
             }
+            .animation(.spring(response: 0.32, dampingFraction: 0.9), value: isTitleEditAlertPresented)
             .safeAreaInset(edge: .bottom) { coreBottomInset }
             .onAppear { onAppearHandler() }
             .onDisappear {
@@ -525,6 +522,10 @@ struct PasteView: View {
                 tokenGeometryDebugOverlay
             }
         }
+        // Slide in/out ONLY when the panel is shown/hidden.
+        // Switching to a new word updates `presented.requestID` but keeps `presented != nil`,
+        // so this animation does not run during content swaps.
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: inlineLookup.presented != nil)
         .coordinateSpace(name: Self.coordinateSpaceName)
     }
 
@@ -1068,24 +1069,21 @@ struct PasteView: View {
     private var inlineDictionaryOverlay: some View {
         if inlineDictionaryPanelEnabled {
             // Presentation gate:
-            // Do not insert the panel into the SwiftUI tree until the lookup model has
-            // entered a stable phase. This prevents immediate empty → loading → results reflow.
-            let shouldPresent: Bool = {
-                switch inlineLookup.phase {
-                case .idle:
+            // Keep the panel mounted as long as we have a stable `presented` snapshot.
+            // When a new lookup starts, `phase` flips to `.resolving`, but `presented`
+            // remains unchanged until the next lookup commits. This prevents flicker.
+            if let presented = inlineLookup.presented,
+               let selection = presented.selection,
+               selection.range.length > 0 {
+                let isBusy: Bool = {
+                    if case .resolving(let currentID) = inlineLookup.phase {
+                        return currentID != presented.requestID
+                    }
                     return false
-                case .resolving:
-                    return false
-                case .ready:
-                    return true
-                }
-            }()
+                }()
 
-            if tokenSelection != nil, shouldPresent {
                 inlineDismissScrim
-            }
-            if let selection = tokenSelection, selection.range.length > 0, shouldPresent {
-                inlineTokenActionPanel(for: selection)
+                inlineTokenActionPanel(for: selection, isBusy: isBusy)
             }
         }
     }
@@ -1125,7 +1123,7 @@ struct PasteView: View {
         incrementalSelectedCharacterRange = nil
     }
 
-    private func inlineTokenActionPanel(for selection: TokenSelectionContext) -> some View {
+    private func inlineTokenActionPanel(for selection: TokenSelectionContext, isBusy: Bool) -> some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -1168,6 +1166,17 @@ struct PasteView: View {
                     focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
                     onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
                 )
+                .disabled(isBusy)
+                .overlay {
+                    if isBusy {
+                        // Non-layout-affecting "busy" indicator while resolving a new selection.
+                        ProgressView()
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+                            .allowsHitTesting(false)
+                    }
+                }
                 .id("token-action-panel-\(overrideSignature)")
                 .padding(.horizontal, 0)
                 .padding(.bottom, 0)
@@ -1411,6 +1420,66 @@ struct PasteView: View {
         isTitleEditAlertPresented = true
     }
 
+    private var titleEditModal: some View {
+        ZStack {
+            // Tap-to-dismiss scrim.
+            Color.black.opacity(0.22)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    isTitleEditAlertPresented = false
+                }
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    TextField("Title", text: $titleEditDraft)
+                        .textInputAutocapitalization(.sentences)
+                        .disableAutocorrection(true)
+                        .submitLabel(.done)
+                        .onSubmit {
+                            applyTitleEditDraft()
+                            isTitleEditAlertPresented = false
+                        }
+
+                    if titleEditDraft.isEmpty == false {
+                        Button {
+                            titleEditDraft = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                                .font(.title3)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear title")
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                HStack {
+                    Button("Cancel", role: .cancel) {
+                        isTitleEditAlertPresented = false
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer(minLength: 0)
+
+                    Button("Set") {
+                        applyTitleEditDraft()
+                        isTitleEditAlertPresented = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: 520)
+            .frame(height: 180)
+            .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .padding(.horizontal, 24)
+            .transition(.scale(scale: 0.98).combined(with: .opacity))
+        }
+    }
+
     private func applyTitleEditDraft() {
         let normalized = normalizedTitle(titleEditDraft)
 
@@ -1560,11 +1629,12 @@ struct PasteView: View {
         let selectionID = selection.id
         let lemmaFallbacks = selection.annotatedSpan.lemmaCandidates
 
-        Task { [tokens, selectedRange, currentText, selectionID, lemmaFallbacks] in
+        Task { [selection, tokens, selectedRange, currentText, selectionID, lemmaFallbacks] in
             // Treat surface/deinflection + lemma fallbacks as ONE transaction.
             // The UI should not see intermediate empty/loading states.
             await inlineLookup.lookupTransaction(
                 requestID: selectionID,
+                selection: selection,
                 selectedRange: selectedRange,
                 inText: currentText,
                 tokenSpans: tokens,
