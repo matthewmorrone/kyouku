@@ -308,11 +308,21 @@ struct RubyText: UIViewRepresentable {
         renderHasher.combine(Int((effectiveLineSpacing * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(rubyHorizontalAlignment == .leading ? 1 : 0)
         renderHasher.combine(wrapLines ? 1 : 0)
-        // Only treat `.removed` as a layout-affecting change; `.visible` vs
-        // `.hiddenKeepMetrics` share identical metrics, so toggling furigana
-        // visibility does not force a reapplication or resync.
-        let removeAnnotationsFlag = (annotationVisibility == .removed) ? 1 : 0
-        renderHasher.combine(removeAnnotationsFlag)
+        // Ruby visibility affects layout, because we may reserve different vertical headroom
+        // (paragraph spacing + top inset) depending on whether ruby should be shown.
+        // Treat all visibility transitions as layout-affecting so toggling furigana cannot
+        // leave stale paragraph metrics and cause overlaps.
+        let annotationVisibilityFlag: Int = {
+            switch annotationVisibility {
+            case .visible:
+                return 0
+            case .hiddenKeepMetrics:
+                return 1
+            case .removed:
+                return 2
+            }
+        }()
+        renderHasher.combine(annotationVisibilityFlag)
         renderHasher.combine(tokenOverlays.count)
         for o in tokenOverlays {
             renderHasher.combine(o.range.location)
@@ -1102,6 +1112,21 @@ struct RubyText: UIViewRepresentable {
             insert.addAttribute(.rubyReadingFontSize, value: item.rubyFontSize, range: NSRange(location: 0, length: insert.length))
 
             let safeIndex = max(0, min(mutable.length, item.insertAtSourceIndex))
+
+            // CRITICAL: preserve paragraph metrics on inserted spacers.
+            // TextKit can resolve paragraph style per-run; if a visual line begins with a
+            // spacer that lacks `.paragraphStyle`, line spacing/headroom may collapse and
+            // ruby can overlap adjacent lines.
+            if mutable.length > 0 {
+                let sampleIndex: Int = {
+                    if safeIndex < mutable.length { return safeIndex }
+                    return max(0, mutable.length - 1)
+                }()
+                if let paragraph = mutable.attribute(.paragraphStyle, at: sampleIndex, effectiveRange: nil) {
+                    insert.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: insert.length))
+                }
+            }
+
             mutable.insert(insert, at: safeIndex)
         }
 
