@@ -1648,6 +1648,64 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         ]
         return layer
     }()
+
+    // Temporary diagnostic: remove after ruby-envelope highlight is verified.
+    private let rubyEnvelopeDebugRubyRectsLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemGreen.withAlphaComponent(0.95).cgColor
+        layer.lineWidth = 2.0
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+    private let rubyEnvelopeDebugBaseUnionLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemBlue.withAlphaComponent(0.95).cgColor
+        layer.lineWidth = 2.0
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+    private let rubyEnvelopeDebugRubyUnionLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemGreen.withAlphaComponent(0.95).cgColor
+        layer.lineWidth = 2.0
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+    private let rubyEnvelopeDebugFinalUnionLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemRed.withAlphaComponent(0.95).cgColor
+        layer.lineWidth = 2.0
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
     var rubyHighlightHeadroom: CGFloat = 0 {
         didSet {
             guard oldValue != rubyHighlightHeadroom else { return }
@@ -2256,6 +2314,17 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         rubyHighlightLayer.contentsScale = traitCollection.displayScale
         highlightOverlayContainerLayer.addSublayer(rubyHighlightLayer)
         highlightOverlayContainerLayer.addSublayer(baseHighlightLayer)
+
+        // Temporary diagnostic: remove after ruby-envelope highlight is verified.
+        rubyEnvelopeDebugRubyRectsLayer.contentsScale = traitCollection.displayScale
+        rubyEnvelopeDebugBaseUnionLayer.contentsScale = traitCollection.displayScale
+        rubyEnvelopeDebugRubyUnionLayer.contentsScale = traitCollection.displayScale
+        rubyEnvelopeDebugFinalUnionLayer.contentsScale = traitCollection.displayScale
+        highlightOverlayContainerLayer.addSublayer(rubyEnvelopeDebugRubyRectsLayer)
+        highlightOverlayContainerLayer.addSublayer(rubyEnvelopeDebugBaseUnionLayer)
+        highlightOverlayContainerLayer.addSublayer(rubyEnvelopeDebugRubyUnionLayer)
+        highlightOverlayContainerLayer.addSublayer(rubyEnvelopeDebugFinalUnionLayer)
+
         layer.addSublayer(highlightOverlayContainerLayer)
 
         headwordBoundingRectsLayer.contentsScale = traitCollection.displayScale
@@ -3092,7 +3161,24 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             // filtering can return no ruby rects depending on the active source↔display mapping.
             textLayer.setValue(run.range.location, forKey: "rubyRangeLocation")
             textLayer.setValue(run.range.length, forKey: "rubyRangeLength")
-            let sourceLoc = sourceIndex(fromDisplayIndex: run.range.location)
+            // IMPORTANT (2026-01-28): When headword padding is enabled, ruby-bearing runs can
+            // begin with one or more invisible width spacer characters (U+FFFC). Those indices
+            // are not real source text and `displayToSource` maps them to the previous source
+            // index, which mis-tags ruby layers and can make ruby-envelope highlight collection
+            // empty. Fix: choose the first non-spacer display index within the run.
+            let tokenLookupDisplayIndex: Int = {
+                guard run.range.location != NSNotFound, run.range.length > 0 else { return run.range.location }
+                let upper = min(attributedText?.length ?? 0, NSMaxRange(run.range))
+                var idx = max(0, run.range.location)
+                while idx < upper {
+                    if isRubyWidthSpacer(atDisplayIndex: idx) == false {
+                        return idx
+                    }
+                    idx += 1
+                }
+                return run.range.location
+            }()
+            let sourceLoc = sourceIndex(fromDisplayIndex: tokenLookupDisplayIndex)
             if let (tokenIndex, span) = semanticSpans.spanContext(containingUTF16Index: sourceLoc) {
                 textLayer.setValue(tokenIndex, forKey: "rubyTokenIndex")
                 textLayer.setValue(span.range.location, forKey: "rubySpanLocation")
@@ -3723,6 +3809,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         textRange(for: range) != nil else {
             baseHighlightLayer.path = nil
             rubyHighlightLayer.path = nil
+
+            // Temporary diagnostic: remove after ruby-envelope highlight is verified.
+            rubyEnvelopeDebugRubyRectsLayer.path = nil
+            rubyEnvelopeDebugBaseUnionLayer.path = nil
+            rubyEnvelopeDebugRubyUnionLayer.path = nil
+            rubyEnvelopeDebugFinalUnionLayer.path = nil
             return
         }
 
@@ -3748,10 +3840,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             return u.offsetBy(dx: contentOffset.x, dy: contentOffset.y)
         }()
 
-        let rubyRectsInContent: [CGRect] = {
+        let rubyHighlightTokenIndex: Int? = {
             let sourceLoc = sourceIndex(fromDisplayIndex: range.location)
-            guard let (tokenIndex, _) = semanticSpans.spanContext(containingUTF16Index: sourceLoc) else { return [] }
-            return rubyHighlightRectsInContentCoordinates(forTokenIndex: tokenIndex)
+            guard let (tokenIndex, _) = semanticSpans.spanContext(containingUTF16Index: sourceLoc) else { return nil }
+            return tokenIndex
+        }()
+
+        let rubyRectsInContent: [CGRect] = {
+            guard let rubyHighlightTokenIndex else { return [] }
+            return rubyHighlightRectsInContentCoordinates(forTokenIndex: rubyHighlightTokenIndex)
         }()
         let rubyRectUnionInContent: CGRect = {
             var u = CGRect.null
@@ -3766,6 +3863,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             highlightRect = highlightRect.isNull ? rubyRectUnionInContent : highlightRect.union(rubyRectUnionInContent)
         }
 
+        let highlightRectPreInsets = highlightRect
+
         guard highlightRect.isNull == false, highlightRect.isEmpty == false else {
             baseHighlightLayer.path = nil
             rubyHighlightLayer.path = nil
@@ -3775,6 +3874,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // Keep highlight overlays attached to the same scrolling container as ruby overlays.
         highlightOverlayContainerLayer.frame = CGRect(origin: .zero, size: contentSize)
 
+        // Temporary diagnostic: remove after ruby-envelope highlight is verified.
+        rubyEnvelopeDebugRubyRectsLayer.frame = highlightOverlayContainerLayer.bounds
+        rubyEnvelopeDebugBaseUnionLayer.frame = highlightOverlayContainerLayer.bounds
+        rubyEnvelopeDebugRubyUnionLayer.frame = highlightOverlayContainerLayer.bounds
+        rubyEnvelopeDebugFinalUnionLayer.frame = highlightOverlayContainerLayer.bounds
+
         let insets = selectionHighlightInsets
 
         if insets != .zero {
@@ -3783,6 +3888,37 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             highlightRect.size.width -= (insets.left + insets.right)
             highlightRect.size.height -= (insets.top + insets.bottom)
         }
+
+        // Temporary diagnostic: remove after ruby-envelope highlight is verified.
+        // Always-on: no env vars, no external tracing required.
+        let tokenDesc = rubyHighlightTokenIndex.map(String.init) ?? "<none>"
+        func rectString(_ rect: CGRect) -> String { NSCoder.string(for: rect) }
+        print(
+            "[RubyEnvelopeHighlight] token=\(tokenDesc) rubyRects=\(rubyRectsInContent.count) " +
+            "baseUnion=\(rectString(baseRectUnionInContent)) " +
+            "rubyUnion=\(rectString(rubyRectUnionInContent)) " +
+            "finalPreInsets=\(rectString(highlightRectPreInsets)) " +
+            "final=\(rectString(highlightRect))"
+        )
+
+        // Temporary diagnostic: remove after ruby-envelope highlight is verified.
+        // Draw ruby rects (green), base union (blue), ruby union (green), final union (red).
+        let rubyRectsPath = CGMutablePath()
+        for r in rubyRectsInContent {
+            if r.isNull == false, r.isEmpty == false {
+                rubyRectsPath.addRect(r)
+            }
+        }
+        rubyEnvelopeDebugRubyRectsLayer.path = rubyRectsPath.isEmpty ? nil : rubyRectsPath
+        rubyEnvelopeDebugBaseUnionLayer.path = (baseRectUnionInContent.isNull || baseRectUnionInContent.isEmpty)
+            ? nil
+            : UIBezierPath(rect: baseRectUnionInContent).cgPath
+        rubyEnvelopeDebugRubyUnionLayer.path = (rubyRectUnionInContent.isNull || rubyRectUnionInContent.isEmpty)
+            ? nil
+            : UIBezierPath(rect: rubyRectUnionInContent).cgPath
+        rubyEnvelopeDebugFinalUnionLayer.path = (highlightRect.isNull || highlightRect.isEmpty)
+            ? nil
+            : UIBezierPath(rect: highlightRect).cgPath
 
         if highlightRect.width > 0, highlightRect.height > 0 {
             baseHighlightLayer.path = UIBezierPath(roundedRect: highlightRect, cornerRadius: 6).cgPath
