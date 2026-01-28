@@ -263,12 +263,19 @@ struct RubyText: UIViewRepresentable {
             )
         )
 
-        let insets = textInsets
-        // Ruby headroom is reserved via custom TextKit 2 layout fragments (topMargin).
-        // Keep container inset stable so we don't introduce global top padding.
+        let rubyMetricsEnabled = (annotationVisibility != .removed)
+
+        // Reserve ruby headroom via container inset at the top of the document.
+        // We intentionally avoid fragment `topMargin` for spacing because TextKit 2 only
+        // applies it to the first line of each fragment, which creates inconsistent gaps.
+        var insets = textInsets
+        if rubyMetricsEnabled {
+            insets.top += max(0, rubyHeadroom)
+        }
+
         uiView.rubyHighlightHeadroom = rubyHeadroom
         uiView.rubyBaselineGap = rubyBaselineGap
-        uiView.rubyReservedTopMargin = (annotationVisibility == .removed) ? 0 : max(0, rubyHeadroom)
+        uiView.rubyReservedTopMargin = 0
 
         // IMPORTANT:
         // TextKit 2 `NSTextLayoutFragment.topMargin` only reserves space above the *first* line
@@ -276,8 +283,6 @@ struct RubyText: UIViewRepresentable {
         // reliable way to ensure *every* wrapped line has enough vertical room for ruby.
         //
         // Use a minimum line height that includes the ruby headroom.
-        let rubyMetricsEnabled = (annotationVisibility != .removed)
-
         // Allocate vertical room for ruby on EVERY visual line (including soft wraps).
         // TextKit 2 fragment `topMargin` cannot cover subsequent wrapped lines.
         let effectiveLineSpacing: CGFloat = {
@@ -2748,9 +2753,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         // Draw alternating content-space bands for base text lines and the ruby headroom above them.
         // TextKit 2 layout is frequently viewport-lazy; compute VISIBLE lines in view coords and
         // translate to content coords so the bands keep up with scrolling.
-        // Labels (L#/R#) are useful during development but add visual noise; keep the code
-        // available but default to off.
-        let showLineBandLabels = UserDefaults.standard.bool(forKey: "RubyDebug.showLineBandLabels")
+        // Labels (L#/R#) are useful during debugging; default them to ON when bands are enabled.
+        // You can explicitly override via UserDefaults: `RubyDebug.showLineBandLabels = false`.
+        let showLineBandLabels: Bool = {
+            guard headwordLineBandsEnabled || rubyLineBandsEnabled else { return false }
+            if UserDefaults.standard.object(forKey: "RubyDebug.showLineBandLabels") != nil {
+                return UserDefaults.standard.bool(forKey: "RubyDebug.showLineBandLabels")
+            }
+            return true
+        }()
         // NOTE: Historically we computed visible lines in view coordinates and then added
         // `contentOffset` to translate back to content coordinates. That works when the helper
         // truly returns view-space rects, but can appear visually offset if any upstream rects
