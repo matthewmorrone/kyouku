@@ -4,6 +4,7 @@ import UIKit
 @MainActor
 struct FuriganaRenderingHost: View {
     @AppStorage("readingFontName") private var readingFontName: String = ""
+    @AppStorage("readingDistinctKanaKanjiFonts") private var readingDistinctKanaKanjiFonts: Bool = false
     @State private var scrollSyncGroupID: String = UUID().uuidString
 
     @Binding var text: String
@@ -183,7 +184,8 @@ struct FuriganaRenderingHost: View {
                     attributed: attributed,
                     fontSize: CGFloat(textSize),
                     extraGap: CGFloat(max(0, lineSpacing)),
-                    textInsets: insets
+                    textInsets: insets,
+                    distinctKanaKanjiFonts: readingDistinctKanaKanjiFonts
                 )
                 .id(rubyViewIdentity())
                 .frame(minHeight: 40, alignment: .topLeading)
@@ -216,6 +218,7 @@ struct FuriganaRenderingHost: View {
             alternateTokenColorsEnabled: alternateTokenColors,
             enableTapInspection: enableTapInspection,
             enableDragSelection: enableDragSelection,
+            distinctKanaKanjiFonts: readingDistinctKanaKanjiFonts,
             onDragSelectionBegan: onDragSelectionBegan,
             onDragSelectionEnded: onDragSelectionEnded,
             onCharacterTap: onCharacterTap,

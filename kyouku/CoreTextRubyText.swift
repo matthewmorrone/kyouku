@@ -13,6 +13,7 @@ struct CoreTextRubyText: UIViewRepresentable {
     var fontSize: CGFloat
     var extraGap: CGFloat
     var textInsets: UIEdgeInsets
+    var distinctKanaKanjiFonts: Bool = false
 
     func makeUIView(context: Context) -> CoreTextRubyScrollView {
         let scrollView = CoreTextRubyScrollView()
@@ -28,6 +29,7 @@ struct CoreTextRubyText: UIViewRepresentable {
         uiView.renderView.fontSize = fontSize
         uiView.renderView.extraGap = extraGap
         uiView.renderView.textInsets = textInsets
+        uiView.renderView.distinctKanaKanjiFonts = distinctKanaKanjiFonts
         uiView.renderView.setAttributedText(attributed)
         uiView.setNeedsLayout()
         uiView.layoutIfNeeded()
@@ -62,6 +64,7 @@ final class CoreTextRubyRenderView: UIView {
     var fontSize: CGFloat = 17
     var extraGap: CGFloat = 0
     var textInsets: UIEdgeInsets = .zero
+    var distinctKanaKanjiFonts: Bool = false
 
     private var rawAttributed: NSAttributedString = NSAttributedString(string: "")
 
@@ -132,6 +135,7 @@ final class CoreTextRubyRenderView: UIView {
 private extension CoreTextRubyRenderView {
     func rebuildDisplayAttributed() {
         let baseFont = UIFont.systemFont(ofSize: max(1, fontSize))
+        let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
 
         // 1) Start from the raw text and enforce base font + paragraph spacing.
         let mutable = NSMutableAttributedString(attributedString: rawAttributed)
@@ -147,6 +151,10 @@ private extension CoreTextRubyRenderView {
             .foregroundColor: UIColor.label,
             .paragraphStyle: paragraph
         ], range: fullRange)
+
+        if distinctKanaKanjiFonts {
+            ScriptFontStyler.applyDistinctKanaKanjiFonts(to: mutable, kanjiFont: kanjiFont)
+        }
 
         // 2) Apply kerning/attachments to force base width to match ruby width.
         rubyEndAttachmentIndexByStart = [:]

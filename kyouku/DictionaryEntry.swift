@@ -534,8 +534,7 @@ actor DictionarySQLiteStore {
         let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else { return [] }
 
-        if hasGlossesFTS {
-            guard let ftsQuery = buildFTSQuery(from: trimmed) else { return [] }
+        if hasGlossesFTS, let ftsQuery = buildFTSQuery(from: trimmed) {
         let rankedSQL = """
         WITH matched AS (
             SELECT entry_id, MIN(bm25(glosses_fts)) AS score
@@ -645,7 +644,9 @@ actor DictionarySQLiteStore {
                 )
             )
         }
-        return out
+            if out.isEmpty == false {
+                return out
+            }
         }
 
         // Fallback when the bundled DB lacks the optional gloss FTS table (or it wasn't detected).
@@ -1105,13 +1106,18 @@ actor DictionarySQLiteStore {
                 let senseID = sqlite3_column_int64(stmt, 1)
                 let orderIndex = Int(sqlite3_column_int(stmt, 3))
                 guard let langPtr = sqlite3_column_text(stmt, 4) else { continue }
-                let language = String(cString: langPtr).lowercased()
-                guard language == "eng" else { continue }
+                let rawLanguage = String(cString: langPtr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                // Some generators leave English as an empty lang; treat that as English.
+                // Also accept "en".
+                let isEnglish = rawLanguage.isEmpty || rawLanguage == "eng" || rawLanguage == "en"
+                guard isEnglish else { continue }
                 guard let textPtr = sqlite3_column_text(stmt, 5) else { continue }
                 let text = String(cString: textPtr).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard text.isEmpty == false else { continue }
                 guard let builder = builders[senseID] else { continue }
-                let gloss = DictionarySenseGloss(id: glossID, text: text, language: language, orderIndex: orderIndex)
+                let gloss = DictionarySenseGloss(id: glossID, text: text, language: "eng", orderIndex: orderIndex)
                 builder.glosses.append(gloss)
             }
         }

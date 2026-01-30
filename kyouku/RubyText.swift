@@ -116,6 +116,8 @@ struct RubyText: UIViewRepresentable {
     var alternateTokenColorsEnabled: Bool = false
     var enableTapInspection: Bool = true
     var enableDragSelection: Bool = false
+    /// When enabled, applies a distinct font to kanji runs (kana/other stay base font).
+    var distinctKanaKanjiFonts: Bool = false
     var onDragSelectionBegan: (() -> Void)? = nil
     var onDragSelectionEnded: ((NSRange) -> Void)? = nil
     var onCharacterTap: ((Int) -> Void)? = nil
@@ -271,6 +273,21 @@ struct RubyText: UIViewRepresentable {
         var insets = textInsets
         if rubyMetricsEnabled {
             insets.top += max(0, rubyHeadroom)
+
+            // Prevent ruby overhang/clipping at the container edges.
+            // When headword padding is enabled, we may center a wide ruby reading over its
+            // base run by inserting invisible width on both sides; at line starts/ends this
+            // needs real horizontal slack so ruby never extends into the inset boundary.
+            // Compute a conservative inset based on the largest ruby font size present.
+            let rubyHorizontalInset = RubyText.requiredHorizontalInsetForRubyOverhang(
+                in: attributed,
+                baseFont: baseFont,
+                defaultRubyFontSize: defaultRubyFontSize
+            )
+            if rubyHorizontalInset > 0 {
+                insets.left += rubyHorizontalInset
+                insets.right += rubyHorizontalInset
+            }
         }
 
         uiView.rubyHighlightHeadroom = rubyHeadroom
@@ -375,6 +392,11 @@ struct RubyText: UIViewRepresentable {
             mutable.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
             mutable.addAttribute(.foregroundColor, value: UIColor.label, range: fullRange)
             mutable.addAttribute(.font, value: baseFont, range: fullRange)
+
+            if distinctKanaKanjiFonts {
+                let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
+                ScriptFontStyler.applyDistinctKanaKanjiFonts(to: mutable, kanjiFont: kanjiFont)
+            }
 
             if abs(globalKerning) > 0.001 {
                 // Apply global kerning to every character without clobbering any existing
@@ -962,6 +984,20 @@ struct RubyText: UIViewRepresentable {
         return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
     }
 
+    fileprivate static func measureTypographicSize(_ attributed: NSAttributedString) -> CGSize {
+        let line = CTLineCreateWithAttributedString(attributed)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        let width = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+
+        // Use ascent+descent (typographic height). This matches how CoreText lays out glyphs
+        // more closely than NSString.size(withAttributes:), and tends to agree better with
+        // CATextLayer rendering.
+        let height = max(0, ascent + descent)
+        return CGSize(width: max(0, width), height: height)
+    }
+
     private static func makeWidthAttachmentAttributes(width: CGFloat) -> [NSAttributedString.Key: Any] {
         let w = max(0, width)
 
@@ -1046,8 +1082,16 @@ struct RubyText: UIViewRepresentable {
             let rubyAttr = NSAttributedString(string: reading, attributes: [.font: rubyFont])
             let rubyWidth = measureTypographicWidth(rubyAttr)
 
-            let overhang = rubyWidth - baseWidth
-            guard overhang > 0.25 else { return }
+            // Prevent furigana overlap:
+            // - First, ensure the base run is at least as wide as the ruby reading.
+            // - Second, add a small safety width so adjacent ruby runs don't visually touch/overlap
+            //   due to rounding differences or glyph overhangs between CoreText measurement and
+            //   CATextLayer rendering.
+            let safetyWidth: CGFloat = max(1.0, rubyFontSize * 0.12)
+            let desiredRubyWidth = max(0, rubyWidth) + safetyWidth
+
+            let overhang = desiredRubyWidth - baseWidth
+            guard overhang > 0.01 else { return }
 
             let pad = overhang / 2
             insertions.append(.init(insertAtSourceIndex: range.location, width: pad, rubyReading: reading, rubyFontSize: rubyFontSize))
@@ -1056,42 +1100,6 @@ struct RubyText: UIViewRepresentable {
 
         guard insertions.isEmpty == false else {
             return (mutable, .identity)
-        }
-
-        // Adjacent ruby runs (common when furigana is per-kanji) produce TWO insertions at the
-        // same boundary: a right-pad for the left run and a left-pad for the right run.
-        // The conservative sum can create huge intra-word gaps (e.g. "純　情").
-        // Allow ruby to overhang more by capping the *total* padding at shared boundaries.
-        let groupedByIndex = Dictionary(grouping: insertions, by: { $0.insertAtSourceIndex })
-        if groupedByIndex.values.contains(where: { $0.count >= 2 }) {
-            let capTotalAtSharedBoundary = max(1.0, baseFont.pointSize * 0.28)
-            var adjusted: [SpacerInsertion] = []
-            adjusted.reserveCapacity(insertions.count)
-
-            for (idx, group) in groupedByIndex {
-                if group.count < 2 {
-                    adjusted.append(contentsOf: group)
-                    continue
-                }
-
-                let sum = group.reduce(CGFloat(0)) { $0 + $1.width }
-                let scale: CGFloat = (sum > capTotalAtSharedBoundary && sum > 0)
-                    ? (capTotalAtSharedBoundary / sum)
-                    : 1.0
-
-                for item in group {
-                    adjusted.append(
-                        .init(
-                            insertAtSourceIndex: idx,
-                            width: max(0, item.width * scale),
-                            rubyReading: item.rubyReading,
-                            rubyFontSize: item.rubyFontSize
-                        )
-                    )
-                }
-            }
-
-            insertions = adjusted
         }
 
         // Apply insertions from end to start so indices remain stable.
@@ -1752,6 +1760,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
 
     private struct RubyRun {
         let range: NSRange
+        let inkRange: NSRange
         let reading: String
         let fontSize: CGFloat
         let color: UIColor
@@ -3147,13 +3156,28 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             return
         }
 
-        // Use visible line rects when available; in debug mode we only need what the user sees.
-        let lineRectsInContent = textKit2LineTypographicRectsInContentCoordinates(visibleOnly: true)
+        // Use full line rects (not visible-only) so any stored ruby anchor metadata remains stable.
+        let lineRectsInContent = textKit2LineTypographicRectsInContentCoordinates(visibleOnly: false)
 
         let alignedHeadwordPath = CGMutablePath()
         let misalignedHeadwordPath = CGMutablePath()
         let alignedRubyPath = CGMutablePath()
         let misalignedRubyPath = CGMutablePath()
+
+        struct BisectorKey: Hashable {
+            // kind 0: semantic token index, kind 1: ruby range (location/length)
+            let kind: UInt8
+            let a: Int
+            let b: Int
+        }
+        var seen: Set<BisectorKey> = []
+        seen.reserveCapacity(min(1024, rubyLayers.count))
+
+        // Debug readability: compact mode reduces the number of drawn bisectors.
+        // When enabled, aligned runs draw only ONE yellow bisector (headword), while
+        // misaligned runs still draw both (green) so the offset is visible.
+        // Default is false (full detail): draw both headword + ruby bisectors.
+        let compactBisectors = UserDefaults.standard.bool(forKey: "RubyDebug.compactBisectors")
 
         let tolerance: CGFloat = 0.75
         let maxLayers = min(rubyLayers.count, 1024)
@@ -3171,37 +3195,72 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             }
 
             let range = NSRange(location: loc, length: len)
+
+            // Deduplicate bisectors: a single semantic token can map to multiple ruby layers
+            // (e.g. if attributes are split by padding/spacers). Drawing each layer's bisector
+            // produces the “extra lines” effect without adding signal.
+            let key: BisectorKey = {
+                if let tokenIndex = ruby.value(forKey: "rubyTokenIndex") as? Int {
+                    return BisectorKey(kind: 0, a: tokenIndex, b: 0)
+                }
+                return BisectorKey(kind: 1, a: loc, b: len)
+            }()
+            if seen.contains(key) { continue }
+            seen.insert(key)
+
             let baseRects = textKit2AnchorRectsInContentCoordinates(for: range, lineRectsInContent: lineRectsInContent)
             guard baseRects.isEmpty == false else { continue }
             let unions = unionRectsByLine(baseRects)
             guard unions.isEmpty == false else { continue }
 
-            // Select the base union on the same visual line as the ruby rect.
+            // Select the base union that this ruby layer was placed from.
+            // IMPORTANT: Ruby rects sit above the typographic line rects, so intersection-based
+            // line matching is unstable. Instead, we store the base union's midY on the ruby layer.
             let baseUnion: CGRect = {
-                guard let rubyLineIndex = bestMatchingLineIndex(for: rubyRect, candidates: lineRectsInContent) else {
-                    return unions[0]
-                }
-                for u in unions {
-                    if bestMatchingLineIndex(for: u, candidates: lineRectsInContent) == rubyLineIndex {
-                        return u
+                let storedMidY: CGFloat? = {
+                    if let n = ruby.value(forKey: "rubyAnchorBaseMidY") as? NSNumber {
+                        return CGFloat(n.doubleValue)
+                    }
+                    if let d = ruby.value(forKey: "rubyAnchorBaseMidY") as? Double {
+                        return CGFloat(d)
+                    }
+                    return nil
+                }()
+
+                guard let targetMidY = storedMidY, unions.count > 1 else { return unions[0] }
+
+                var best = unions[0]
+                var bestDist = abs(best.midY - targetMidY)
+                for u in unions.dropFirst() {
+                    let dist = abs(u.midY - targetMidY)
+                    if dist < bestDist {
+                        bestDist = dist
+                        best = u
                     }
                 }
-                return unions[0]
+                return best
             }()
 
             let baseCenterX = baseUnion.midX
             let rubyCenterX = rubyRect.midX
             let aligned = abs(baseCenterX - rubyCenterX) <= tolerance
 
-            // Headword bisector (per ruby run / per-kanji).
+            // Headword bisector.
             let headwordPath = aligned ? alignedHeadwordPath : misalignedHeadwordPath
             headwordPath.move(to: CGPoint(x: baseCenterX, y: baseUnion.minY))
             headwordPath.addLine(to: CGPoint(x: baseCenterX, y: baseUnion.maxY))
 
             // Ruby bisector.
-            let rubyPath = aligned ? alignedRubyPath : misalignedRubyPath
-            rubyPath.move(to: CGPoint(x: rubyCenterX, y: rubyRect.minY))
-            rubyPath.addLine(to: CGPoint(x: rubyCenterX, y: rubyRect.maxY))
+            // In compact mode, skip aligned ruby bisectors to reduce visual clutter.
+            if aligned {
+                if compactBisectors == false {
+                    alignedRubyPath.move(to: CGPoint(x: rubyCenterX, y: rubyRect.minY))
+                    alignedRubyPath.addLine(to: CGPoint(x: rubyCenterX, y: rubyRect.maxY))
+                }
+            } else {
+                misalignedRubyPath.move(to: CGPoint(x: rubyCenterX, y: rubyRect.minY))
+                misalignedRubyPath.addLine(to: CGPoint(x: rubyCenterX, y: rubyRect.maxY))
+            }
         }
 
         func apply(_ layer: CAShapeLayer, _ path: CGPath) {
@@ -3296,6 +3355,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             let lineIndex: Int
             var frame: CGRect
             let preferredCenterX: CGFloat
+            let anchorBaseMidY: CGFloat
         }
 
         var proposals: [RubyPlacementProposal] = []
@@ -3304,7 +3364,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
         proposalRuns.reserveCapacity(min(2048, cachedRubyRuns.count))
 
         for run in cachedRubyRuns {
-            let baseRectsInContent = textKit2AnchorRectsInContentCoordinates(for: run.range, lineRectsInContent: lineRectsInContent)
+            let baseRectsInContent = textKit2AnchorRectsInContentCoordinates(for: run.inkRange, lineRectsInContent: lineRectsInContent)
             guard baseRectsInContent.isEmpty == false else { continue }
 
             let unionsInContent = unionRectsByLine(baseRectsInContent)
@@ -3349,7 +3409,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 .font: rubyFont,
                 .foregroundColor: run.color
             ]
-            let size = (run.reading as NSString).size(withAttributes: attrs)
+            let size = RubyText.measureTypographicSize(NSAttributedString(string: run.reading, attributes: attrs))
             guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { continue }
 
             let baseUnionInContent = preferredUnionInContent
@@ -3357,7 +3417,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             // Center ruby over the base glyph bounds.
             // (If we shift ruby to eliminate left overhang, the extra width appears only on the right.)
             let xUnclamped: CGFloat = {
-                if let xr = caretXRangeInContentCoordinates(for: run.range) {
+                // When headword padding is enabled we insert invisible width spacers into
+                // the displayed attributed string so the *base* anchor rects match the ruby.
+                // Those spacers can make caret-based geometry disagree with segment/anchor
+                // rect unions. The bisector debug uses anchor-rect unions, so to keep
+                // bisectors yellow we must position ruby from the same geometry source.
+                if padHeadwordSpacing == false, let xr = caretXRangeInContentCoordinates(for: run.inkRange) {
                     switch rubyHorizontalAlignment {
                     case .leading:
                         return xr.startX
@@ -3374,21 +3439,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 }
             }()
 
-            // When headword padding is enabled, avoid left overhang at the beginning of a visual line.
-            // This is the case that reads as “ruby jutting into the margin”.
-            let x: CGFloat = {
-                guard padHeadwordSpacing else { return xUnclamped }
-
-                // Only clamp when this token starts a visual line.
-                guard let line = bestMatchingLineRect(for: baseUnionInContent, candidates: lineRectsInContent) else {
-                    return xUnclamped
-                }
-                let isAtLineStart = baseUnionInContent.minX <= (line.minX + 1.0)
-                guard isAtLineStart else { return xUnclamped }
-
-                // Clamp ruby so it never starts left of the headword's rendered base.
-                return max(xUnclamped, baseUnionInContent.minX)
-            }()
+            let x: CGFloat = xUnclamped
             // Place ruby in the reserved headroom above the base glyph bounds.
             // This avoids the ruby being occluded by the text layer when overlays are below it.
             let y = (baseUnionInContent.minY - gap) - size.height
@@ -3397,17 +3448,23 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             let lineIndex: Int = bestMatchingLineIndex(for: baseUnionInContent, candidates: lineRectsInContent)
                 ?? (Int.min + proposals.count)
             let preferredCenterX: CGFloat = x + (size.width / 2.0)
-            proposals.append(.init(lineIndex: lineIndex, frame: initialFrame, preferredCenterX: preferredCenterX))
+            proposals.append(.init(
+                lineIndex: lineIndex,
+                frame: initialFrame,
+                preferredCenterX: preferredCenterX,
+                anchorBaseMidY: baseUnionInContent.midY
+            ))
             proposalRuns.append(run)
         }
 
         // Collision resolution (single-pass, deterministic): within each visual line,
         // shift ruby frames to the right to prevent overlap.
-        // Constraints:
-        // - Preserve ordering
-        // - Never modify widths/heights
-        // - Only adjust frame.origin.x
-        if proposals.isEmpty == false {
+        //
+        // IMPORTANT: When `padHeadwordSpacing` is enabled, we rely on display-text padding
+        // (invisible width spacers) to ensure ruby widths fit, so ruby frames can stay
+        // centered over their anchor rects. Shifting frames here breaks that centering
+        // and produces misaligned (green) bisectors.
+        if padHeadwordSpacing == false, proposals.isEmpty == false {
             let indicesByLine = Dictionary(grouping: proposals.indices, by: { proposals[$0].lineIndex })
             for lineIndex in indicesByLine.keys.sorted() {
                 guard let lineIndices = indicesByLine[lineIndex], lineIndices.isEmpty == false else { continue }
@@ -3443,24 +3500,28 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             // Tag the layer for hit-testing and highlight binding.
             // Ruby layers are keyed by token/span identity, not source NSRange; range-based
             // filtering can return no ruby rects depending on the active source↔display mapping.
-            textLayer.setValue(run.range.location, forKey: "rubyRangeLocation")
-            textLayer.setValue(run.range.length, forKey: "rubyRangeLength")
+            textLayer.setValue(run.inkRange.location, forKey: "rubyRangeLocation")
+            textLayer.setValue(run.inkRange.length, forKey: "rubyRangeLength")
+            // Store anchor metadata for stable debug/bisector matching.
+            // (Ruby rects do not intersect typographic line rects, so geometric matching is fragile.)
+            textLayer.setValue(NSNumber(value: Double(proposal.preferredCenterX)), forKey: "rubyPreferredCenterX")
+            textLayer.setValue(NSNumber(value: Double(proposal.anchorBaseMidY)), forKey: "rubyAnchorBaseMidY")
             // IMPORTANT (2026-01-28): When headword padding is enabled, ruby-bearing runs can
             // begin with one or more invisible width spacer characters (U+FFFC). Those indices
             // are not real source text and `displayToSource` maps them to the previous source
             // index, which mis-tags ruby layers and can make ruby-envelope highlight collection
             // empty. Fix: choose the first non-spacer display index within the run.
             let tokenLookupDisplayIndex: Int = {
-                guard run.range.location != NSNotFound, run.range.length > 0 else { return run.range.location }
-                let upper = min(attributedText?.length ?? 0, NSMaxRange(run.range))
-                var idx = max(0, run.range.location)
+                guard run.inkRange.location != NSNotFound, run.inkRange.length > 0 else { return run.inkRange.location }
+                let upper = min(attributedText?.length ?? 0, NSMaxRange(run.inkRange))
+                var idx = max(0, run.inkRange.location)
                 while idx < upper {
                     if isRubyWidthSpacer(atDisplayIndex: idx) == false {
                         return idx
                     }
                     idx += 1
                 }
-                return run.range.location
+                return run.inkRange.location
             }()
             let sourceLoc = sourceIndex(fromDisplayIndex: tokenLookupDisplayIndex)
             if let (tokenIndex, span) = semanticSpans.spanContext(containingUTF16Index: sourceLoc) {
@@ -3593,7 +3654,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                     height: headroom
                 )
 
-                let size = (run.reading as NSString).size(withAttributes: attrs)
+                let size = RubyText.measureTypographicSize(NSAttributedString(string: run.reading, attributes: attrs))
                 let x: CGFloat = {
                     if let xr = caretXRangeInViewCoordinates(for: run.range) {
                         switch rubyHorizontalAlignment {
@@ -4041,6 +4102,52 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             guard range.location != NSNotFound, range.length > 0 else { return }
             guard NSMaxRange(range) <= text.length else { return }
 
+            // Derive an "ink" range for geometry/bisectors by trimming invisible ruby-width
+            // spacers (U+FFFC) and pure whitespace at the start/end of the attributed run.
+            // This keeps alignment debugging tied to the visible glyphs, even when we pad
+            // headword spacing for wide ruby.
+            let backing = text.string as NSString
+            let upperBound = min(text.length, NSMaxRange(range))
+            var inkStart = range.location
+            var inkEndExclusive = upperBound
+
+            if range.location < upperBound {
+                // Trim leading.
+                var idx = range.location
+                while idx < upperBound {
+                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
+                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
+                    let s = backing.substring(with: r)
+                    if s == "\u{FFFC}" || s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        idx = NSMaxRange(r)
+                        continue
+                    }
+                    inkStart = r.location
+                    break
+                }
+
+                // Trim trailing.
+                var tail = upperBound - 1
+                while tail >= inkStart {
+                    let r = backing.rangeOfComposedCharacterSequence(at: tail)
+                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
+                    let s = backing.substring(with: r)
+                    if s == "\u{FFFC}" || s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if r.location == 0 { break }
+                        tail = r.location - 1
+                        continue
+                    }
+                    inkEndExclusive = NSMaxRange(r)
+                    break
+                }
+            }
+
+            let inkRange: NSRange = {
+                let len = max(0, inkEndExclusive - inkStart)
+                guard inkStart != NSNotFound, len > 0 else { return range }
+                return NSRange(location: inkStart, length: len)
+            }()
+
             let rubyFontSize: CGFloat
             if let stored = text.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? Double {
                 rubyFontSize = CGFloat(max(1.0, stored))
@@ -4055,8 +4162,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
             // Ruby runs can begin with an invisible width spacer (U+FFFC) when we pad headword widths.
             // If so, the spacer's clear foregroundColor would incorrectly make ruby invisible.
             // Choose the first non-spacer glyph's color within the run.
-            let backing = text.string as NSString
-            let upper = min(text.length, NSMaxRange(range))
+            let upper = upperBound
             var chosenColor: UIColor? = nil
             if range.location < upper {
                 var idx = range.location
@@ -4078,7 +4184,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate {
                 }
             }
             let color = chosenColor ?? (text.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? UIColor) ?? UIColor.label
-            runs.append(RubyRun(range: range, reading: reading, fontSize: rubyFontSize, color: color))
+            runs.append(RubyRun(range: range, inkRange: inkRange, reading: reading, fontSize: rubyFontSize, color: color))
         }
 
         cachedRubyRuns = runs

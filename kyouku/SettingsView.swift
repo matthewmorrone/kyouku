@@ -18,6 +18,7 @@ struct SettingsView: View {
     /// Preferred base font PostScript name for reading text.
     /// Empty string means "System".
     @AppStorage("readingFontName") private var readingFontName: String = ""
+    @AppStorage("readingDistinctKanaKanjiFonts") private var readingDistinctKanaKanjiFonts: Bool = false
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
@@ -234,11 +235,19 @@ struct SettingsView: View {
                 globalKerning: CGFloat(readingGlobalKerningPixels),
                 padHeadwordSpacing: readingHeadwordSpacingPadding,
                 rubyHorizontalAlignment: .center,
-                enableTapInspection: false
+                enableTapInspection: false,
+                distinctKanaKanjiFonts: readingDistinctKanaKanjiFonts
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: 140, alignment: .leading)
             .padding(.vertical, 8)
+
+            Toggle("Distinct kana/kanji fonts", isOn: $readingDistinctKanaKanjiFonts)
+                .tint(Color.appAccent)
+
+            Text("When enabled, kanji render in a Mincho-style font while kana keep your selected font.")
+                .font(.caption)
+                .foregroundStyle(Color.appTextSecondary)
 
             Picker("Font", selection: $readingFontName) {
                 ForEach(readingFontOptions) { option in

@@ -1,4 +1,5 @@
 import SwiftUI
+import NaturalLanguage
 
 struct WordDefinitionsView: View {
     @EnvironmentObject var store: WordsStore
@@ -41,7 +42,28 @@ struct WordDefinitionsView: View {
     @State private var similarWords: [String] = []
 
     @State private var componentPreviewPart: TokenPart? = nil
-    @State private var componentToOpen: TokenPart? = nil
+
+    @State private var inferredTokenParts: [TokenPart] = []
+
+    private struct NavigationTarget: Identifiable, Hashable {
+        let id = UUID()
+        let surface: String
+        let kana: String?
+        let contextSentence: String?
+    }
+
+    @State private var navigationTarget: NavigationTarget? = nil
+
+    private struct ActiveToken: Identifiable, Hashable {
+        let id: String
+        let text: String
+        let mode: DictionarySearchMode
+        let contextSentence: String?
+    }
+
+    @State private var activeToken: ActiveToken? = nil
+    @State private var activeTokenLookupResult: DictionaryEntry? = nil
+    @State private var isLoadingActiveTokenLookup: Bool = false
 
     private struct ListAssignmentTarget: Identifiable, Hashable {
         let id = UUID()
@@ -106,16 +128,24 @@ struct WordDefinitionsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     // .modifier(dbgBG(LayoutDebugColor.DBG_MINT__HeaderTitleRow))
                     // .modifier(dbgRowBG(LayoutDebugColor.DBG_MINT__HeaderTitleRow))
+
+                if let posLine = partOfSpeechSummaryLine() {
+                    Text(posLine)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
 
-            if tokenParts.count > 1 {
+            let partsForDisplay = displayTokenParts
+            if partsForDisplay.count > 1 {
                 Section("Components") {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text("From")
                             .foregroundStyle(.secondary)
 
-                        ForEach(Array(tokenParts.enumerated()), id: \.offset) { idx, part in
+                        ForEach(Array(partsForDisplay.enumerated()), id: \.offset) { idx, part in
                             if idx > 0 {
                                 Text("+")
                                     .foregroundStyle(.secondary)
@@ -281,15 +311,15 @@ struct WordDefinitionsView: View {
             ComponentPreviewSheet(part: part) { selectedPart in
                 componentPreviewPart = nil
                 DispatchQueue.main.async {
-                    componentToOpen = selectedPart
+                    navigationTarget = NavigationTarget(surface: selectedPart.surface, kana: selectedPart.kana, contextSentence: contextSentence)
                 }
             }
         }
-        .navigationDestination(item: $componentToOpen) { part in
+        .navigationDestination(item: $navigationTarget) { target in
             WordDefinitionsView(
-                surface: part.surface,
-                kana: part.kana,
-                contextSentence: contextSentence,
+                surface: target.surface,
+                kana: target.kana,
+                contextSentence: target.contextSentence,
                 lemmaCandidates: [],
                 tokenPartOfSpeech: nil,
                 sourceNoteID: sourceNoteID,
@@ -1005,6 +1035,10 @@ struct WordDefinitionsView: View {
             // Final display requirement: common entries should all appear before non-common ones.
             entryDetails = baseOrderedDetails.filter { $0.isCommon } + baseOrderedDetails.filter { $0.isCommon == false }
 
+            // If we weren't invoked with component parts from Paste, infer a reasonable component
+            // breakdown for compounds.
+            await inferTokenPartsIfNeeded()
+
             let sentenceTerms = sentenceLookupTerms(primaryTerms: terms, entryDetails: details)
             do {
                 let sentences = try await Task.detached(priority: .utility) {
@@ -1116,15 +1150,932 @@ struct WordDefinitionsView: View {
 
     private func exampleSentenceRow(_ sentence: ExampleSentence) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(highlightedJapaneseSentence(sentence.jpText))
-                .fixedSize(horizontal: false, vertical: true)
-            Text(sentence.enText)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            interactiveSentenceLine(
+                sentence.jpText,
+                mode: .japanese,
+                highlightTerms: japaneseHighlightTermsForSentences(),
+                contextSentenceForOpen: sentence.jpText,
+                sentenceIDForPopoverAnchoring: sentence.id
+            )
+            interactiveSentenceLine(
+                sentence.enText,
+                mode: .english,
+                highlightTerms: [],
+                contextSentenceForOpen: sentence.jpText,
+                sentenceIDForPopoverAnchoring: sentence.id
+            )
+            .font(.callout)
         }
-        .textSelection(.enabled)
         .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func interactiveSentenceLine(
+        _ text: String,
+        mode: DictionarySearchMode,
+        highlightTerms: [String],
+        contextSentenceForOpen: String?,
+        sentenceIDForPopoverAnchoring: String?
+    ) -> some View {
+        if #available(iOS 16.0, *) {
+            let segments = sentenceSegments(for: text, mode: mode)
+            let englishRanges: [NSRange] = (mode == .english) ? englishHighlightRanges(in: text) : []
+            InlineWrapLayout(spacing: 0, lineSpacing: 6) {
+                ForEach(segments) { seg in
+                    if seg.isToken {
+                        let popoverTokenID: String = {
+                            let modeKey: String = (mode == .english) ? "en" : "jp"
+                            let sentenceKey = sentenceIDForPopoverAnchoring ?? "unknown"
+                            return "tok|\(sentenceKey)|\(modeKey)|\(seg.range.location)|\(seg.range.length)"
+                        }()
+
+                        Button {
+                            presentTokenPopover(id: popoverTokenID, text: seg.text, mode: mode, contextSentence: contextSentenceForOpen)
+                        } label: {
+                            Text(seg.text)
+                                .foregroundStyle(tokenForeground(for: seg, mode: mode, highlightTerms: highlightTerms, englishHighlightRanges: englishRanges))
+                        }
+                        .buttonStyle(.plain)
+                        .popover(
+                            item: Binding<ActiveToken?>(
+                                get: {
+                                    guard let t = activeToken, t.id == popoverTokenID else { return nil }
+                                    return t
+                                },
+                                set: { newValue in
+                                    // Only clear if this token is the active one.
+                                    if newValue == nil, activeToken?.id == popoverTokenID {
+                                        activeToken = nil
+                                    } else {
+                                        activeToken = newValue
+                                    }
+                                }
+                            )
+                        ) { token in
+                            tokenPopoverView(token)
+                                .presentationCompactAdaptation(.popover)
+                        }
+                    } else {
+                        Text(seg.text)
+                            .foregroundStyle(tokenForeground(for: seg, mode: mode, highlightTerms: highlightTerms, englishHighlightRanges: englishRanges))
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            if mode == .japanese {
+                Text(highlightedJapaneseSentence(text))
+            } else {
+                Text(highlightedEnglishSentence(text))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private struct SentenceSegment: Identifiable, Hashable {
+        let id: String
+        let text: String
+        let isToken: Bool
+        let range: NSRange
+    }
+
+    private func sentenceSegments(for sentence: String, mode: DictionarySearchMode) -> [SentenceSegment] {
+        let s = sentence
+        let ns = s as NSString
+        guard ns.length > 0 else { return [] }
+
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = s
+        switch mode {
+        case .japanese:
+            tokenizer.setLanguage(.japanese)
+        case .english:
+            tokenizer.setLanguage(.english)
+        }
+
+        var tokenRanges: [NSRange] = []
+        tokenizer.enumerateTokens(in: s.startIndex..<s.endIndex) { range, _ in
+            let r = NSRange(range, in: s)
+            if r.location != NSNotFound, r.length > 0 {
+                tokenRanges.append(r)
+            }
+            return true
+        }
+        tokenRanges.sort { $0.location < $1.location }
+
+        if tokenRanges.isEmpty {
+            return [SentenceSegment(id: "seg:0:\(ns.length)", text: s, isToken: false, range: NSRange(location: 0, length: ns.length))]
+        }
+
+        var out: [SentenceSegment] = []
+        out.reserveCapacity(tokenRanges.count * 2)
+
+        var cursor = 0
+        for r in tokenRanges {
+            if r.location > cursor {
+                let gap = ns.substring(with: NSRange(location: cursor, length: r.location - cursor))
+                if gap.isEmpty == false {
+                    out.append(SentenceSegment(id: "seg:\(cursor):\(r.location - cursor)", text: gap, isToken: false, range: NSRange(location: cursor, length: r.location - cursor)))
+                }
+            }
+
+            let tokenText = ns.substring(with: r)
+            if isEligibleTapToken(tokenText) {
+                out.append(SentenceSegment(id: "seg:\(r.location):\(r.length)", text: tokenText, isToken: true, range: r))
+            } else {
+                out.append(SentenceSegment(id: "seg:\(r.location):\(r.length)", text: tokenText, isToken: false, range: r))
+            }
+
+            cursor = NSMaxRange(r)
+        }
+
+        if cursor < ns.length {
+            let tail = ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+            if tail.isEmpty == false {
+                out.append(SentenceSegment(id: "seg:\(cursor):\(ns.length - cursor)", text: tail, isToken: false, range: NSRange(location: cursor, length: ns.length - cursor)))
+            }
+        }
+
+        return out
+    }
+
+    private func isEligibleTapToken(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return false }
+
+        // Filter out pure punctuation.
+        let scalars = trimmed.unicodeScalars
+        guard scalars.isEmpty == false else { return false }
+        let punct = CharacterSet.punctuationCharacters
+        let punctCount = scalars.filter { punct.contains($0) }.count
+        if punctCount == scalars.count { return false }
+        return true
+    }
+
+    private func tokenForeground(
+        for segment: SentenceSegment,
+        mode: DictionarySearchMode,
+        highlightTerms: [String],
+        englishHighlightRanges: [NSRange]
+    ) -> Color {
+        let base: Color = (mode == .english) ? .secondary : Color(uiColor: .secondaryLabel)
+
+        if mode == .english {
+            guard englishHighlightRanges.isEmpty == false else { return base }
+            if englishHighlightRanges.contains(where: { NSIntersectionRange($0, segment.range).length > 0 }) {
+                return Color(uiColor: .systemOrange)
+            }
+            return base
+        }
+
+        guard highlightTerms.isEmpty == false else { return base }
+        if highlightTerms.contains(where: { segment.text.contains($0) }) {
+            return Color(uiColor: .systemOrange)
+        }
+        return base
+    }
+
+    private func presentTokenPopover(id: String, text: String, mode: DictionarySearchMode, contextSentence: String?) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+
+        activeTokenLookupResult = nil
+        isLoadingActiveTokenLookup = true
+        let token = ActiveToken(id: id, text: trimmed, mode: mode, contextSentence: contextSentence)
+        activeToken = token
+
+        Task {
+            let id = token.id
+            defer {
+                if activeToken?.id == id {
+                    isLoadingActiveTokenLookup = false
+                }
+            }
+
+            let keys = DictionaryKeyPolicy.keys(forDisplayKey: trimmed)
+            guard keys.lookupKey.isEmpty == false else {
+                if activeToken?.id == id {
+                    activeTokenLookupResult = nil
+                }
+                return
+            }
+
+            let rows: [DictionaryEntry] = (try? await Task.detached(priority: .userInitiated) {
+                try await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 10, mode: mode)
+            }.value) ?? []
+
+            if activeToken?.id == id {
+                activeTokenLookupResult = rows.first
+            }
+        }
+    }
+
+    private func tokenPopoverView(_ token: ActiveToken) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(token.text)
+                .font(.headline)
+                .lineLimit(2)
+
+            if isLoadingActiveTokenLookup {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Looking up…")
+                        .foregroundStyle(.secondary)
+                }
+            } else if let entry = activeTokenLookupResult {
+                let head = entry.kanji.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? (entry.kana ?? token.text) : entry.kanji
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(head)
+                        .font(.subheadline.weight(.semibold))
+
+                    if let kana = entry.kana,
+                       kana.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                       kana != head {
+                        Text(kana)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ScrollView(.vertical) {
+                        Text(firstGloss(for: entry.gloss))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.vertical, 2)
+                    }
+                    .frame(maxHeight: 140)
+
+                    Button {
+                        activeToken = nil
+                        DispatchQueue.main.async {
+                            navigationTarget = NavigationTarget(surface: head, kana: entry.kana, contextSentence: token.contextSentence)
+                        }
+                    } label: {
+                        Label("Open entry", systemImage: "arrow.right")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            } else {
+                Text("No dictionary results.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .frame(width: 360)
+    }
+
+    private func highlightedEnglishSentence(_ sentence: String) -> AttributedString {
+        let s = sentence
+        guard s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return AttributedString(sentence) }
+
+        let ranges = englishHighlightRanges(in: s)
+        guard ranges.isEmpty == false else { return AttributedString(sentence) }
+
+        let ns = s as NSString
+        let mutable = NSMutableAttributedString(string: s)
+        let baseColor = UIColor.secondaryLabel
+        let highlightColor = UIColor.systemOrange
+        mutable.addAttribute(.foregroundColor, value: baseColor, range: NSRange(location: 0, length: ns.length))
+
+        for r in ranges {
+            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= ns.length else { continue }
+            mutable.addAttribute(.foregroundColor, value: highlightColor, range: r)
+        }
+
+        return AttributedString(mutable)
+    }
+
+    private var displayTokenParts: [TokenPart] {
+        if tokenParts.count > 1 { return tokenParts }
+        return inferredTokenParts
+    }
+
+    private func inferTokenPartsIfNeeded() async {
+        guard tokenParts.count <= 1 else {
+            inferredTokenParts = []
+            return
+        }
+        guard inferredTokenParts.isEmpty else { return }
+
+        // Prefer the primary headword if we have one loaded.
+        let headword: String = {
+            if let first = entryDetails.first {
+                return primaryHeadword(for: first).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }()
+
+        guard headword.isEmpty == false else { return }
+        guard containsKanji(headword) || containsJapaneseScript(headword) else { return }
+
+        func composedCharacterRanges(for text: String) -> [NSRange] {
+            let ns = text as NSString
+            guard ns.length > 0 else { return [] }
+            var ranges: [NSRange] = []
+            ranges.reserveCapacity(min(ns.length, 16))
+            var i = 0
+            while i < ns.length {
+                let r = ns.rangeOfComposedCharacterSequence(at: i)
+                if r.length <= 0 { break }
+                ranges.append(r)
+                i = NSMaxRange(r)
+            }
+            return ranges
+        }
+
+        func lookupReading(surface: String) async -> String? {
+            let keys = DictionaryKeyPolicy.keys(forDisplayKey: surface)
+            guard keys.lookupKey.isEmpty == false else { return nil }
+            let rows: [DictionaryEntry] = (try? await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 1, mode: .japanese)) ?? []
+            return rows.first?.kana
+        }
+
+        func setFromSpans(_ spans: [TextSpan], headword: String) async {
+            // Ensure spans fully cover the string contiguously.
+            let ns = headword as NSString
+            let sorted = spans.sorted { $0.range.location < $1.range.location }
+            guard sorted.first?.range.location == 0 else { return }
+
+            var cursor = 0
+            for sp in sorted {
+                if sp.range.location != cursor { return }
+                cursor = NSMaxRange(sp.range)
+            }
+            guard cursor == ns.length else { return }
+
+            var out: [TokenPart] = []
+            out.reserveCapacity(min(sorted.count, 8))
+
+            for (idx, sp) in sorted.enumerated() {
+                if idx >= 8 { break }
+                let surface = sp.surface.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                guard surface.isEmpty == false else { continue }
+                let reading = await lookupReading(surface: surface)
+                out.append(TokenPart(id: "infer:\(sp.range.location):\(sp.range.length)", surface: surface, kana: reading))
+            }
+
+            if out.count > 1 {
+                inferredTokenParts = out
+            }
+        }
+
+        do {
+            let spans = try await SegmentationService.shared.segment(text: headword)
+            if spans.count > 1 {
+                await setFromSpans(spans, headword: headword)
+                return
+            }
+
+            // Fallback: try a 2-part split that yields dictionary hits on both sides.
+            // This helps when the lexicon contains the full compound as one token.
+            let charRanges = composedCharacterRanges(for: headword)
+            guard charRanges.count >= 2, charRanges.count <= 10 else { return }
+            let ns = headword as NSString
+
+            var bestSplit: (idx: Int, score: Int, left: String, right: String, leftReading: String?, rightReading: String?)? = nil
+            for splitIdx in 1..<(charRanges.count) {
+                let leftRange = NSRange(location: 0, length: charRanges[splitIdx].location)
+                let rightRange = NSRange(location: charRanges[splitIdx].location, length: ns.length - charRanges[splitIdx].location)
+                guard leftRange.length > 0, rightRange.length > 0 else { continue }
+
+                let left = ns.substring(with: leftRange).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                let right = ns.substring(with: rightRange).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                guard left.isEmpty == false, right.isEmpty == false else { continue }
+
+                let leftReading = await lookupReading(surface: left)
+                let rightReading = await lookupReading(surface: right)
+                guard leftReading != nil || rightReading != nil else { continue }
+
+                // Score: prefer both sides having hits, then more balanced splits.
+                let both = (leftReading != nil && rightReading != nil) ? 10_000 : 0
+                let balance = min(left.count, right.count) * 100
+                let score = both + balance
+                if let best = bestSplit {
+                    if score > best.score {
+                        bestSplit = (splitIdx, score, left, right, leftReading, rightReading)
+                    }
+                } else {
+                    bestSplit = (splitIdx, score, left, right, leftReading, rightReading)
+                }
+            }
+
+            if let bestSplit {
+                inferredTokenParts = [
+                    TokenPart(id: "infer:split:left", surface: bestSplit.left, kana: bestSplit.leftReading),
+                    TokenPart(id: "infer:split:right", surface: bestSplit.right, kana: bestSplit.rightReading)
+                ]
+            }
+        } catch {
+            // best-effort only
+        }
+    }
+
+    private func containsJapaneseScript(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x3040...0x309F, // Hiragana
+                 0x30A0...0x30FF, // Katakana
+                 0xFF66...0xFF9F, // Half-width katakana
+                 0x3400...0x4DBF, // CJK Ext A
+                 0x4E00...0x9FFF: // CJK Unified
+                return true
+            default:
+                continue
+            }
+        }
+        return false
+    }
+
+    private func partOfSpeechSummaryLine() -> String? {
+        // Prefer JMdict POS tags; fall back to MeCab POS if we have nothing else.
+        let posTags: [String] = {
+            var seen: Set<String> = []
+            var out: [String] = []
+            for detail in entryDetails {
+                for sense in detail.senses {
+                    for tag in sense.partsOfSpeech {
+                        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard trimmed.isEmpty == false else { continue }
+                        let expanded = expandPartOfSpeechTag(trimmed)
+                        let key = expanded.lowercased()
+                        if seen.insert(key).inserted {
+                            out.append(expanded)
+                        }
+                        if out.count >= 8 { break }
+                    }
+                    if out.count >= 8 { break }
+                }
+                if out.count >= 8 { break }
+            }
+            return out
+        }()
+
+        if posTags.isEmpty == false {
+            return "Part of speech: \(posTags.joined(separator: " · "))"
+        }
+
+        let mecab = (tokenPartOfSpeech ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if mecab.isEmpty == false {
+            return "Part of speech: \(mecab)"
+        }
+        return nil
+    }
+
+    private func expandPartOfSpeechTag(_ tag: String) -> String {
+        let t = tag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch t {
+        case "n": return "noun"
+        case "pn": return "pronoun"
+        case "adj-i": return "i-adjective"
+        case "adj-na": return "na-adjective"
+        case "adj-no": return "no-adjective"
+        case "adj-pn": return "pre-noun adjectival"
+        case "adv": return "adverb"
+        case "prt": return "particle"
+        case "conj": return "conjunction"
+        case "int": return "interjection"
+        case "num": return "numeric"
+        case "aux": return "auxiliary"
+        case "exp": return "expression"
+        case "pref": return "prefix"
+        case "suf": return "suffix"
+        case "vs": return "suru verb"
+        case "vk": return "kuru verb"
+        case "vz": return "zuru verb"
+        case "v1": return "ichidan verb"
+        default:
+            if t.hasPrefix("v5") { return "godan verb"
+            }
+            return tag
+        }
+    }
+
+    private func japaneseHighlightTermsForSentences() -> [String] {
+        // Keep aligned with `highlightedJapaneseSentence` behavior.
+        let lookupAligned = sentenceLookupTerms(primaryTerms: [surface, kana].compactMap { $0 }, entryDetails: entryDetails)
+        return lookupAligned
+    }
+
+    private func englishHighlightRanges(in sentence: String) -> [NSRange] {
+        let s = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.isEmpty == false else { return [] }
+
+        let candidates = englishGlossPhraseCandidates()
+        guard candidates.isEmpty == false else { return [] }
+
+        // Choose the "best" phrase that actually appears in the sentence.
+        // Preference order:
+        // - more words (multi-word phrases are more aligned)
+        // - longer phrase
+        // - earlier occurrence
+        var best: (phrase: String, regex: NSRegularExpression, score: Int, firstLocation: Int)? = nil
+
+        for phrase in candidates {
+            guard let regex = englishPhraseRegex(for: phrase) else { continue }
+            let matches = regex.matches(in: s, range: NSRange(location: 0, length: (s as NSString).length))
+            guard matches.isEmpty == false else { continue }
+
+            let words = phrase.split(whereSeparator: { $0 == " " || $0 == "-" }).count
+            let score = (words * 10_000) + min(phrase.count, 1000)
+            let firstLoc = matches.first?.range.location ?? Int.max
+            if let b = best {
+                if score > b.score || (score == b.score && firstLoc < b.firstLocation) {
+                    best = (phrase, regex, score, firstLoc)
+                }
+            } else {
+                best = (phrase, regex, score, firstLoc)
+            }
+        }
+
+        if let best {
+            let ns = s as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            return best.regex.matches(in: s, range: range).map { $0.range }.filter { $0.length > 0 }
+        }
+
+        // Fallback: if no gloss phrase appears verbatim in the translation (e.g. “police” vs “cops”),
+        // use Apple’s English word embedding to highlight semantically-near tokens.
+        return englishEmbeddingHighlightRanges(in: s)
+    }
+
+    private func englishEmbeddingHighlightRanges(in sentence: String) -> [NSRange] {
+        let s = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s.isEmpty == false else { return [] }
+
+        guard let embedding = NLEmbedding.wordEmbedding(for: .english) else { return [] }
+
+        let keywords = englishGlossKeywordCandidates(maxCount: 36)
+        guard keywords.isEmpty == false else { return [] }
+        let keywordSet = Set(keywords)
+
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = s
+        tokenizer.setLanguage(.english)
+
+        let ns = s as NSString
+        let full = NSRange(location: 0, length: ns.length)
+
+        struct TokenInfo {
+            let range: NSRange
+            let text: String
+            let normalized: String
+        }
+
+        struct ScoredRange {
+            let range: NSRange
+            let distance: Double
+            let token: String
+            let tokenIndex: Int
+        }
+
+        // Use embedding distance rather than neighbors() membership.
+        // This is more stable for cases like “miss” vs “missed” and “old” (from gloss parentheses).
+        let distanceThreshold: Double = 0.52
+        let maxHighlights = 2
+
+        let negationTokens: Set<String> = [
+            "not", "no", "never", "dont", "don't", "cant", "can't", "cannot",
+            "wont", "won't", "wouldnt", "wouldn't", "shouldnt", "shouldn't",
+            "couldnt", "couldn't", "didnt", "didn't", "doesnt", "doesn't",
+            "isnt", "isn't", "arent", "aren't", "wasnt", "wasn't", "werent", "weren't",
+            "without"
+        ]
+
+        func englishLemma(for word: String) -> String? {
+            let w = word.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            guard w.isEmpty == false else { return nil }
+            let tagger = NLTagger(tagSchemes: [.lemma])
+            tagger.string = w
+            // Use the stable overload available across iOS 15/16 SDKs.
+            let result = tagger.tag(at: w.startIndex, unit: .word, scheme: .lemma)
+            let lemma = result.0?.rawValue.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
+            return lemma.isEmpty ? nil : lemma
+        }
+
+        func bestDistance(for token: String) -> Double? {
+            let normalized = normalizeEnglishWord(token)
+            guard normalized.isEmpty == false else { return nil }
+            if englishStopwords.contains(normalized) { return nil }
+            if normalized.count < 3 { return nil }
+
+            // Fast exact match path.
+            if keywordSet.contains(normalized) { return 0 }
+
+            let lemma = englishLemma(for: normalized).map { normalizeEnglishWord($0) }
+            if let lemma, lemma.isEmpty == false, keywordSet.contains(lemma) { return 0 }
+
+            var forms: [String] = [normalized]
+            if let lemma, lemma.isEmpty == false, lemma != normalized { forms.append(lemma) }
+
+            // Simple morphology helpers: plural/ed/ing.
+            if normalized.hasSuffix("s"), normalized.count > 3 {
+                forms.append(String(normalized.dropLast()))
+            }
+            if normalized.hasSuffix("ed"), normalized.count > 4 {
+                forms.append(String(normalized.dropLast(2)))
+            }
+            if normalized.hasSuffix("ing"), normalized.count > 5 {
+                forms.append(String(normalized.dropLast(3)))
+            }
+
+            var best: Double? = nil
+            for f in forms {
+                for kw in keywords {
+                    if f == kw { return 0 }
+                    let d = embedding.distance(between: f, and: kw)
+                    guard d.isFinite else { continue }
+                    if let b = best {
+                        if d < b { best = d }
+                    } else {
+                        best = d
+                    }
+                }
+            }
+            return best
+        }
+
+        var tokens: [TokenInfo] = []
+        tokens.reserveCapacity(24)
+
+        var scored: [ScoredRange] = []
+        scored.reserveCapacity(12)
+
+        func isNegationToken(_ raw: String) -> Bool {
+            let n = normalizeEnglishWord(raw)
+            if n.isEmpty { return false }
+            if negationTokens.contains(n) { return true }
+            // Handle unicode apostrophe variants by removing apostrophes.
+            let stripped = n.replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "’", with: "")
+            return negationTokens.contains(stripped)
+        }
+
+        tokenizer.enumerateTokens(in: s.startIndex..<s.endIndex) { range, _ in
+            let r = NSRange(range, in: s)
+            if r.location == NSNotFound || r.length <= 0 || NSMaxRange(r) > ns.length {
+                return true
+            }
+
+            let tokenText = ns.substring(with: r)
+            let normalized = normalizeEnglishWord(tokenText)
+            let idx = tokens.count
+            tokens.append(TokenInfo(range: r, text: tokenText, normalized: normalized))
+
+            if let d = bestDistance(for: tokenText), d <= distanceThreshold {
+                scored.append(ScoredRange(range: r, distance: d, token: tokenText, tokenIndex: idx))
+            }
+            return true
+        }
+
+        guard scored.isEmpty == false else { return [] }
+        scored.sort { lhs, rhs in
+            if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
+            // Prefer longer tokens when distance ties.
+            if lhs.token.count != rhs.token.count { return lhs.token.count > rhs.token.count }
+            return lhs.range.location < rhs.range.location
+        }
+
+        var picked: [NSRange] = []
+        picked.reserveCapacity(maxHighlights * 2)
+
+        for item in scored {
+            // Expand to include a directly-adjacent negation token (e.g. "don't" + "mind")
+            // without hardcoding any specific phrase patterns.
+            if item.tokenIndex - 1 >= 0 {
+                let prev = tokens[item.tokenIndex - 1]
+                if isNegationToken(prev.text) {
+                    picked.append(prev.range)
+                }
+            }
+            picked.append(item.range)
+            if picked.count >= maxHighlights * 2 { break }
+        }
+
+        // De-dupe while preserving order.
+        var seenRanges: Set<String> = []
+        picked = picked.filter { r in
+            let key = "\(r.location):\(r.length)"
+            if seenRanges.insert(key).inserted {
+                return true
+            }
+            return false
+        }
+
+        // Ensure ranges are within bounds.
+        return picked.filter { $0.location != NSNotFound && $0.length > 0 && NSMaxRange($0) <= full.length }
+    }
+
+    private var englishStopwords: Set<String> {
+        [
+            "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "he",
+            "her", "his", "i", "if", "in", "into", "is", "it", "its", "me", "my", "no", "not", "of", "on",
+            "or", "our", "out", "she", "so", "that", "the", "their", "them", "then", "there", "they", "this",
+            "to", "up", "us", "was", "we", "were", "what", "when", "where", "who", "will", "with", "you", "your"
+        ]
+    }
+
+    private func normalizeEnglishWord(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard s.isEmpty == false else { return "" }
+
+        // Trim leading/trailing punctuation.
+        s = s.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.symbols))
+        guard s.isEmpty == false else { return "" }
+
+        // Strip possessive.
+        if s.hasSuffix("'s") {
+            s = String(s.dropLast(2))
+        }
+        return s.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.symbols))
+    }
+
+    private func englishGlossKeywordCandidates(maxCount: Int) -> [String] {
+        // Derive single-word keyword candidates from raw gloss text.
+        // Includes parenthetical hints like "(old)" and basic morphology stems like "miss" from "missed".
+        var out: [String] = []
+        var seen: Set<String> = []
+
+        func addWord(_ raw: String) {
+            let w = normalizeEnglishWord(raw)
+            guard w.isEmpty == false else { return }
+            guard w.count >= 3 else { return }
+            guard englishStopwords.contains(w) == false else { return }
+            if seen.insert(w).inserted {
+                out.append(w)
+            }
+
+            // Add a tiny set of stems (best-effort; no heavy lemmatizer here).
+            if w.hasSuffix("ed"), w.count > 4 {
+                let stem = String(w.dropLast(2))
+                if stem.count >= 3, englishStopwords.contains(stem) == false, seen.insert(stem).inserted {
+                    out.append(stem)
+                }
+            }
+            if w.hasSuffix("s"), w.count > 3 {
+                let stem = String(w.dropLast())
+                if stem.count >= 3, englishStopwords.contains(stem) == false, seen.insert(stem).inserted {
+                    out.append(stem)
+                }
+            }
+        }
+
+        func harvest(from text: String) {
+            // Keep parenthetical content as additional candidates.
+            // Example: "dear (old)" => add "dear" and "old".
+            let separators = CharacterSet(charactersIn: ";,/\n")
+            let parts = text
+                .components(separatedBy: separators)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.isEmpty == false }
+
+            for part in parts {
+                // Add outside parentheses.
+                let outside: String = {
+                    if let idx = part.firstIndex(of: "(") {
+                        return String(part[..<idx])
+                    }
+                    return part
+                }()
+                outside
+                    .components(separatedBy: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "-")))
+                    .forEach(addWord)
+
+                // Add inside parentheses.
+                if let open = part.firstIndex(of: "("), let close = part.firstIndex(of: ")"), open < close {
+                    let inside = String(part[part.index(after: open)..<close])
+                    inside
+                        .components(separatedBy: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "-")))
+                        .forEach(addWord)
+                }
+
+                if out.count >= max(1, maxCount) { return }
+            }
+        }
+
+        for detail in entryDetails {
+            let senses = orderedSensesForDisplay(detail)
+            for sense in senses {
+                let english = sense.glosses.filter { $0.language == "eng" || $0.language.isEmpty }
+                let source = english.isEmpty ? sense.glosses : english
+                for g in source {
+                    harvest(from: g.text)
+                    if out.count >= max(1, maxCount) { return out }
+                }
+            }
+        }
+
+        return out
+    }
+
+    private func englishGlossPhraseCandidates() -> [String] {
+        // Collect plausible English phrases from all senses.
+        // We then try to match these phrases verbatim (case-insensitive) inside the translation.
+        var out: [String] = []
+        var seen: Set<String> = []
+
+        for detail in entryDetails {
+            let senses = orderedSensesForDisplay(detail)
+            for sense in senses {
+                let english = sense.glosses.filter { $0.language == "eng" || $0.language.isEmpty }
+                let source = english.isEmpty ? sense.glosses : english
+                for g in source {
+                    let raw = g.text
+                    for phrase in splitEnglishGlossPhrases(raw) {
+                        let normalized = normalizeEnglishPhraseCandidate(phrase)
+                        guard normalized.isEmpty == false else { continue }
+                        let key = normalized.lowercased()
+                        if seen.insert(key).inserted {
+                            out.append(normalized)
+                        }
+                        if out.count >= 80 { break }
+                    }
+                    if out.count >= 80 { break }
+                }
+                if out.count >= 80 { break }
+            }
+            if out.count >= 80 { break }
+        }
+
+        // Prefer longer (more specific) phrases first.
+        out.sort { a, b in
+            let aw = a.split(whereSeparator: { $0 == " " || $0 == "-" }).count
+            let bw = b.split(whereSeparator: { $0 == " " || $0 == "-" }).count
+            if aw != bw { return aw > bw }
+            if a.count != b.count { return a.count > b.count }
+            return a < b
+        }
+        return out
+    }
+
+    private func splitEnglishGlossPhrases(_ raw: String) -> [String] {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return [] }
+
+        // Split on common gloss separators.
+        let separators = CharacterSet(charactersIn: ";,/\n")
+        let parts = trimmed
+            .components(separatedBy: separators)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+
+        // Also strip parenthetical notes but keep the main phrase.
+        return parts.map { part in
+            if let idx = part.firstIndex(of: "(") {
+                return String(part[..<idx]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return part
+        }.filter { $0.isEmpty == false }
+    }
+
+    private func normalizeEnglishPhraseCandidate(_ phrase: String) -> String {
+        var p = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard p.isEmpty == false else { return "" }
+
+        // Remove leading "to " to better match actual translation phrases.
+        if p.lowercased().hasPrefix("to ") {
+            p = String(p.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // Drop surrounding quotes.
+        if (p.hasPrefix("\"") && p.hasSuffix("\"")) || (p.hasPrefix("'") && p.hasSuffix("'")) {
+            p = String(p.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // Keep only phrases that contain at least one letter.
+        if p.rangeOfCharacter(from: .letters) == nil {
+            return ""
+        }
+
+        // Avoid extremely generic phrases.
+        let lower = p.lowercased()
+        let banned: Set<String> = ["thing", "person", "something", "someone", "to do", "do"]
+        if banned.contains(lower) {
+            return ""
+        }
+
+        return p
+    }
+
+    private func englishPhraseRegex(for phrase: String) -> NSRegularExpression? {
+        let cleaned = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.isEmpty == false else { return nil }
+
+        // Convert phrase into a word-boundary-aware regex, allowing flexible whitespace/hyphen.
+        let words = cleaned
+            .lowercased()
+            .split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "\t" })
+            .map(String.init)
+            .filter { $0.isEmpty == false }
+        guard words.isEmpty == false else { return nil }
+
+        let escaped = words.map { NSRegularExpression.escapedPattern(for: $0) }
+        let body = escaped.map { "\\b\($0)\\b" }.joined(separator: "[\\s\\-]+");
+
+        do {
+            return try NSRegularExpression(pattern: body, options: [.caseInsensitive])
+        } catch {
+            return nil
+        }
     }
 
     private func highlightedJapaneseSentence(_ sentence: String) -> AttributedString {

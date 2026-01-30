@@ -4,6 +4,11 @@ struct FlashcardsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notes: NotesStore
 
+    @State private var clozeMode: NoteClozeStudyViewModel.Mode = .random
+    @State private var clozeSelectedNoteID: UUID? = nil
+    @State private var clozeStudyNote: Note? = nil
+    @State private var clozeBlanksPerSentence: Int = 1
+
     @State private var session: [Word] = []
     @State private var sessionSource: [Word] = []
     @State private var index: Int = 0
@@ -58,7 +63,7 @@ struct FlashcardsView: View {
                 }
             }
             .padding()
-            .navigationTitle("Flashcards")
+            .navigationTitle("Review")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -225,44 +230,104 @@ struct FlashcardsView: View {
                 Text("Review")
                     .font(.title2).bold()
 
-                // Scope selection
-                Picker("Scope", selection: $scope) {
-                    ForEach(ReviewScope.allCases) { s in
-                        Text(s.rawValue).tag(s)
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Cloze Study", systemImage: "rectangle.and.pencil.and.ellipsis")
+                        .font(.headline)
+
+                    Picker("Order", selection: $clozeMode) {
+                        ForEach(NoteClozeStudyViewModel.Mode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Stepper("Dropdowns per sentence: \(clozeBlanksPerSentence)", value: $clozeBlanksPerSentence, in: 1...10, step: 1)
+
+                    if notes.notes.isEmpty {
+                        Text("Add a note to study.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Note", selection: $clozeSelectedNoteID) {
+                            Text("Select a note").tag(UUID?.none)
+                            ForEach(notes.notes) { note in
+                                Text(note.title?.isEmpty == false ? note.title! : "Untitled").tag(UUID?.some(note.id))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+
+                    Button {
+                        guard let id = clozeSelectedNoteID else { return }
+                        clozeStudyNote = notes.notes.first(where: { $0.id == id })
+                    } label: {
+                        Label("Start Cloze", systemImage: "play.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(clozeSelectedNoteID == nil)
+                }
+                .padding(12)
+                .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.appBorder, lineWidth: 1)
+                )
+                .onAppear {
+                    if clozeSelectedNoteID == nil {
+                        clozeSelectedNoteID = notes.notes.first?.id
                     }
                 }
-                .pickerStyle(.segmented)
 
-                if scope == .mostRecent {
-                    Stepper("Most recent: \u{200E}\(mostRecentCount)", value: $mostRecentCount, in: 5...200, step: 5)
-                } else if scope == .fromNote {
-                    NotePicker(selectedNoteID: $selectedNoteID)
-                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Flashcards", systemImage: "rectangle.on.rectangle.angled")
+                        .font(.headline)
 
-                // Direction selection
-                Picker("Direction", selection: $direction) {
-                    ForEach(CardDirection.allCases) { d in
-                        Text(d.rawValue).tag(d)
+                    Picker("Scope", selection: $scope) {
+                        ForEach(ReviewScope.allCases) { s in
+                            Text(s.rawValue).tag(s)
+                        }
                     }
+                    .pickerStyle(.segmented)
+
+                    if scope == .mostRecent {
+                        Stepper("Most recent: \u{200E}\(mostRecentCount)", value: $mostRecentCount, in: 5...200, step: 5)
+                    } else if scope == .fromNote {
+                        NotePicker(selectedNoteID: $selectedNoteID)
+                    }
+
+                    Picker("Direction", selection: $direction) {
+                        ForEach(CardDirection.allCases) { d in
+                            Text(d.rawValue).tag(d)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    let matchingCount = wordsMatchingSelection().count
+                    Text(matchingCount == 0 ? "No cards match this selection" : "Cards in selection: \(matchingCount)")
+                        .font(.footnote)
+                        .foregroundStyle(matchingCount == 0 ? .red : .secondary)
+
+                    Button {
+                        startSessionFromHome()
+                    } label: {
+                        Label("Start Flashcards", systemImage: "play.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(matchingCount == 0)
                 }
-                .pickerStyle(.segmented)
-
-                let matchingCount = wordsMatchingSelection().count
-
-                Text(matchingCount == 0 ? "No cards match this selection" : "Cards in selection: \(matchingCount)")
-                    .font(.footnote)
-                    .foregroundStyle(matchingCount == 0 ? .red : .secondary)
-
-                Button {
-                    startSessionFromHome()
-                } label: {
-                    Label("Start Review", systemImage: "play.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(matchingCount == 0)
+                .padding(12)
+                .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.appBorder, lineWidth: 1)
+                )
             }
             .padding()
+        }
+        .sheet(item: $clozeStudyNote) { note in
+            NoteClozeStudyView(note: note, initialMode: clozeMode, initialBlanksPerSentence: clozeBlanksPerSentence)
         }
     }
 
