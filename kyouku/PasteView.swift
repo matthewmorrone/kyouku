@@ -60,6 +60,7 @@ struct PasteView: View {
     @State private var customizedRanges: [NSRange] = []
     @State private var showTokensPopover: Bool = false
     @State private var showAdjustedSpansPopover: Bool = false
+    @State private var debugTokenListText: String = ""
     @State private var pendingRouterResetNoteID: UUID? = nil
     @State private var skipNextInitialFuriganaEnsure: Bool = false
     @State private var isDictionarySheetPresented: Bool = false
@@ -688,7 +689,13 @@ struct PasteView: View {
                 },
                 contextMenuStateProvider: contextMenuStateProvider,
                 onContextMenuAction: contextMenuActionHandler,
-                viewMetricsContext: viewMetricsContext
+                viewMetricsContext: viewMetricsContext,
+                onDebugTokenListTextChange: { text in
+                    // Avoid thrashing SwiftUI state with identical strings.
+                    if text != debugTokenListText {
+                        debugTokenListText = text
+                    }
+                }
             )
             .overlay(alignment: .topTrailing) {
                 if isEditing, let liveSemanticFeedback {
@@ -935,8 +942,7 @@ struct PasteView: View {
             ScrollView {
                 Text(adjustedSpansDebugText)
                     .font(.system(.body, design: .monospaced))
-                    .textSelection(.disabled)
-                    .allowsHitTesting(false)
+                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
             }
@@ -944,10 +950,68 @@ struct PasteView: View {
     }
 
     private var adjustedSpansDebugText: String {
+        if debugTokenListText.isEmpty == false {
+            return debugTokenListText
+        }
         guard let spans = furiganaSpans, spans.isEmpty == false else {
             return "(No spans yet)"
         }
-        return SegmentationService.describe(spans: spans.map(\.span))
+        return describeAdjustedSpansForDebug(spans.map(\.span))
+    }
+
+    private func describeAdjustedSpansForDebug(_ spans: [TextSpan]) -> String {
+        guard spans.isEmpty == false else { return "" }
+
+        struct DebugSpan {
+            let range: NSRange
+            let surface: String
+        }
+
+        var results: [DebugSpan] = []
+        var pendingPrefixSurface = ""
+        var pendingPrefixRange: NSRange?
+
+        for span in spans {
+            let surface = span.surface
+            if isHardBoundaryOnly(surface) {
+                if results.isEmpty {
+                    pendingPrefixSurface += surface
+                    if let existing = pendingPrefixRange {
+                        pendingPrefixRange = NSUnionRange(existing, span.range)
+                    } else {
+                        pendingPrefixRange = span.range
+                    }
+                } else {
+                    let last = results.removeLast()
+                    let mergedRange = NSUnionRange(last.range, span.range)
+                    results.append(DebugSpan(range: mergedRange, surface: last.surface + surface))
+                }
+                continue
+            }
+
+            if let prefixRange = pendingPrefixRange, pendingPrefixSurface.isEmpty == false {
+                let mergedRange = NSUnionRange(prefixRange, span.range)
+                results.append(DebugSpan(range: mergedRange, surface: pendingPrefixSurface + surface))
+                pendingPrefixSurface = ""
+                pendingPrefixRange = nil
+            } else {
+                results.append(DebugSpan(range: span.range, surface: surface))
+            }
+        }
+
+        if pendingPrefixSurface.isEmpty == false, let prefixRange = pendingPrefixRange {
+            if results.isEmpty {
+                results.append(DebugSpan(range: prefixRange, surface: pendingPrefixSurface))
+            } else {
+                let last = results.removeLast()
+                let mergedRange = NSUnionRange(last.range, prefixRange)
+                results.append(DebugSpan(range: mergedRange, surface: last.surface + pendingPrefixSurface))
+            }
+        }
+
+        return results
+            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+            .joined(separator: ", ")
     }
 
     private var tokenListButton: some View {

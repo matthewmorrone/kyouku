@@ -316,25 +316,22 @@ struct TokenListPanel: View {
 
         var body: some View {
             HStack(spacing: 12) {
-                Button(action: onSelect) {
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.surface)
-                                .font(.body)
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            if let reading = readingText {
-                                Text(reading)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer(minLength: 12)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.surface)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if let reading = readingText {
+                        Text(reading)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                // Allow tap-to-select while still supporting long-press text selection.
+                .onTapGesture(perform: onSelect)
+                .textSelection(.enabled)
 
                 Button(action: onAdd) {
                     if item.isAlreadySaved {

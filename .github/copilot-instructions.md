@@ -30,7 +30,12 @@
 
 ## Dev workflows + diagnostics
 
-**Copilot must not invoke build, run, or test workflows.** All build/run/test workflows are for humans only and must be performed manually. The following information is provided for documentation and human reference only.
+Copilot should run a **build-only** verification (`xcodebuild build`) after it finishes making code changes, and then iterate on any compiler errors until the build is clean.
+
+Constraints:
+- Build only (no tests).
+- No install/launch flows.
+- Builds are for surfacing compiler errors/warnings.
 
 ## Release goals
 - Use `docs/ReleaseGoals.md` as the stop-iterating checklist.
@@ -41,15 +46,19 @@
 - **Copilot MAY:**
   - run non-build shell commands (e.g. `ls`, `rg`, `sed`, `awk`, `cat`, `python`)
   - inspect files and logs
-  - reason about code paths without executing builds
+  - run **build-only** commands as part of its normal “finish” step
+    - `xcodebuild build` (preferred for CI-like logs)
+      - Use a **build-only / Cmd-B equivalent** (no run/launch).
+      - Preferred default (avoids simulator launch and signing prompts):
+        - `xcodebuild -project kyouku.xcodeproj -scheme kyouku -configuration Debug -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build`
 - **Copilot MUST NOT:**
-  - run `xcodebuild`
-  - run `swift build`
-  - invoke Xcode schemes
-  - run `scripts/sim-run.sh` or `scripts/device-run.sh`
-  - run tests, builds, or simulators of any kind
-
-Builds are performed manually in Xcode only. Any attempt by Copilot to run builds, tests, simulators, or invoke related scripts violates these instructions.
+  - run tests of any kind (including `xcodebuild test` and `swift test`)
+  - run `swift build` / `swift test`
+  - run **device install/launch** flows unless the user explicitly asks
+  - run `scripts/sim-run.sh` or `scripts/device-run.sh` (they install/launch)
+  - run Release/AppStore signing flows unless the user explicitly asks
+  - change signing / provisioning settings without asking
+  - run long-lived simulator/device sessions in the background without asking
 
 - Primary workflow for humans: build/run in Xcode. VS Code tasks wrap scripts:
   - Simulator: `bash scripts/sim-run.sh` (env: `SIM_NAME`, `SCHEME`, `CONF`, `DERIVED_DATA_PATH`, `RUBY_TRACE=1`).

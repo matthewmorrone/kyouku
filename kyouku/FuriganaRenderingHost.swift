@@ -41,6 +41,7 @@ struct FuriganaRenderingHost: View {
     var contextMenuStateProvider: (() -> RubyContextMenuState?)? = nil
     var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
     var viewMetricsContext: RubyText.ViewMetricsContext? = nil
+    var onDebugTokenListTextChange: ((String) -> Void)? = nil
 
     var body: some View {
         GeometryReader { proxy in
@@ -225,7 +226,8 @@ struct FuriganaRenderingHost: View {
             onSpanSelection: onSpanSelection,
             contextMenuStateProvider: contextMenuStateProvider,
             onContextMenuAction: onContextMenuAction,
-            viewMetricsContext: viewMetricsContext
+            viewMetricsContext: viewMetricsContext,
+            onDebugTokenListTextChange: onDebugTokenListTextChange
         )
         // `RubyText` performs custom drawing for ruby annotations. When token overlay modes
         // toggle, UIKit doesn't always repaint the custom ruby layer immediately, so we

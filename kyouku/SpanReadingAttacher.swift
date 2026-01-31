@@ -57,8 +57,9 @@ struct SpanReadingAttacher {
     ) async -> Result {
         guard text.isEmpty == false, spans.isEmpty == false else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
-            let semantic = spans.enumerated().map { idx, span in
-                SemanticSpan(range: span.range, surface: span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: nil)
+            let semantic = spans.enumerated().compactMap { idx, span -> SemanticSpan? in
+                guard Self.isHardBoundaryOnly(span.surface) == false else { return nil }
+                return SemanticSpan(range: span.range, surface: span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: nil)
             }
             return Result(annotatedSpans: passthrough, semanticSpans: semantic)
         }
@@ -85,8 +86,9 @@ struct SpanReadingAttacher {
         }
         guard let tokenizer = tokenizerOpt else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
-            let semantic = passthrough.enumerated().map { idx, span in
-                SemanticSpan(range: span.span.range, surface: span.span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: span.readingKana)
+            let semantic = passthrough.enumerated().compactMap { idx, span -> SemanticSpan? in
+                guard Self.isHardBoundaryOnly(span.span.surface) == false else { return nil }
+                return SemanticSpan(range: span.span.range, surface: span.span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: span.readingKana)
             }
             let result = Result(annotatedSpans: passthrough, semanticSpans: semantic)
             await Self.cache.store(result, for: key)
@@ -155,8 +157,9 @@ struct SpanReadingAttacher {
         //  • Never cross hard boundaries (punctuation / whitespace). We enforce contiguity and reject hard-boundary spans.
 
         func passthroughSemanticSpans() -> [SemanticSpan] {
-            return annotatedSpans.enumerated().map { idx, span in
-                SemanticSpan(range: span.span.range, surface: span.span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: span.readingKana)
+            return annotatedSpans.enumerated().compactMap { idx, span -> SemanticSpan? in
+                guard Self.isHardBoundaryOnly(span.span.surface) == false else { return nil }
+                return SemanticSpan(range: span.span.range, surface: span.span.surface, sourceSpanIndices: idx..<(idx + 1), readingKana: span.readingKana)
             }
         }
 
