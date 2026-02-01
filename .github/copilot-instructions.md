@@ -32,6 +32,10 @@
 
 Copilot should run a **build-only** verification (`xcodebuild build`) after it finishes making code changes, and then iterate on any compiler errors until the build is clean.
 
+To keep iteration fast:
+- Do **not** run builds after purely investigative/read-only work (searching, reading files, reasoning).
+- For a given batch of code edits, run `xcodebuild` **once at the end**; only rebuild if that build fails.
+
 Constraints:
 - Build only (no tests).
 - No install/launch flows.
