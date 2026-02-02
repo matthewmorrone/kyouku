@@ -5,34 +5,9 @@ import Foundation
 struct PasteView: View {
     // NOTE: The semantic heatmap/constellation is intentionally disabled for now.
     // Leave the code in place so we can revisit it later.
-    private static let sentenceHeatmapEnabledFlag: Bool = false
+    static let sentenceHeatmapEnabledFlag: Bool = false
 
     @EnvironmentObject var notes: NotesStore
-    private struct TokenActionPanelFramePreferenceKey: PreferenceKey {
-        static var defaultValue: CGRect? = nil
-
-        static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
-            if let next = nextValue() {
-                value = next
-            }
-        }
-    }
-    private struct PasteAreaFramePreferenceKey: PreferenceKey {
-        static var defaultValue: CGRect? = nil
-
-        static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
-            if let next = nextValue() {
-                value = next
-            }
-        }
-    }
-    private struct SheetPanelHeightPreferenceKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
-
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-            value = nextValue()
-        }
-    }
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var words: WordsStore
     @EnvironmentObject var readingOverrides: ReadingOverridesStore
@@ -40,18 +15,18 @@ struct PasteView: View {
     @Environment(\.undoManager) private var undoManager
     @Environment(\.appColorTheme) private var appColorTheme
 
-    @State private var inputText: String = ""
-    @State private var currentNote: Note? = nil
+    @State var inputText: String = ""
+    @State var currentNote: Note? = nil
     @State private var noteTitleInput: String = ""
     @State private var hasManuallyEditedTitle: Bool = false
     @State private var isTitleEditAlertPresented: Bool = false
     @State private var titleEditDraft: String = ""
     @State private var hasInitialized: Bool = false
-    @State private var isEditing: Bool = false
-    @State private var furiganaAttributedText: NSAttributedString? = nil
-    @State private var furiganaAttributedTextBase: NSAttributedString? = nil
-    @State private var furiganaSpans: [AnnotatedSpan]? = nil
-    @State private var furiganaSemanticSpans: [SemanticSpan] = []
+    @State var isEditing: Bool = false
+    @State var furiganaAttributedText: NSAttributedString? = nil
+    @State var furiganaAttributedTextBase: NSAttributedString? = nil
+    @State var furiganaSpans: [AnnotatedSpan]? = nil
+    @State var furiganaSemanticSpans: [SemanticSpan] = []
     @State private var furiganaRefreshToken: Int = 0
     @State private var furiganaTaskHandle: Task<Void, Never>? = nil
     @StateObject private var inlineLookup = DictionaryLookupViewModel()
@@ -59,35 +34,34 @@ struct PasteView: View {
     @State private var overrideSignature: Int = 0
     @State private var customizedRanges: [NSRange] = []
     @State private var showTokensPopover: Bool = false
-    @State private var showAdjustedSpansPopover: Bool = false
     @State private var debugTokenListText: String = ""
     @State private var pendingRouterResetNoteID: UUID? = nil
     @State private var skipNextInitialFuriganaEnsure: Bool = false
     @State private var isDictionarySheetPresented: Bool = false
     @State private var measuredSheetHeight: CGFloat = 0
-    @State private var pasteAreaFrame: CGRect? = nil
+    @State var pasteAreaFrame: CGRect? = nil
 
     @State private var toastText: String? = nil
     @State private var toastDismissWorkItem: DispatchWorkItem? = nil
 
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
-    @State private var incrementalPopupHits: [IncrementalLookupHit] = []
-    @State private var isIncrementalPopupVisible: Bool = false
-    @State private var incrementalLookupTask: Task<Void, Never>? = nil
-    @State private var savedWordOverlays: [RubyText.TokenOverlay] = []
-    @State private var incrementalSelectedCharacterRange: NSRange? = nil
-    @State private var incrementalSheetDetent: PresentationDetent = .height(420)
+    @State var incrementalPopupHits: [IncrementalLookupHit] = []
+    @State var isIncrementalPopupVisible: Bool = false
+    @State var incrementalLookupTask: Task<Void, Never>? = nil
+    @State var savedWordOverlays: [RubyText.TokenOverlay] = []
+    @State var incrementalSelectedCharacterRange: NSRange? = nil
+    @State var incrementalSheetDetent: PresentationDetent = .height(420)
 
     // Sentence-level semantic heatmap (visual-only)
-    @State private var sentenceRanges: [NSRange] = []
-    @State private var sentenceVectors: [[Float]?] = []
-    @State private var sentenceHeatmapSelectedIndex: Int? = nil
-    @State private var sentenceHeatmapTask: Task<Void, Never>? = nil
+    @State var sentenceRanges: [NSRange] = []
+    @State var sentenceVectors: [[Float]?] = []
+    @State var sentenceHeatmapSelectedIndex: Int? = nil
+    @State var sentenceHeatmapTask: Task<Void, Never>? = nil
 
     // Live semantic feedback while editing (read-only)
-    @State private var editorSelectedRange: NSRange? = nil
-    @State private var liveSemanticFeedback: LiveSemanticFeedback? = nil
-    @State private var liveSemanticFeedbackTask: Task<Void, Never>? = nil
+    @State var editorSelectedRange: NSRange? = nil
+    @State var liveSemanticFeedback: LiveSemanticFeedback? = nil
+    @State var liveSemanticFeedbackTask: Task<Void, Never>? = nil
 
     // Semantic constellation (sentence graph)
     @State private var isConstellationSheetPresented: Bool = false
@@ -101,7 +75,7 @@ struct PasteView: View {
     @State private var wordDefinitionsPartOfSpeech: String? = nil
     @State private var wordDefinitionsTokenParts: [WordDefinitionsView.TokenPart] = []
 
-    private var tokenSelection: TokenSelectionContext? {
+    var tokenSelection: TokenSelectionContext? {
         get { selectionController.tokenSelection }
         nonmutating set { selectionController.tokenSelection = newValue }
     }
@@ -131,7 +105,7 @@ struct PasteView: View {
         nonmutating set { selectionController.pendingSplitFocusSelectionID = newValue }
     }
 
-    private var tokenPanelFrame: CGRect? {
+    var tokenPanelFrame: CGRect? {
         get { selectionController.tokenPanelFrame }
         nonmutating set { selectionController.tokenPanelFrame = newValue }
     }
@@ -157,7 +131,7 @@ struct PasteView: View {
     // One-time migration to disable token overlay highlighting that can hurt responsiveness.
     // Users can re-enable manually in the furigana options menu if desired.
     @AppStorage("paste.migrated.disableTokenOverlayHighlighting.v1") private var didDisableTokenOverlayHighlightingV1: Bool = false
-    @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
+    @AppStorage("readingAlternateTokenColorA") var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage(FuriganaKnownWordSettings.modeKey) private var knownWordFuriganaModeRaw: String = FuriganaKnownWordSettings.defaultModeRawValue
     @AppStorage(FuriganaKnownWordSettings.scoreThresholdKey) private var knownWordFuriganaScoreThreshold: Double = FuriganaKnownWordSettings.defaultScoreThreshold
@@ -188,7 +162,7 @@ struct PasteView: View {
     }
 
     
-    private static let coordinateSpaceName = "PasteViewRootSpace"
+    static let coordinateSpaceName = "PasteViewRootSpace"
     private static let inlineDictionaryPanelEnabledFlag = true
     private static let dictionaryPopupEnabledFlag = true // Tap in paste area shows popup + highlight.
     private static let dictionaryPopupLoggingEnabledFlag = false
@@ -196,7 +170,7 @@ struct PasteView: View {
     private static let sheetMaxHeightFraction: CGFloat = 0.8
     private static let sheetExtraPadding: CGFloat = 36
     private let furiganaPipeline = FuriganaPipelineService()
-    private var incrementalLookupEnabled: Bool { Self.incrementalLookupEnabledFlag }
+    var incrementalLookupEnabled: Bool { Self.incrementalLookupEnabledFlag }
     private var dictionaryPopupEnabled: Bool { Self.dictionaryPopupEnabledFlag && incrementalLookupEnabled == false && debugDisableDictionaryPopup == false }
     private var dictionaryPopupLoggingEnabled: Bool { Self.dictionaryPopupLoggingEnabledFlag }
     private var inlineDictionaryPanelEnabled: Bool { Self.inlineDictionaryPanelEnabledFlag && dictionaryPopupEnabled }
@@ -535,47 +509,7 @@ struct PasteView: View {
         .coordinateSpace(name: Self.coordinateSpaceName)
     }
 
-    @ViewBuilder
-    private var tokenGeometryDebugOverlay: some View {
-        GeometryReader { proxy in
-            ZStack {
-                // Outline the coordinate-space container itself.
-                Rectangle()
-                    .stroke(Color.yellow.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [10, 6]))
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    .position(x: proxy.size.width / 2.0, y: proxy.size.height / 2.0)
-
-                // Mark the coordinate-space origin.
-                Circle()
-                    .fill(Color.yellow.opacity(0.9))
-                    .frame(width: 6, height: 6)
-                    .position(x: 0, y: 0)
-
-            if let paste = pasteAreaFrame {
-                Rectangle()
-                    .fill(Color.cyan.opacity(0.06))
-                    .frame(width: paste.width, height: paste.height)
-                    .position(x: paste.midX, y: paste.midY)
-
-                Rectangle()
-                    .stroke(
-                        Color.cyan.opacity(0.95),
-                        style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [14, 10])
-                    )
-                    .frame(width: paste.width, height: paste.height)
-                    .position(x: paste.midX, y: paste.midY)
-            }
-            if let panel = tokenPanelFrame {
-                Rectangle()
-                    .stroke(Color.red.opacity(0.9), lineWidth: 2)
-                    .frame(width: panel.width, height: panel.height)
-                    .position(x: panel.midX, y: panel.midY)
-            }
-
-            }
-            .allowsHitTesting(false)
-        }
-    }
+    
 
     private var editorColumn: some View {
         // Precompute helpers outside of the ViewBuilder to avoid non-View statements inside VStack
@@ -631,193 +565,118 @@ struct PasteView: View {
             tokenPanelFrame: tokenPanelFrame
         )
 
-        return VStack(spacing: 0) {
-            FuriganaRenderingHost(
-                text: $inputText,
-                editorSelectedRange: $editorSelectedRange,
-                furiganaText: furiganaAttributedText,
-                furiganaSpans: furiganaSpans,
-                semanticSpans: furiganaSemanticSpans,
-                textSize: readingTextSize,
-                isEditing: isEditing,
-                showFurigana: incrementalLookupEnabled ? false : showFurigana,
-                lineSpacing: readingLineSpacing,
-                globalKerningPixels: readingGlobalKerningPixels,
-                padHeadwordSpacing: readingHeadwordSpacingPadding,
-                wrapLines: wrapLines,
-                alternateTokenColors: incrementalLookupEnabled ? false : alternateTokenColors,
-                highlightUnknownTokens: incrementalLookupEnabled ? false : highlightUnknownTokens,
-                tokenPalette: alternateTokenPalette,
-                unknownTokenColor: unknownTokenColor,
-                selectedRangeHighlight: incrementalLookupEnabled ? incrementalSelectedCharacterRange : persistentSelectionRange,
-                scrollToSelectedRangeToken: constellationScrollToSelectedRangeToken,
-                customizedRanges: customizedRanges,
-                extraTokenOverlays: extraOverlays,
-                enableTapInspection: true,
-                bottomObstructionHeight: tokenPanelOverlap,
-                onCharacterTap: incrementalLookupEnabled ? { utf16Index in
-                        // Existing incremental lookup behavior
-                        let ns = inputText as NSString
-                        if ns.length == 0 {
-                            incrementalSelectedCharacterRange = nil
-                        } else {
-                            let clamped = min(max(0, utf16Index), max(0, ns.length - 1))
-                            let r = ns.rangeOfComposedCharacterSequence(at: clamped)
-                            let ch = ns.substring(with: r)
-                            if ch == "\n" || ch == "\r" {
-                                incrementalSelectedCharacterRange = nil
-                                incrementalLookupTask?.cancel()
-                                isIncrementalPopupVisible = false
-                                incrementalPopupHits = []
-                                return
-                            }
-                            incrementalSelectedCharacterRange = r
-                        }
-                        startIncrementalLookup(atUTF16Index: utf16Index)
-                } : nil,
-                onSpanSelection: spanSelectionHandler,
-                enableDragSelection: incrementalLookupEnabled ? false : (alternateTokenColors == false),
-                onDragSelectionBegan: {
-                    guard incrementalLookupEnabled == false else { return }
-                        // Avoid showing stale popup content while the user is selecting.
-                    clearSelection(resetPersistent: true)
-                },
-                onDragSelectionEnded: { range in
-                    guard incrementalLookupEnabled == false else { return }
-                    guard alternateTokenColors == false else { return }
-                    presentDictionaryForArbitraryRange(range)
-                },
-                contextMenuStateProvider: contextMenuStateProvider,
-                onContextMenuAction: contextMenuActionHandler,
-                viewMetricsContext: viewMetricsContext,
-                onDebugTokenListTextChange: { text in
-                    // Avoid thrashing SwiftUI state with identical strings.
-                    if text != debugTokenListText {
-                        debugTokenListText = text
-                    }
-                }
-            )
-            .overlay(alignment: .topTrailing) {
-                if isEditing, let liveSemanticFeedback {
-                    LiveSemanticFeedbackBadge(feedback: liveSemanticFeedback)
-                        .padding(.top, 10)
-                        .padding(.trailing, 10)
-                        .allowsHitTesting(false)
-                }
-            }
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: PasteAreaFramePreferenceKey.self,
-                        value: proxy.frame(in: .named(Self.coordinateSpaceName))
-                    )
-                }
-            )
-            .padding(.vertical, 16)
+        let interTokenSpacing: [Int: CGFloat] = {
+            guard let noteID = currentNote?.id else { return [:] }
+            return tokenBoundaries.interTokenSpacing(for: noteID, text: inputText)
+        }()
 
-            HStack(alignment: .center, spacing: 0) {
-                ControlCell {
-                    Button {
-                        hideKeyboard()
-                        showToast("Keyboard hidden")
-                    } label: {
-                        Image(systemName: "keyboard.chevron.compact.down").font(.title2)
-                    }
-                    .accessibilityLabel("Hide Keyboard")
-                }
-
-                ControlCell {
-                    Button(action: pasteFromClipboard) {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.title2)
-                    }
-                    .accessibilityLabel("Paste")
-                }
-
-                ControlCell {
-                    Button(action: saveNote) {
-                        Image(systemName: "square.and.arrow.down")
-                            .font(.title2)
-                    }
-                    .accessibilityLabel("Save")
-                }
-
-                ControlCell {
-                    if Self.sentenceHeatmapEnabledFlag {
-                        Button {
-                            hideKeyboard()
-                            isConstellationSheetPresented = true
-                        } label: {
-                            Image(systemName: "circle.dotted")
-                                .font(.title2)
-                        }
-                        .accessibilityLabel("Constellation")
-                        .accessibilityHint("View sentence constellation")
-                    }
-                }
-
-                ControlCell {
-                    ZStack {
-                        Color.clear.frame(width: 28, height: 28)
-                        Image(showFurigana ? "furigana.on" : "furigana.off")
-                            .renderingMode(.template)
-                            .foregroundColor(.accentColor)
-                            .font(.system(size: 22))
-                    }
-                    .contentShape(Rectangle())
-                    .opacity(isEditing ? 0.45 : 1.0)
-                    .onTapGesture {
-                        guard isEditing == false else { return }
-                        showFurigana.toggle()
-                        if showFurigana {
-                            // Manual toggle should not force a fresh segmentation pass; reuse
-                            // existing spans and just rebuild the ruby text.
-                            triggerFuriganaRefreshIfNeeded(reason: "manual toggle button", recomputeSpans: false)
-                        }
-                        showToast(showFurigana ? "Furigana enabled" : "Furigana disabled")
-                    }
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.35)
-                            .onEnded { _ in
-                                fireContextMenuHaptic()
-                                showingFuriganaOptions = true
-                            }
-                    )
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityLabel(showFurigana ? "Disable Furigana" : "Enable Furigana")
-                    .accessibilityHint("Double tap to toggle. Press and hold for options.")
-                    .popover(
-                        isPresented: $showingFuriganaOptions,
-                        attachmentAnchor: .rect(.bounds),
-                        arrowEdge: .bottom
-                    ) {
-                        FuriganaOptionsPopover(
-                            wrapLines: $wrapLines,
-                            alternateTokenColors: $alternateTokenColors,
-                            highlightUnknownTokens: $highlightUnknownTokens,
-                            padHeadwords: $readingHeadwordSpacingPadding
-                        )
-                        .presentationCompactAdaptation(.popover)
-                    }
-                }
-
-            ControlCell {
-                Toggle(isOn: $isEditing) {
-                        if UIImage(systemName: "character.cursor.ibeam.ja") != nil {
-                            Image(systemName: "character.cursor.ibeam.ja")
-                        } else {
-                            Image(systemName: "character.cursor.ibeam")
-                        }
-                    }
-                    .labelsHidden()
-                    .toggleStyle(.button)
-                    .tint(.accentColor)
-                    .font(.title2)
-                    .accessibilityLabel("Edit")
-                }
-            }
-            .controlSize(.small)
+        let tokenSpacingValueProvider: ((Int) -> CGFloat)? = {
+            guard let noteID = currentNote?.id else { return 0 }
+            return tokenBoundaries.interTokenSpacingWidth(noteID: noteID, boundaryUTF16Index: $0)
         }
+
+        let onTokenSpacingChanged: ((Int, CGFloat, Bool) -> Void)? = { boundary, width, _ in
+            guard let noteID = currentNote?.id else { return }
+            tokenBoundaries.setInterTokenSpacing(noteID: noteID, boundaryUTF16Index: boundary, width: width, text: inputText)
+            // Spacing is display-only; no need to resync notes or spans.
+        }
+
+        return PasteEditorColumnBody(
+            text: $inputText,
+            editorSelectedRange: $editorSelectedRange,
+            furiganaText: furiganaAttributedText,
+            furiganaSpans: furiganaSpans,
+            semanticSpans: furiganaSemanticSpans,
+            textSize: readingTextSize,
+            isEditing: $isEditing,
+            showFurigana: $showFurigana,
+            wrapLines: $wrapLines,
+            alternateTokenColors: $alternateTokenColors,
+            highlightUnknownTokens: $highlightUnknownTokens,
+            padHeadwordSpacing: $readingHeadwordSpacingPadding,
+            incrementalLookupEnabled: incrementalLookupEnabled,
+            lineSpacing: readingLineSpacing,
+            globalKerningPixels: readingGlobalKerningPixels,
+            tokenPalette: alternateTokenPalette,
+            unknownTokenColor: unknownTokenColor,
+            selectedRangeHighlight: incrementalLookupEnabled ? incrementalSelectedCharacterRange : persistentSelectionRange,
+            scrollToSelectedRangeToken: constellationScrollToSelectedRangeToken,
+            customizedRanges: customizedRanges,
+            extraTokenOverlays: extraOverlays,
+            bottomObstructionHeight: tokenPanelOverlap,
+            onCharacterTap: incrementalLookupEnabled ? { utf16Index in
+                // Existing incremental lookup behavior
+                let ns = inputText as NSString
+                if ns.length == 0 {
+                    incrementalSelectedCharacterRange = nil
+                } else {
+                    let clamped = min(max(0, utf16Index), max(0, ns.length - 1))
+                    let r = ns.rangeOfComposedCharacterSequence(at: clamped)
+                    let ch = ns.substring(with: r)
+                    if ch == "\n" || ch == "\r" {
+                        incrementalSelectedCharacterRange = nil
+                        incrementalLookupTask?.cancel()
+                        isIncrementalPopupVisible = false
+                        incrementalPopupHits = []
+                        return
+                    }
+                    incrementalSelectedCharacterRange = r
+                }
+                startIncrementalLookup(atUTF16Index: utf16Index)
+            } : nil,
+            onSpanSelection: spanSelectionHandler,
+            enableDragSelection: incrementalLookupEnabled ? false : (alternateTokenColors == false),
+            onDragSelectionBegan: {
+                guard incrementalLookupEnabled == false else { return }
+                // Avoid showing stale popup content while the user is selecting.
+                clearSelection(resetPersistent: true)
+            },
+            onDragSelectionEnded: { range in
+                guard incrementalLookupEnabled == false else { return }
+                guard alternateTokenColors == false else { return }
+                presentDictionaryForArbitraryRange(range)
+            },
+            contextMenuStateProvider: contextMenuStateProvider,
+            onContextMenuAction: contextMenuActionHandler,
+            viewMetricsContext: viewMetricsContext,
+            onDebugTokenListTextChange: { text in
+                // Avoid thrashing SwiftUI state with identical strings.
+                if text != debugTokenListText {
+                    debugTokenListText = text
+                }
+            },
+            liveSemanticFeedback: liveSemanticFeedback,
+            coordinateSpaceName: Self.coordinateSpaceName,
+            interTokenSpacing: interTokenSpacing,
+            tokenSpacingValueProvider: tokenSpacingValueProvider,
+            onTokenSpacingChanged: onTokenSpacingChanged,
+            showConstellationButton: Self.sentenceHeatmapEnabledFlag,
+            onHideKeyboard: {
+                hideKeyboard()
+            },
+            onPaste: {
+                pasteFromClipboard()
+            },
+            onSave: {
+                saveNote()
+            },
+            onShowConstellation: {
+                isConstellationSheetPresented = true
+            },
+            onToggleFurigana: { enabled in
+                if enabled {
+                    // Manual toggle should not force a fresh segmentation pass; reuse
+                    // existing spans and just rebuild the ruby text.
+                    triggerFuriganaRefreshIfNeeded(reason: "manual toggle button", recomputeSpans: false)
+                }
+            },
+            onShowToast: { message in
+                showToast(message)
+            },
+            onHaptic: {
+                fireContextMenuHaptic()
+            }
+        )
         .sheet(
             isPresented: $isConstellationSheetPresented,
             onDismiss: {
@@ -883,33 +742,6 @@ struct PasteView: View {
         generator.impactOccurred()
     }
 
-    private struct FuriganaOptionsPopover: View {
-        @Binding var wrapLines: Bool
-        @Binding var alternateTokenColors: Bool
-        @Binding var highlightUnknownTokens: Bool
-        @Binding var padHeadwords: Bool
-
-        var body: some View {
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle(isOn: $wrapLines) {
-                    Label("Wrap Lines", systemImage: "text.justify")
-                }
-                Toggle(isOn: $padHeadwords) {
-                    Label("Pad headwords", systemImage: "textformat.size")
-                }
-                Toggle(isOn: $alternateTokenColors) {
-                    Label("Alternate Token Colors", systemImage: "textformat.alt")
-                }
-                Toggle(isOn: $highlightUnknownTokens) {
-                    Label("Highlight Unknown Words", systemImage: "questionmark.square.dashed")
-                }
-            }
-            .toggleStyle(.switch)
-            .padding(14)
-            .frame(maxWidth: 320)
-        }
-    }
-
     private var transformPasteTextButton: some View {
         Button {
             let transformed = PasteTextTransforms.transform(inputText)
@@ -920,33 +752,6 @@ struct PasteView: View {
             Image(systemName: "wand.and.stars")
         }
         .accessibilityLabel("Transform Paste Text")
-    }
-
-    private var resetSpansButton: some View {
-        Button {
-            resetAllCustomSpans()
-        } label: {
-            Image(systemName: "arrow.counterclockwise")
-        }
-        .accessibilityLabel("Reset Spans")
-    }
-
-    private var adjustedSpansButton: some View {
-        Button {
-            showAdjustedSpansPopover = true
-        } label: {
-            Image(systemName: "list.bullet")
-        }
-        .accessibilityLabel("Show Adjusted Spans")
-        .popover(isPresented: $showAdjustedSpansPopover) {
-            ScrollView {
-                Text(adjustedSpansDebugText)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-            }
-        }
     }
 
     private var adjustedSpansDebugText: String {
@@ -1014,48 +819,6 @@ struct PasteView: View {
             .joined(separator: ", ")
     }
 
-    private var tokenListButton: some View {
-        Button {
-            showTokensPopover = true
-        } label: {
-            Image(systemName: "list.bullet.rectangle")
-        }
-        .accessibilityLabel("Extract Words")
-        .sheet(isPresented: $showTokensPopover) {
-            tokenListSheet
-                .presentationDetents(Set([.large]))
-                .presentationDragIndicator(.visible)
-        }
-    }
-
-    private var tokenListSheet: some View {
-        NavigationStack {
-            ExtractWordsView(
-                items: tokenListItems,
-                noteID: activeNoteID,
-                isReady: (furiganaSemanticSpans.isEmpty == false) || (furiganaSpans != nil),
-                isEditing: isEditing,
-                selectedRange: tokenSelection?.range ?? persistentSelectionRange,
-                hideDuplicateTokens: $hideDuplicateTokens,
-                hideCommonParticles: $hideCommonParticles,
-                onSelect: { presentDictionaryForSpan(at: $0, focusSplitMenu: false) },
-                onGoTo: { goToSpanInNote(at: $0) },
-                onAdd: { bookmarkToken(at: $0) },
-                onAddAll: { addAllTokensToWordList() },
-                onMergeLeft: { mergeSpan(at: $0, direction: .previous) },
-                onMergeRight: { mergeSpan(at: $0, direction: .next) },
-                onSplit: { startSplitFlow(for: $0) },
-                canMergeLeft: { canMergeSpan(at: $0, direction: .previous) },
-                canMergeRight: { canMergeSpan(at: $0, direction: .next) },
-                sheetSelection: sheetSelectionBinding,
-                dictionaryPanel: { selection in
-                    dictionaryPanel(for: selection, enableDragToDismiss: true, embedInMaterialBackground: true)
-                },
-                onDone: { showTokensPopover = false }
-            )
-        }
-    }
-
     private var tokenListItems: [TokenListItem] {
         guard furiganaSemanticSpans.isEmpty == false else { return [] }
         let noteID = currentNote?.id
@@ -1102,29 +865,41 @@ struct PasteView: View {
 
     @ToolbarContentBuilder
     private var coreToolbar: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            Button {
-                presentTitleEditAlert()
-            } label: {
-                Text(navigationTitleText)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+        PasteCoreToolbar(
+            isTitleEditPresented: $isTitleEditAlertPresented,
+            titleEditDraft: $titleEditDraft,
+            navigationTitleText: navigationTitleText,
+            adjustedSpansDebugText: adjustedSpansDebugText,
+            onResetSpans: {
+                resetAllCustomSpans()
+            },
+            showTokensSheet: $showTokensPopover,
+            tokenListSheet: {
+                PasteTokenListSheet(
+                    items: tokenListItems,
+                    noteID: activeNoteID,
+                    isReady: (furiganaSemanticSpans.isEmpty == false) || (furiganaSpans != nil),
+                    isEditing: isEditing,
+                    selectedRange: tokenSelection?.range ?? persistentSelectionRange,
+                    hideDuplicateTokens: $hideDuplicateTokens,
+                    hideCommonParticles: $hideCommonParticles,
+                    onSelect: { presentDictionaryForSpan(at: $0, focusSplitMenu: false) },
+                    onGoTo: { goToSpanInNote(at: $0) },
+                    onAdd: { bookmarkToken(at: $0) },
+                    onAddAll: { addAllTokensToWordList() },
+                    onMergeLeft: { mergeSpan(at: $0, direction: .previous) },
+                    onMergeRight: { mergeSpan(at: $0, direction: .next) },
+                    onSplit: { startSplitFlow(for: $0) },
+                    canMergeLeft: { canMergeSpan(at: $0, direction: .previous) },
+                    canMergeRight: { canMergeSpan(at: $0, direction: .next) },
+                    sheetSelection: sheetSelectionBinding,
+                    dictionaryPanel: { selection in
+                        dictionaryPanel(for: selection, enableDragToDismiss: true, embedInMaterialBackground: true)
+                    },
+                    onDone: { showTokensPopover = false }
+                )
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit Title")
-            .accessibilityHint("Shows an alert to set the note title")
-        }
-        ToolbarItem(placement: .topBarLeading) {
-            adjustedSpansButton
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-            HStack(spacing: 12) {
-                // transformPasteTextButton
-                resetSpansButton
-                tokenListButton
-            }
-        }
+        )
     }
 
     @ViewBuilder
@@ -1150,16 +925,7 @@ struct PasteView: View {
         }
     }
 
-    private var inlineDismissScrim: some View {
-        // When the inline dictionary panel is visible, we used to dim the background.
-        // That can read as a “faint highlight” across non-selected tokens, so keep it clear.
-        // IMPORTANT: keep this scrim non-interactive so it never blocks scrolling.
-        Color.clear
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
-            .transition(.opacity)
-            .zIndex(0.5)
-    }
+    
 
     @ViewBuilder
     private var incrementalLookupOverlay: some View { EmptyView() }
@@ -1168,7 +934,7 @@ struct PasteView: View {
         Set([.height(300), .height(420), .height(560), .large])
     }
 
-    private var incrementalPreferredSheetDetent: PresentationDetent {
+    var incrementalPreferredSheetDetent: PresentationDetent {
         let groupCount = incrementalPopupGroups.count
         if groupCount <= 1 {
             return .height(300)
@@ -1186,67 +952,40 @@ struct PasteView: View {
     }
 
     private func inlineTokenActionPanel(for selection: TokenSelectionContext) -> some View {
-        GeometryReader { proxy in
-            VStack(spacing: 0) {
-                Spacer(minLength: 0)
+        let preferred = normalizedReading(preferredReadingForSelection(selection))
 
-                let preferred = normalizedReading(preferredReadingForSelection(selection))
-
-                TokenActionPanel(
-                    selection: selection,
-                    lookup: inlineLookup,
-                    preferredReading: preferred,
-                    canMergePrevious: canMergeSelection(.previous),
-                    canMergeNext: canMergeSelection(.next),
-                    onShowDefinitions: {
-                        presentWordDefinitions(for: selection)
-                    },
-                    onDismiss: { clearSelection(resetPersistent: true) },
-                    onSaveWord: { entry in
-                        toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
-                    },
-                    onApplyReading: { entry in
-                        applyDictionaryReading(entry)
-                    },
-                    onApplyCustomReading: { kana in
-                        applyCustomReading(kana)
-                    },
-                    isWordSaved: { entry in
-                        isSavedWord(for: selection.surface, preferredReading: preferred, entry: entry)
-                    },
-                    onMergePrevious: { mergeSelection(.previous) },
-                    onMergeNext: { mergeSelection(.next) },
-                    onSplit: { offset in splitSelection(at: offset) },
-                    onReset: resetSelectionOverrides,
-                    isSelectionCustomized: selectionIsCustomized(selection),
-                    enableDragToDismiss: true,
-                    embedInMaterialBackground: true,
-                    // The inline panel must respect the bottom safe area.
-                    // If we let it use the full container height, the action buttons can
-                    // end up under the tab bar / home indicator when the panel grows tall.
-                    containerHeight: proxy.size.height - proxy.safeAreaInsets.bottom,
-                    focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
-                    onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil }
-                )
-                // IMPORTANT: do not disable the panel while resolving a new selection.
-                // Users must be able to drag-dismiss or tap-dismiss even if the next
-                // lookup is still in flight. The panel renders a built-in busy indicator
-                // when stale presented content is shown during `.resolving`.
-                .id("token-action-panel-\(overrideSignature)")
-                .padding(.horizontal, 0)
-                .padding(.bottom, 0)
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: TokenActionPanelFramePreferenceKey.self,
-                            value: proxy.frame(in: .named(Self.coordinateSpaceName))
-                        )
-                    }
-                )
-            }
-        }
-        .zIndex(1)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
+        return PasteInlineTokenActionPanel(
+            selection: selection,
+            lookup: inlineLookup,
+            preferredReading: preferred,
+            canMergePrevious: canMergeSelection(.previous),
+            canMergeNext: canMergeSelection(.next),
+            onShowDefinitions: {
+                presentWordDefinitions(for: selection)
+            },
+            onDismiss: { clearSelection(resetPersistent: true) },
+            onSaveWord: { entry in
+                toggleSavedWord(surface: selection.surface, preferredReading: preferred, entry: entry)
+            },
+            onApplyReading: { entry in
+                applyDictionaryReading(entry)
+            },
+            onApplyCustomReading: { kana in
+                applyCustomReading(kana)
+            },
+            isWordSaved: { entry in
+                isSavedWord(for: selection.surface, preferredReading: preferred, entry: entry)
+            },
+            onMergePrevious: { mergeSelection(.previous) },
+            onMergeNext: { mergeSelection(.next) },
+            onSplit: { offset in splitSelection(at: offset) },
+            onReset: resetSelectionOverrides,
+            isSelectionCustomized: selectionIsCustomized(selection),
+            overrideSignature: overrideSignature,
+            focusSplitMenu: pendingSplitFocusSelectionID == selection.id,
+            onSplitFocusConsumed: { pendingSplitFocusSelectionID = nil },
+            coordinateSpaceName: Self.coordinateSpaceName
+        )
     }
 
     private func pasteFromClipboard() {
@@ -1476,63 +1215,13 @@ struct PasteView: View {
     }
 
     private var titleEditModal: some View {
-        ZStack {
-            // Tap-to-dismiss scrim.
-            Color.black.opacity(0.22)
-                .ignoresSafeArea()
-                .onTapGesture {
-                    isTitleEditAlertPresented = false
-                }
-
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    TextField("Title", text: $titleEditDraft)
-                        .textInputAutocapitalization(.sentences)
-                        .disableAutocorrection(true)
-                        .submitLabel(.done)
-                        .onSubmit {
-                            applyTitleEditDraft()
-                            isTitleEditAlertPresented = false
-                        }
-
-                    if titleEditDraft.isEmpty == false {
-                        Button {
-                            titleEditDraft = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(Color.appTextSecondary)
-                                .font(.title3)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Clear title")
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                HStack {
-                    Button("Cancel", role: .cancel) {
-                        isTitleEditAlertPresented = false
-                    }
-                    .buttonStyle(.bordered)
-
-                    Spacer(minLength: 0)
-
-                    Button("Set") {
-                        applyTitleEditDraft()
-                        isTitleEditAlertPresented = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
+        TitleEditModalView(
+            isPresented: $isTitleEditAlertPresented,
+            draft: $titleEditDraft,
+            onApply: {
+                applyTitleEditDraft()
             }
-            .padding(16)
-            .frame(maxWidth: 520)
-            .frame(height: 180)
-            .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .padding(.horizontal, 24)
-            .transition(.scale(scale: 0.98).combined(with: .opacity))
-        }
+        )
     }
 
     private func applyTitleEditDraft() {
@@ -1570,7 +1259,7 @@ struct PasteView: View {
         currentNote?.id ?? scratchNoteID
     }
 
-    private func clearSelection(resetPersistent: Bool = true) {
+    func clearSelection(resetPersistent: Bool = true) {
         CustomLogger.shared.debug("Clearing selection resetPersistent=\(resetPersistent)")
         let hadSelection = selectionController.tokenSelection != nil
         selectionController.clearSelection(resetPersistent: resetPersistent)
@@ -1735,7 +1424,7 @@ struct PasteView: View {
         )
     }
 
-    private func isSavedWord(for surface: String, preferredReading: String?, entry: DictionaryEntry) -> Bool {
+    func isSavedWord(for surface: String, preferredReading: String?, entry: DictionaryEntry) -> Bool {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let k = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let kana = (k?.isEmpty == false) ? k : nil
@@ -1761,7 +1450,7 @@ struct PasteView: View {
         }
     }
 
-    private func toggleSavedWord(surface: String, preferredReading: String?, entry: DictionaryEntry) {
+    func toggleSavedWord(surface: String, preferredReading: String?, entry: DictionaryEntry) {
         let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let k = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let kana = (k?.isEmpty == false) ? k : nil
@@ -1943,72 +1632,7 @@ struct PasteView: View {
         return min(max(padded, minHeight), maxHeight)
     }
 
-    @ViewBuilder
-    private var legacyDismissOverlay: some View {
-        if #available(iOS 17.0, *) {
-            EmptyView()
-        }
-        else {
-            GeometryReader { proxy in
-                let containerFrame = proxy.frame(in: .named(Self.coordinateSpaceName))
-                let localPaste: CGRect? = pasteAreaFrame.map { paste in
-                    CGRect(
-                        x: paste.minX - containerFrame.minX,
-                        y: paste.minY - containerFrame.minY,
-                        width: paste.width,
-                        height: paste.height
-                    )
-                }
-                let regions = legacyDismissHitRegions(containerSize: proxy.size, localPaste: localPaste)
-
-                ZStack {
-                    ForEach(Array(regions.enumerated()), id: \.offset) { _, rect in
-                        // IMPORTANT: UIKit ignores views with alpha <= 0.01 for hit-testing.
-                        Color.black.opacity(0.02)
-                            .frame(width: rect.width, height: rect.height)
-                            .position(x: rect.midX, y: rect.midY)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                clearSelection(resetPersistent: false)
-                            }
-                    }
-                }
-                .ignoresSafeArea()
-            }
-            .transition(.opacity)
-            .zIndex(0.5)
-        }
-    }
-
-    private func legacyDismissHitRegions(containerSize: CGSize, localPaste: CGRect?) -> [CGRect] {
-        let container = CGRect(origin: .zero, size: containerSize)
-        guard let paste = localPaste?.intersection(container),
-              paste.isNull == false,
-              paste.isEmpty == false else {
-            return container.size.width > 0 && container.size.height > 0 ? [container] : []
-        }
-
-        var regions: [CGRect] = []
-
-        if paste.minY > container.minY {
-            let height = paste.minY - container.minY
-            regions.append(CGRect(x: container.minX, y: container.minY, width: container.width, height: height))
-        }
-        if paste.maxY < container.maxY {
-            let height = container.maxY - paste.maxY
-            regions.append(CGRect(x: container.minX, y: paste.maxY, width: container.width, height: height))
-        }
-        if paste.minX > container.minX {
-            let width = paste.minX - container.minX
-            regions.append(CGRect(x: container.minX, y: paste.minY, width: width, height: paste.height))
-        }
-        if paste.maxX < container.maxX {
-            let width = container.maxX - paste.maxX
-            regions.append(CGRect(x: paste.maxX, y: paste.minY, width: width, height: paste.height))
-        }
-
-        return regions.filter { $0.width > 1 && $0.height > 1 }
-    }
+    
 
     private func trimmedRangeAndSurface(for spanRange: NSRange) -> (range: NSRange, surface: String)? {
         guard spanRange.location != NSNotFound, spanRange.length > 0 else { return nil }
@@ -2043,7 +1667,7 @@ struct PasteView: View {
         return (highlightRange, trimmedSurface)
     }
 
-    private func aggregatedAnnotatedSpan(for semantic: SemanticSpan) -> AnnotatedSpan {
+    func aggregatedAnnotatedSpan(for semantic: SemanticSpan) -> AnnotatedSpan {
         let stage1 = furiganaSpans ?? []
         let indices = semantic.sourceSpanIndices
         let group: ArraySlice<AnnotatedSpan>
@@ -2352,22 +1976,22 @@ struct PasteView: View {
         }
     }
 
-    private func normalizedReading(_ reading: String?) -> String? {
+    func normalizedReading(_ reading: String?) -> String? {
         guard let value = reading?.trimmingCharacters(in: .whitespacesAndNewlines), value.isEmpty == false else { return nil }
         return value
     }
 
-    private func kanaFoldToHiragana(_ value: String) -> String {
+    func kanaFoldToHiragana(_ value: String) -> String {
         // Fold katakana/hiragana differences so "カタカナ" and "かたかな" compare equal.
         value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
     }
 
-    private func kanaFoldToHiragana(_ value: String?) -> String? {
+    func kanaFoldToHiragana(_ value: String?) -> String? {
         guard let value else { return nil }
         return kanaFoldToHiragana(value)
     }
 
-    private func kanaVariants(_ value: String) -> [String] {
+    func kanaVariants(_ value: String) -> [String] {
         let hira = kanaFoldToHiragana(value)
         let kata = hira.applyingTransform(.hiraganaToKatakana, reverse: false) ?? hira
         if hira == kata { return [hira] }
@@ -2870,6 +2494,22 @@ struct PasteView: View {
 
     private func resetSelectionOverrides() {
         guard let selection = tokenSelection else { return }
+
+        let noteID = activeNoteID
+        let selectionStart = selection.range.location
+        let selectionEnd = NSMaxRange(selection.range)
+
+        let boundariesToReset: [Int] = {
+            var indices: [Int] = [selectionStart, selectionEnd]
+            let spacing = tokenBoundaries.interTokenSpacing(for: noteID, text: inputText)
+            if spacing.isEmpty == false {
+                indices.append(contentsOf: spacing.keys.filter { $0 >= selectionStart && $0 <= selectionEnd })
+            }
+            return Array(Set(indices))
+        }()
+
+        tokenBoundaries.resetInterTokenSpacing(noteID: noteID, boundaryUTF16Indices: boundariesToReset)
+
         applyOverridesChange(range: selection.range, newOverrides: [], actionName: "Reset Token")
         resetSpanEdits(in: selection.range, actionName: "Reset Token")
         clearSelection(resetPersistent: false)
@@ -3064,7 +2704,15 @@ struct PasteView: View {
     }
 
     private func selectionIsCustomized(_ selection: TokenSelectionContext) -> Bool {
-        customizedRanges.contains { NSIntersectionRange($0, selection.range).length > 0 }
+        if customizedRanges.contains(where: { NSIntersectionRange($0, selection.range).length > 0 }) {
+            return true
+        }
+
+        let noteID = activeNoteID
+        let start = selection.range.location
+        let end = NSMaxRange(selection.range)
+        let spacing = tokenBoundaries.interTokenSpacing(for: noteID, text: inputText)
+        return spacing.keys.contains { $0 >= start && $0 <= end }
     }
 
     private func neighborIndex(for index: Int, direction: MergeDirection) -> Int? {
@@ -3219,397 +2867,6 @@ struct PasteView: View {
         }
     }
 
-    // MARK: - Sentence semantic heatmap
-
-    private func updateSentenceHeatmapSelection(for selectedRange: NSRange?) {
-        guard let base = furiganaAttributedTextBase else {
-            // Rendering not ready yet; just record state.
-            sentenceHeatmapSelectedIndex = nil
-            return
-        }
-
-        guard let selectedRange, sentenceRanges.isEmpty == false else {
-            sentenceHeatmapSelectedIndex = nil
-            furiganaAttributedText = base
-            return
-        }
-
-        let idx = sentenceRanges.firstIndex(where: { NSLocationInRange(selectedRange.location, $0) })
-        if idx == sentenceHeatmapSelectedIndex {
-            return
-        }
-
-        sentenceHeatmapSelectedIndex = idx
-        if idx == nil {
-            furiganaAttributedText = base
-        } else {
-            furiganaAttributedText = applySentenceHeatmap(to: base)
-        }
-    }
-
-    private func startSentenceHeatmapPrecomputeIfPossible(text: String, spans: [AnnotatedSpan]?) {
-        guard Self.sentenceHeatmapEnabledFlag else {
-            sentenceHeatmapTask?.cancel()
-            sentenceVectors = []
-            sentenceRanges = []
-            clearSentenceHeatmap()
-            return
-        }
-
-        let nsText = text as NSString
-        let ranges = SentenceRangeResolver.sentenceRanges(in: nsText)
-        sentenceRanges = ranges
-
-        // Do not infer heatmap selection from the current selection range; that makes
-        // dictionary taps paint background blocks across other tokens.
-        if sentenceHeatmapSelectedIndex == nil, let base = furiganaAttributedTextBase {
-            furiganaAttributedText = base
-        }
-
-        guard let spans, spans.isEmpty == false, ranges.isEmpty == false else {
-            sentenceVectors = []
-            return
-        }
-
-        sentenceHeatmapTask?.cancel()
-        let capturedRanges = ranges
-        let capturedSpans = spans
-        sentenceHeatmapTask = Task(priority: .utility) {
-            // Resolve EmbeddingAccess safely.
-            let access = await MainActor.run(resultType: EmbeddingAccess.self, body: { EmbeddingAccess.shared })
-
-            // Bucket spans by sentence.
-            var tokenBuckets: [[EmbeddingToken]] = Array(repeating: [], count: capturedRanges.count)
-            tokenBuckets.reserveCapacity(capturedRanges.count)
-
-            var sentenceIndex = 0
-            for s in capturedSpans {
-                let r = s.span.range
-                guard r.location != NSNotFound, r.length > 0 else { continue }
-
-                // Fast path: spans are typically in ascending order.
-                if sentenceIndex < capturedRanges.count {
-                    while sentenceIndex < capturedRanges.count,
-                          NSMaxRange(capturedRanges[sentenceIndex]) <= r.location {
-                        sentenceIndex += 1
-                    }
-                }
-
-                let resolvedSentenceIndex: Int?
-                if sentenceIndex < capturedRanges.count,
-                   NSLocationInRange(r.location, capturedRanges[sentenceIndex]) {
-                    resolvedSentenceIndex = sentenceIndex
-                } else {
-                    // Fallback (should be rare): handle out-of-order spans.
-                    resolvedSentenceIndex = capturedRanges.firstIndex(where: { NSLocationInRange(r.location, $0) })
-                }
-
-                guard let sentenceIndex = resolvedSentenceIndex else { continue }
-                let lemma = s.lemmaCandidates.first
-                let token = EmbeddingToken(surface: s.span.surface, lemma: lemma, reading: s.readingKana)
-                tokenBuckets[sentenceIndex].append(token)
-            }
-
-            // Collect all unique candidate keys for batch fetch.
-            var unique: [String] = []
-            unique.reserveCapacity(capturedSpans.count * 2)
-            var seen: Set<String> = []
-            seen.reserveCapacity(capturedSpans.count * 2)
-
-            let perSentenceCandidates: [[[String]]] = tokenBuckets.map { bucket in
-                bucket.map { EmbeddingFallbackPolicy.candidates(for: $0) }
-            }
-
-            for sentence in perSentenceCandidates {
-                for tokenCandidates in sentence {
-                    for c in tokenCandidates {
-                        if c.isEmpty { continue }
-                        if seen.insert(c).inserted {
-                            unique.append(c)
-                        }
-                    }
-                }
-            }
-
-            let fetched = access.vectors(for: unique)
-
-            func normalize(_ v: [Float]) -> [Float] {
-                var sum: Float = 0
-                for x in v { sum += x * x }
-                let norm = sum.squareRoot()
-                guard norm > 0 else { return v }
-                return v.map { $0 / norm }
-            }
-
-            var vectors: [[Float]?] = Array(repeating: nil, count: capturedRanges.count)
-
-            for (i, sentence) in perSentenceCandidates.enumerated() {
-                var acc: [Float]? = nil
-                var count: Float = 0
-                for tokenCandidates in sentence {
-                    var chosen: [Float]? = nil
-                    for c in tokenCandidates {
-                        if let v = fetched[c] {
-                            chosen = v
-                            break
-                        }
-                    }
-                    guard let vec = chosen else { continue }
-
-                    if acc == nil {
-                        acc = Array(repeating: 0, count: vec.count)
-                    }
-                    guard var a = acc else { continue }
-                    for j in 0..<vec.count {
-                        a[j] += vec[j]
-                    }
-                    acc = a
-                    count += 1
-                }
-
-                if let acc, count > 0 {
-                    let mean = acc.map { $0 / count }
-                    vectors[i] = normalize(mean)
-                }
-            }
-
-            await MainActor.run {
-                guard Task.isCancelled == false else { return }
-                sentenceVectors = vectors
-                // Re-apply heatmap with fresh vectors if a selection is active.
-                if let base = furiganaAttributedTextBase {
-                    furiganaAttributedText = applySentenceHeatmap(to: base)
-                }
-            }
-        }
-    }
-
-    private func applySentenceHeatmap(to base: NSAttributedString?) -> NSAttributedString? {
-        guard let base else { return nil }
-        guard Self.sentenceHeatmapEnabledFlag else { return base }
-        // Heatmap is a semantic exploration visual; don't show it during dictionary popup.
-        guard tokenSelection == nil else { return base }
-        guard let selectedIndex = sentenceHeatmapSelectedIndex else { return base }
-        guard sentenceRanges.isEmpty == false, sentenceVectors.count == sentenceRanges.count else { return base }
-        guard sentenceVectors.indices.contains(selectedIndex), let selectedVec = sentenceVectors[selectedIndex] else { return base }
-
-        // Compute similarities (dot product) and map to background colors.
-        var sims: [Float] = Array(repeating: 0, count: sentenceRanges.count)
-        for i in 0..<sentenceRanges.count {
-            guard let v = sentenceVectors[i] else {
-                sims[i] = 0
-                continue
-            }
-            sims[i] = EmbeddingMath.cosineSimilarity(a: selectedVec, b: v)
-        }
-
-        let mutable = NSMutableAttributedString(attributedString: base)
-        // Remove any existing heatmap backgrounds (only within sentence ranges).
-        for r in sentenceRanges {
-            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= mutable.length else { continue }
-            mutable.removeAttribute(.backgroundColor, range: r)
-        }
-
-        func clamp01(_ x: Float) -> CGFloat {
-            CGFloat(max(0, min(1, x)))
-        }
-
-        func heatColor(sim: Float, isSelected: Bool) -> UIColor {
-            // Convert [-1,1] -> [0,1], but we mostly expect [0,1].
-            let t = clamp01((sim + 1) * 0.5)
-            // Low similarity = light gray; high similarity = warm.
-            let baseGray = UIColor.systemGray5
-            let warm = UIColor.systemOrange
-
-            let alpha: CGFloat = isSelected ? 0.28 : (0.04 + 0.18 * t)
-            return blend(base: baseGray, top: warm, t: t).withAlphaComponent(alpha)
-        }
-
-        for i in 0..<sentenceRanges.count {
-            let r = sentenceRanges[i]
-            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= mutable.length else { continue }
-            let color = heatColor(sim: sims[i], isSelected: i == selectedIndex)
-            mutable.addAttribute(.backgroundColor, value: color, range: r)
-        }
-
-        return mutable
-    }
-
-    private func blend(base: UIColor, top: UIColor, t: CGFloat) -> UIColor {
-        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
-        var tr: CGFloat = 0, tg: CGFloat = 0, tb: CGFloat = 0, ta: CGFloat = 0
-        base.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
-        top.getRed(&tr, green: &tg, blue: &tb, alpha: &ta)
-        let u = max(0, min(1, t))
-        return UIColor(
-            red: br + (tr - br) * u,
-            green: bg + (tg - bg) * u,
-            blue: bb + (tb - bb) * u,
-            alpha: 1
-        )
-    }
-
-    private func clearSentenceHeatmap() {
-        sentenceHeatmapSelectedIndex = nil
-        if let base = furiganaAttributedTextBase {
-            furiganaAttributedText = base
-        }
-    }
-
-    struct LiveSemanticFeedback: Equatable {
-        let previousSimilarity: Float?
-        let paragraphSimilarity: Float?
-        let displaySentenceIndex: Int
-    }
-
-    private func scheduleLiveSemanticFeedbackIfNeeded() {
-        guard isEditing else { return }
-        guard incrementalLookupEnabled == false else {
-            liveSemanticFeedback = nil
-            return
-        }
-
-        liveSemanticFeedbackTask?.cancel()
-
-        let capturedText = inputText
-        let capturedCaretRange = editorSelectedRange
-        let capturedSentenceRanges = sentenceRanges
-        let capturedSentenceVectors = sentenceVectors
-
-        liveSemanticFeedbackTask = Task(priority: .utility) {
-            // Debounce: don't run on every keystroke.
-            try? await Task.sleep(nanoseconds: 450_000_000)
-            guard Task.isCancelled == false else { return }
-
-            let nsText = capturedText as NSString
-            guard nsText.length > 0 else {
-                await MainActor.run { liveSemanticFeedback = nil }
-                return
-            }
-
-            guard let caret = capturedCaretRange else {
-                await MainActor.run { liveSemanticFeedback = nil }
-                return
-            }
-
-            let caretLoc = max(0, min(caret.location, max(0, nsText.length - 1)))
-
-            let ranges: [NSRange] = capturedSentenceRanges.isEmpty
-                ? SentenceRangeResolver.sentenceRanges(in: nsText)
-                : capturedSentenceRanges
-
-            guard ranges.isEmpty == false else {
-                await MainActor.run { liveSemanticFeedback = nil }
-                return
-            }
-
-            guard let sentenceIndex = ranges.firstIndex(where: { NSLocationInRange(caretLoc, $0) }) else {
-                await MainActor.run { liveSemanticFeedback = nil }
-                return
-            }
-
-            guard capturedSentenceVectors.count == ranges.count else {
-                // Embeddings not ready for this text yet.
-                await MainActor.run { liveSemanticFeedback = nil }
-                return
-            }
-
-            guard let current = capturedSentenceVectors[sentenceIndex] else {
-                await MainActor.run { liveSemanticFeedback = nil }
-                return
-            }
-
-            let prevSim: Float? = {
-                guard sentenceIndex > 0 else { return nil }
-                guard let prev = capturedSentenceVectors[sentenceIndex - 1] else { return nil }
-                return EmbeddingMath.cosineSimilarity(a: current, b: prev)
-            }()
-
-            let paragraph = paragraphRange(containingUTF16: caretLoc, in: nsText)
-            let paraIndices = ranges.indices.filter { NSIntersectionRange(ranges[$0], paragraph).length > 0 }
-
-            let paraSim: Float? = {
-                // Exclude current sentence when possible.
-                let withoutCurrent = paraIndices.filter { $0 != sentenceIndex }
-                let source = withoutCurrent.isEmpty ? paraIndices : withoutCurrent
-                guard source.count > 0 else { return nil }
-
-                var acc: [Float]? = nil
-                var count: Float = 0
-                for idx in source {
-                    guard let v = capturedSentenceVectors[idx] else { continue }
-                    if acc == nil { acc = Array(repeating: 0, count: v.count) }
-                    guard var a = acc else { continue }
-                    for j in 0..<v.count { a[j] += v[j] }
-                    acc = a
-                    count += 1
-                }
-                guard let acc, count > 0 else { return nil }
-                let mean = acc.map { $0 / count }
-                var sum: Float = 0
-                for x in mean { sum += x * x }
-                let norm = sum.squareRoot()
-                guard norm > 0 else { return nil }
-                let centroid = mean.map { $0 / norm }
-                return EmbeddingMath.cosineSimilarity(a: current, b: centroid)
-            }()
-
-            if prevSim == nil && paraSim == nil {
-                await MainActor.run { liveSemanticFeedback = nil }
-                return
-            }
-
-            let feedback = LiveSemanticFeedback(
-                previousSimilarity: prevSim,
-                paragraphSimilarity: paraSim,
-                displaySentenceIndex: sentenceIndex
-            )
-
-            await MainActor.run {
-                guard isEditing else { return }
-                liveSemanticFeedback = feedback
-            }
-        }
-    }
-
-    private func paragraphRange(containingUTF16 loc: Int, in text: NSString) -> NSRange {
-        let n = text.length
-        guard n > 0 else { return NSRange(location: 0, length: 0) }
-        let clamped = max(0, min(loc, n - 1))
-
-        func isLineBreak(_ ch: unichar) -> Bool {
-            ch == 0x000A || ch == 0x000D
-        }
-
-        // Paragraph boundaries are blank lines (two consecutive line breaks).
-        var start = 0
-        var i = clamped
-        while i > 0 {
-            let c0 = text.character(at: i)
-            let c1 = text.character(at: i - 1)
-            if isLineBreak(c0) && isLineBreak(c1) {
-                start = i + 1
-                break
-            }
-            i -= 1
-        }
-
-        var end = n
-        i = clamped
-        while i < n - 1 {
-            let c0 = text.character(at: i)
-            let c1 = text.character(at: i + 1)
-            if isLineBreak(c0) && isLineBreak(c1) {
-                end = i
-                break
-            }
-            i += 1
-        }
-
-        if end < start { return NSRange(location: 0, length: n) }
-        return NSRange(location: start, length: end - start)
-    }
-
     @MainActor
     private func restoreSelectionIfNeeded() {
         guard let targetRange = pendingSelectionRange else { return }
@@ -3687,450 +2944,6 @@ struct PasteView: View {
         }
     }
 
-}
-
-private enum MergeDirection {
-    case previous
-    case next
-}
-
-private final class OverrideUndoToken: NSObject {
-    private let action: () -> Void
-
-    init(action: @escaping () -> Void) {
-        self.action = action
-    }
-
-    func perform() {
-        action()
-    }
-}
-
-private struct ControlCell<Content: View>: View {
-    @ViewBuilder var content: Content
-    var body: some View {
-        content
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-    }
-}
-
-// MARK: - Incremental Lookup (PasteView)
-
-private struct IncrementalLookupHit: Identifiable, Hashable {
-    let matchedSurface: String
-    let entry: DictionaryEntry
-
-    var id: String { "\(matchedSurface)#\(entry.id)" }
-}
-
-private struct IncrementalLookupCollapsed: Identifiable, Hashable {
-    let matchedSurface: String
-    let kanji: String
-    let gloss: String
-    let kanaList: String?
-    let entries: [DictionaryEntry]
-
-    var id: String {
-        let k = kanji.isEmpty ? "(no-kanji)" : kanji
-        return "\(matchedSurface)#\(k)#\(gloss)"
-    }
-}
-
-private struct IncrementalLookupGroup: Identifiable, Hashable {
-    let matchedSurface: String
-    let pages: [IncrementalLookupCollapsed]
-
-    var id: String { matchedSurface }
-}
-
-extension PasteView {
-    private var incrementalPopupGroups: [IncrementalLookupGroup] {
-        guard incrementalPopupHits.isEmpty == false else { return [] }
-
-        // Preserve first-seen order per surface.
-        struct Bucket {
-            var firstIndex: Int
-            var surface: String
-            var hits: [IncrementalLookupHit]
-        }
-
-        var buckets: [String: Bucket] = [:]
-        buckets.reserveCapacity(min(32, incrementalPopupHits.count))
-
-        for (idx, hit) in incrementalPopupHits.enumerated() {
-            let foldedKey = kanaFoldToHiragana(hit.matchedSurface.trimmingCharacters(in: .whitespacesAndNewlines))
-            if var existing = buckets[foldedKey] {
-                existing.hits.append(hit)
-                buckets[foldedKey] = existing
-            } else {
-                buckets[foldedKey] = Bucket(firstIndex: idx, surface: hit.matchedSurface, hits: [hit])
-            }
-        }
-
-        let ordered = buckets.values.sorted { $0.firstIndex < $1.firstIndex }
-
-        func normalizeKanji(_ raw: String) -> String {
-            raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        func normalizeGloss(_ raw: String) -> String {
-            raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return ordered.map { bucket in
-            // Collapse entries that share (kanji, gloss) by combining their kana variants.
-            var collapsedByKey: [String: (kanji: String, gloss: String, kana: [String], entries: [DictionaryEntry], firstIndex: Int)] = [:]
-            collapsedByKey.reserveCapacity(min(16, bucket.hits.count))
-
-            for (localIndex, hit) in bucket.hits.enumerated() {
-                let kanji = normalizeKanji(hit.entry.kanji)
-                let gloss = normalizeGloss(hit.entry.gloss)
-                let key = "\(kanji)#\(gloss)"
-                let kana = normalizedReading(hit.entry.kana)
-
-                if var existing = collapsedByKey[key] {
-                    if let kana, existing.kana.contains(kana) == false {
-                        existing.kana.append(kana)
-                    }
-                    existing.entries.append(hit.entry)
-                    collapsedByKey[key] = existing
-                } else {
-                    collapsedByKey[key] = (
-                        kanji: kanji,
-                        gloss: gloss,
-                        kana: kana.map { [$0] } ?? [],
-                        entries: [hit.entry],
-                        firstIndex: localIndex
-                    )
-                }
-            }
-
-            let pages: [IncrementalLookupCollapsed] = collapsedByKey.values
-                .sorted { $0.firstIndex < $1.firstIndex }
-                .map { item in
-                    let kanaList: String?
-                    if item.kana.isEmpty {
-                        kanaList = nil
-                    } else {
-                        kanaList = item.kana.joined(separator: "; ")
-                    }
-                    return IncrementalLookupCollapsed(
-                        matchedSurface: bucket.surface,
-                        kanji: item.kanji,
-                        gloss: item.gloss,
-                        kanaList: kanaList,
-                        entries: item.entries
-                    )
-                }
-
-            return IncrementalLookupGroup(matchedSurface: bucket.surface, pages: pages)
-        }
-    }
-
-    @ViewBuilder
-    fileprivate var incrementalLookupSheet: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(incrementalPopupGroups) { group in
-                    if group.pages.count <= 1, let page = group.pages.first {
-                        incrementalPopupPage(page)
-                    } else {
-                        TabView {
-                            ForEach(group.pages) { page in
-                                incrementalPopupPage(page)
-                            }
-                        }
-                        .tabViewStyle(.page(indexDisplayMode: .never))
-                        .frame(height: 110)
-                    }
-
-                    Divider()
-                }
-            }
-            .padding(14)
-        }
-        .background(Color.appBackground)
-        .onAppear {
-            incrementalSheetDetent = incrementalPreferredSheetDetent
-        }
-        .onChange(of: incrementalPopupHits) { _, _ in
-            incrementalSheetDetent = incrementalPreferredSheetDetent
-        }
-    }
-
-    private func incrementalPopupPage(_ page: IncrementalLookupCollapsed) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(page.matchedSurface)
-                    .font(.headline)
-                    .lineLimit(1)
-
-                Text(page.gloss)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.appTextSecondary)
-                    .lineLimit(2)
-
-                if let kanaList = page.kanaList, kanaList.isEmpty == false {
-                    Text(kanaList)
-                        .font(.caption)
-                        .foregroundStyle(Color.appTextSecondary)
-                        .lineLimit(1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            let isAnySaved = page.entries.contains { isSavedWord(for: page.matchedSurface, preferredReading: nil, entry: $0) }
-            Button {
-                if isAnySaved {
-                    for entry in page.entries where isSavedWord(for: page.matchedSurface, preferredReading: nil, entry: entry) {
-                        toggleSavedWord(surface: page.matchedSurface, preferredReading: nil, entry: entry)
-                    }
-                } else if let first = page.entries.first {
-                    toggleSavedWord(surface: page.matchedSurface, preferredReading: nil, entry: first)
-                }
-                recomputeSavedWordOverlays()
-            } label: {
-                Image(systemName: isAnySaved ? "bookmark.fill" : "bookmark")
-                    .font(.title3)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isAnySaved ? "Remove Bookmark" : "Bookmark")
-        }
-        .padding(.vertical, 10)
-    }
-
-    fileprivate func startIncrementalLookup(atUTF16Index index: Int) {
-        guard incrementalLookupEnabled else { return }
-        let nsText = inputText as NSString
-        guard nsText.length > 0 else { return }
-        guard index >= 0, index < nsText.length else { return }
-
-        // If the tap lands on a newline, ignore.
-        let tappedRange = nsText.rangeOfComposedCharacterSequence(at: index)
-        let tappedChar = nsText.substring(with: tappedRange)
-        if tappedChar == "\n" || tappedChar == "\r" {
-            incrementalLookupTask?.cancel()
-            incrementalSelectedCharacterRange = nil
-            isIncrementalPopupVisible = false
-            incrementalPopupHits = []
-            return
-        }
-
-        incrementalLookupTask?.cancel()
-        incrementalPopupHits = []
-        isIncrementalPopupVisible = false
-
-        let start = tappedRange.location
-        incrementalLookupTask = Task {
-            // Token-aligned candidate expansion (no character-by-character growth).
-            let tokens: [TextSpan] = await MainActor.run {
-                furiganaSpans?.map(\.span) ?? []
-            }
-            let candidates = SelectionSpanResolver.candidates(selectedRange: tappedRange, tokenSpans: tokens, text: nsText)
-            var hits: [IncrementalLookupHit] = []
-            hits.reserveCapacity(16)
-            var seen: Set<String> = []
-
-            // If Stage-2 semantic spans are ready, we can reuse their MeCab-derived lemma candidates.
-            // This lets inflected surfaces still count as "a word" (lookup via lemma) without running
-            // MeCab again per incremental candidate.
-            let lemmaCandidatesBySurface: [String: [String]] = await MainActor.run {
-                var out: [String: [String]] = [:]
-                for semantic in furiganaSemanticSpans {
-                    // Only consider spans that begin at the tapped offset.
-                    guard semantic.range.location == start else { continue }
-                    let surface = semantic.surface
-                    guard surface.isEmpty == false else { continue }
-                    let lemmas = aggregatedAnnotatedSpan(for: semantic)
-                        .lemmaCandidates
-                        .filter { $0.isEmpty == false }
-                    if lemmas.isEmpty == false {
-                        out[surface] = lemmas
-                    }
-                }
-                return out
-            }
-
-            func appendRows(_ rows: [DictionaryEntry], matchedSurface: String) async {
-                // This Task is not main-actor isolated; only touch MainActor-isolated properties via MainActor.run.
-                for row in rows {
-                    let rowID = await MainActor.run { row.id }
-                    let key = "\(matchedSurface)#\(rowID)"
-                    if seen.contains(key) { continue }
-                    seen.insert(key)
-                    hits.append(IncrementalLookupHit(matchedSurface: matchedSurface, entry: row))
-                }
-            }
-
-            for cand in candidates {
-                guard Task.isCancelled == false else { return }
-
-                // Reduplication is structural, not semantic:
-                // If the candidate covers exactly two adjacent identical tokens (after normalization),
-                // prefer looking up the single token and do not treat the combined surface as a unit.
-                if let startIdx = tokens.firstIndex(where: { $0.range.location == cand.range.location }), (startIdx + 1) < tokens.count {
-                    let a = tokens[startIdx]
-                    let b = tokens[startIdx + 1]
-                    if NSMaxRange(b.range) == NSMaxRange(cand.range), NSMaxRange(a.range) == b.range.location {
-                    let k0 = DictionaryKeyPolicy.lookupKey(for: a.surface)
-                    let k1 = DictionaryKeyPolicy.lookupKey(for: b.surface)
-                    if k0.isEmpty == false, k0 == k1 {
-                        // Only apply if X exists and XX does not.
-                        if let singleRows = try? await DictionarySQLiteStore.shared.lookup(term: k0, limit: 50), singleRows.isEmpty == false {
-                            if let combinedRows = try? await DictionarySQLiteStore.shared.lookup(term: cand.lookupKey, limit: 1), combinedRows.isEmpty {
-                                if ProcessInfo.processInfo.environment["REDUP_TRACE"] == "1" {
-                                    CustomLogger.shared.info("Incremental lookup reduplication: using single token lookup for «\(a.surface)» «\(b.surface)»")
-                                }
-                                await appendRows(singleRows, matchedSurface: a.surface)
-                                await appendRows(singleRows, matchedSurface: b.surface)
-                                continue
-                            }
-                        }
-                    }
-                    }
-                }
-
-                if let rows = try? await DictionarySQLiteStore.shared.lookup(term: cand.lookupKey, limit: 50), rows.isEmpty == false {
-                    await appendRows(rows, matchedSurface: cand.displayKey)
-                    continue
-                }
-
-                // Deinflection hard stop: on surface miss, try deinflected lemma candidates.
-                if let deinflector = try? await MainActor.run(resultType: Deinflector.self, body: {
-                    try Deinflector.loadBundled(named: "deinflect")
-                }) {
-                    let deinflected = await MainActor.run { deinflector.deinflect(cand.displayKey, maxDepth: 8, maxResults: 32) }
-                    for d in deinflected {
-                        guard Task.isCancelled == false else { return }
-                        if d.trace.isEmpty { continue }
-                        let keys = DictionaryKeyPolicy.keys(forDisplayKey: d.baseForm)
-                        guard keys.lookupKey.isEmpty == false else { continue }
-                        if let rows = try? await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 50), rows.isEmpty == false {
-                            if ProcessInfo.processInfo.environment["DEINFLECT_HARDSTOP_TRACE"] == "1" {
-                                let trace = d.trace.map { "\($0.reason):\($0.rule.kanaIn)->\($0.rule.kanaOut)" }.joined(separator: ",")
-                                CustomLogger.shared.info("Incremental lookup deinflection hard-stop: «\(cand.displayKey)» -> «\(keys.displayKey)» trace=[\(trace)]")
-                            }
-                            await appendRows(rows, matchedSurface: cand.displayKey)
-                            break
-                        }
-                    }
-                }
-
-                // Lemmatization fallback: if this candidate corresponds to a Stage-2 token surface,
-                // try its lemma candidates (base forms) against the dictionary.
-                if let lemmas = lemmaCandidatesBySurface[cand.displayKey], lemmas.isEmpty == false {
-                    for lemma in lemmas {
-                        guard Task.isCancelled == false else { return }
-                        let keys = DictionaryKeyPolicy.keys(forDisplayKey: lemma)
-                        guard keys.lookupKey.isEmpty == false else { continue }
-                        if let rows = try? await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 50), rows.isEmpty == false {
-                            await appendRows(rows, matchedSurface: cand.displayKey)
-                        }
-                    }
-                }
-            }
-
-            guard Task.isCancelled == false else { return }
-            await MainActor.run {
-                incrementalPopupHits = hits
-                isIncrementalPopupVisible = hits.isEmpty == false
-                if hits.isEmpty == false {
-                    incrementalSheetDetent = incrementalPreferredSheetDetent
-                }
-            }
-        }
-    }
-
-    fileprivate func recomputeSavedWordOverlays() {
-        guard incrementalLookupEnabled else {
-            savedWordOverlays = []
-            return
-        }
-        guard let noteID = currentNote?.id else {
-            savedWordOverlays = []
-            return
-        }
-        let savedWords = words.words
-            .filter { $0.sourceNoteID == noteID }
-        let candidateSurfaces = savedWords
-            .map { $0.surface.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { $0.isEmpty == false }
-
-        guard candidateSurfaces.isEmpty == false else {
-            savedWordOverlays = []
-            return
-        }
-        let nsText = inputText as NSString
-        guard nsText.length > 0 else {
-            savedWordOverlays = []
-            return
-        }
-
-        let savedColor = UIColor(hexString: alternateTokenColorAHex) ?? UIColor.systemBlue
-
-        var overlays: [RubyText.TokenOverlay] = []
-        overlays.reserveCapacity(min(256, candidateSurfaces.count * 2))
-
-        var seenRanges: Set<String> = []
-
-        // Primary path: use Stage-2 spans (surface + lemma candidates) so bookmarked base forms
-        // will still color inflected occurrences in running text.
-        let savedSurfaceKeys = Set(candidateSurfaces.map { kanaFoldToHiragana($0) })
-        if furiganaSemanticSpans.isEmpty == false {
-            for semantic in furiganaSemanticSpans {
-                guard semantic.range.location != NSNotFound, semantic.range.length > 0 else { continue }
-                guard NSMaxRange(semantic.range) <= nsText.length else { continue }
-
-                let surface = semantic.surface.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard surface.isEmpty == false else { continue }
-
-                let aggregated = aggregatedAnnotatedSpan(for: semantic)
-                var candidates: [String] = []
-                candidates.reserveCapacity(1 + aggregated.lemmaCandidates.count)
-                candidates.append(surface)
-                candidates.append(contentsOf: aggregated.lemmaCandidates)
-
-                var isSaved = false
-                for cand in candidates {
-                    let trimmed = cand.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard trimmed.isEmpty == false else { continue }
-                    if savedSurfaceKeys.contains(kanaFoldToHiragana(trimmed)) {
-                        isSaved = true
-                        break
-                    }
-                }
-                guard isSaved else { continue }
-
-                let rangeKey = "\(semantic.range.location)#\(semantic.range.length)"
-                if seenRanges.contains(rangeKey) == false {
-                    seenRanges.insert(rangeKey)
-                    overlays.append(RubyText.TokenOverlay(range: semantic.range, color: savedColor))
-                }
-            }
-        }
-
-        // Fallback path: literal substring scan for cases where spans aren't available yet.
-        for surface in candidateSurfaces {
-            for variant in kanaVariants(surface) {
-                var search = NSRange(location: 0, length: nsText.length)
-                while search.length > 0 {
-                    let found = nsText.range(of: variant, options: [], range: search)
-                    if found.location == NSNotFound || found.length == 0 { break }
-                    let rangeKey = "\(found.location)#\(found.length)"
-                    if seenRanges.contains(rangeKey) == false {
-                        seenRanges.insert(rangeKey)
-                        overlays.append(RubyText.TokenOverlay(range: found, color: savedColor))
-                    }
-                    let nextLoc = NSMaxRange(found)
-                    if nextLoc >= nsText.length { break }
-                    search = NSRange(location: nextLoc, length: nsText.length - nextLoc)
-                }
-            }
-        }
-
-        savedWordOverlays = overlays
-    }
 }
 
 extension PasteView {

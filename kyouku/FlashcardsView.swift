@@ -4,7 +4,7 @@ struct FlashcardsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notes: NotesStore
 
-    @State private var clozeMode: NoteClozeStudyViewModel.Mode = .random
+    @State private var clozeMode: ClozeStudyViewModel.Mode = .random
     @State private var clozeSelectedNoteID: UUID? = nil
     @State private var clozeStudyNote: Note? = nil
     @State private var clozeBlanksPerSentence: Int = 1
@@ -235,7 +235,7 @@ struct FlashcardsView: View {
                         .font(.headline)
 
                     Picker("Order", selection: $clozeMode) {
-                        ForEach(NoteClozeStudyViewModel.Mode.allCases) { mode in
+                        ForEach(ClozeStudyViewModel.Mode.allCases) { mode in
                             Text(mode.displayName).tag(mode)
                         }
                     }
@@ -327,7 +327,7 @@ struct FlashcardsView: View {
             .padding()
         }
         .sheet(item: $clozeStudyNote) { note in
-            NoteClozeStudyView(note: note, initialMode: clozeMode, initialBlanksPerSentence: clozeBlanksPerSentence)
+            ClozeStudyView(note: note, initialMode: clozeMode, initialBlanksPerSentence: clozeBlanksPerSentence)
         }
     }
 

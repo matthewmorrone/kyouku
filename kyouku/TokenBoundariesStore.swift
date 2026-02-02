@@ -16,6 +16,7 @@ final class TokenBoundariesStore: ObservableObject {
 
     @Published private(set) var spansByNote: [UUID: [StoredSpan]] = [:]
     @Published private(set) var hardCutsByNote: [UUID: [Int]] = [:]
+    @Published private(set) var spacingByNote: [UUID: [Int: Double]] = [:]
 
     private let fileName = "token-spans.json"
 
@@ -74,6 +75,92 @@ final class TokenBoundariesStore: ObservableObject {
         guard cuts.count != before else { return }
         hardCutsByNote[noteID] = cuts.isEmpty ? nil : cuts
         save()
+    }
+
+    // MARK: - Inter-token spacing
+
+    private var interTokenSpacingMin: CGFloat { -60 }
+    private var interTokenSpacingMax: CGFloat { 120 }
+    private var interTokenSpacingEpsilon: CGFloat { 0.25 }
+
+    func interTokenSpacing(for noteID: UUID, text: String) -> [Int: CGFloat] {
+        guard let raw = spacingByNote[noteID], raw.isEmpty == false else { return [:] }
+        let length = (text as NSString).length
+        guard length > 0 else { return [:] }
+
+        var result: [Int: CGFloat] = [:]
+        result.reserveCapacity(raw.count)
+
+        for (idx, width) in raw {
+            guard idx > 0, idx < length else { continue }
+            guard width.isFinite else { continue }
+            let w = max(interTokenSpacingMin, min(CGFloat(width), interTokenSpacingMax))
+            guard abs(w) > interTokenSpacingEpsilon else { continue }
+
+            // Avoid adding spacing at explicit line breaks.
+            let scalar = (text as NSString).character(at: idx)
+            if let u = UnicodeScalar(scalar), CharacterSet.newlines.contains(u) {
+                continue
+            }
+            result[idx] = w
+        }
+
+        return result
+    }
+
+    func interTokenSpacingWidth(noteID: UUID, boundaryUTF16Index: Int) -> CGFloat {
+        guard let raw = spacingByNote[noteID] else { return 0 }
+        let width = raw[boundaryUTF16Index] ?? 0
+        guard width.isFinite else { return 0 }
+        return max(interTokenSpacingMin, min(CGFloat(width), interTokenSpacingMax))
+    }
+
+    func setInterTokenSpacing(noteID: UUID, boundaryUTF16Index: Int, width: CGFloat, text: String) {
+        let length = (text as NSString).length
+        guard length > 0 else { return }
+        guard boundaryUTF16Index > 0, boundaryUTF16Index < length else { return }
+        guard width.isFinite else { return }
+
+        // Avoid setting spacing at explicit line breaks.
+        let scalar = (text as NSString).character(at: boundaryUTF16Index)
+        if let u = UnicodeScalar(scalar), CharacterSet.newlines.contains(u) {
+            return
+        }
+
+        let clamped = max(interTokenSpacingMin, min(width, interTokenSpacingMax))
+        if abs(clamped) <= interTokenSpacingEpsilon {
+            removeInterTokenSpacing(noteID: noteID, boundaryUTF16Index: boundaryUTF16Index)
+            return
+        }
+
+        var dict = spacingByNote[noteID] ?? [:]
+        let old = dict[boundaryUTF16Index] ?? 0
+        if abs(old - Double(clamped)) < Double(interTokenSpacingEpsilon) {
+            return
+        }
+        dict[boundaryUTF16Index] = Double(clamped)
+        spacingByNote[noteID] = dict
+    }
+
+    func removeInterTokenSpacing(noteID: UUID, boundaryUTF16Index: Int) {
+        guard var dict = spacingByNote[noteID] else { return }
+        guard dict.removeValue(forKey: boundaryUTF16Index) != nil else { return }
+        if dict.isEmpty {
+            spacingByNote[noteID] = nil
+        } else {
+            spacingByNote[noteID] = dict
+        }
+    }
+
+    func resetInterTokenSpacing(noteID: UUID, boundaryUTF16Indices: [Int]) {
+        guard boundaryUTF16Indices.isEmpty == false else { return }
+        guard var dict = spacingByNote[noteID], dict.isEmpty == false else { return }
+        let beforeCount = dict.count
+        for idx in boundaryUTF16Indices {
+            dict.removeValue(forKey: idx)
+        }
+        guard dict.count != beforeCount else { return }
+        spacingByNote[noteID] = dict.isEmpty ? nil : dict
     }
 
     func storedRanges(for noteID: UUID) -> [NSRange] {
@@ -148,8 +235,12 @@ final class TokenBoundariesStore: ObservableObject {
     func removeAll(for noteID: UUID) {
         let removedSpans = spansByNote.removeValue(forKey: noteID) != nil
         let removedCuts = hardCutsByNote.removeValue(forKey: noteID) != nil
-        guard removedSpans || removedCuts else { return }
-        save()
+        let removedSpacing = spacingByNote.removeValue(forKey: noteID) != nil
+        guard removedSpans || removedCuts || removedSpacing else { return }
+        // Inter-token spacing is intentionally not persisted.
+        if removedSpans || removedCuts {
+            save()
+        }
     }
 
     // MARK: - Persistence
@@ -169,28 +260,37 @@ final class TokenBoundariesStore: ObservableObject {
             if let decoded = try? JSONDecoder().decode(PersistedPayload.self, from: data) {
                 spansByNote = decoded.spansByNote
                 hardCutsByNote = decoded.hardCutsByNote
+                // Inter-token spacing is intentionally NOT persisted across installs.
+                // Old files may contain spacingByNote; we ignore it on load.
+                spacingByNote = [:]
                 return
             }
             if let decoded = try? JSONDecoder().decode([UUID: [StoredSpan]].self, from: data) {
                 spansByNote = decoded
                 hardCutsByNote = [:]
+                spacingByNote = [:]
                 return
             }
             // Backward-compat: older boundary index format existed briefly; ignore it.
             _ = try? JSONDecoder().decode([UUID: [Int]].self, from: data)
             spansByNote = [:]
             hardCutsByNote = [:]
+            spacingByNote = [:]
         } catch {
             CustomLogger.shared.error("Failed to load token boundaries: \(error)")
             spansByNote = [:]
             hardCutsByNote = [:]
+            spacingByNote = [:]
         }
     }
 
     private func save() {
         guard let url = fileURL() else { return }
         do {
-            let payload = PersistedPayload(spansByNote: spansByNote, hardCutsByNote: hardCutsByNote)
+            let payload = PersistedPayload(
+                spansByNote: spansByNote,
+                hardCutsByNote: hardCutsByNote
+            )
             let data = try JSONEncoder().encode(payload)
             try data.write(to: url, options: .atomic)
         } catch {

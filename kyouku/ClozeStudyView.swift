@@ -3,15 +3,15 @@ import SwiftUI
 struct ClozeStudyView: View {
     @Environment(\.dismiss) private var dismiss
 
-    @StateObject private var model: NoteClozeStudyViewModel
+    @StateObject private var model: ClozeStudyViewModel
 
     init(
         note: Note,
-        initialMode: NoteClozeStudyViewModel.Mode = .random,
+        initialMode: ClozeStudyViewModel.Mode = .random,
         initialBlanksPerSentence: Int = 1
     ) {
         _model = StateObject(
-            wrappedValue: NoteClozeStudyViewModel(
+            wrappedValue: ClozeStudyViewModel(
                 note: note,
                 initialMode: initialMode,
                 initialBlanksPerSentence: initialBlanksPerSentence
@@ -48,7 +48,7 @@ struct ClozeStudyView: View {
                     .font(.headline)
                 Spacer()
                 Picker("Mode", selection: $model.mode) {
-                    ForEach(NoteClozeStudyViewModel.Mode.allCases) { m in
+                    ForEach(ClozeStudyViewModel.Mode.allCases) { m in
                         Text(m.displayName).tag(m)
                     }
                 }
@@ -147,7 +147,7 @@ struct ClozeStudyView: View {
         }
     }
 
-    private func inlineDropdown(blank b: NoteClozeStudyViewModel.Blank) -> some View {
+    private func inlineDropdown(blank b: ClozeStudyViewModel.Blank) -> some View {
         let selection = model.selectedOptionByBlankID[b.id] ?? "▾"
         let checked = model.checkedBlankIDs.contains(b.id)
         let isCorrect = checked && selection == b.correct

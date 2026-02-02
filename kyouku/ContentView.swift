@@ -11,6 +11,7 @@ struct ContentView: View {
     @EnvironmentObject var router: AppRouter
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(AppColorThemeID.storageKey) private var appColorThemeRaw: String = AppColorThemeID.defaultValue.rawValue
+    @AppStorage("debugPixelRulerOverlay") private var debugPixelRulerOverlay: Bool = false
 
     private var appColorTheme: AppColorTheme {
         AppColorTheme.from(rawValue: appColorThemeRaw, colorScheme: colorScheme)
@@ -49,15 +50,28 @@ struct ContentView: View {
                 .tag(AppTab.settings)
         }
 
+        let overlay = Group {
+            if debugPixelRulerOverlay {
+                PixelRulerOverlayView()
+                    .ignoresSafeArea()
+            }
+        }
+
         if appColorTheme.id == .systemDefault {
-            tabView
-                .environment(\.appColorTheme, appColorTheme)
-                .appThemedRoot(themeID: appColorTheme.id)
+            ZStack {
+                tabView
+                    .environment(\.appColorTheme, appColorTheme)
+                    .appThemedRoot(themeID: appColorTheme.id)
+                overlay
+            }
         } else {
-            tabView
-                .tint(appColorTheme.palette.accent)
-                .environment(\.appColorTheme, appColorTheme)
-                .appThemedRoot(themeID: appColorTheme.id)
+            ZStack {
+                tabView
+                    .tint(appColorTheme.palette.accent)
+                    .environment(\.appColorTheme, appColorTheme)
+                    .appThemedRoot(themeID: appColorTheme.id)
+                overlay
+            }
         }
     }
 }

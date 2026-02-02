@@ -35,11 +35,16 @@ struct SettingsView: View {
 
     @AppStorage("debugViewMetricsHUD") private var debugViewMetricsHUD: Bool = false
     @AppStorage("rubyDebugRects") private var rubyDebugRects: Bool = false
+    @AppStorage("rubyDebugBisectors") private var rubyDebugBisectors: Bool = false
+    @AppStorage("RubyDebug.showHeadwordBisectors") private var rubyDebugHeadwordBisectors: Bool = true
+    @AppStorage("RubyDebug.showRubyBisectors") private var rubyDebugRubyBisectors: Bool = true
     @AppStorage("rubyHeadwordDebugRects") private var rubyHeadwordDebugRects: Bool = false
     @AppStorage("rubyHeadwordLineBands") private var rubyHeadwordLineBands: Bool = false
     @AppStorage("rubyFuriganaLineBands") private var rubyFuriganaLineBands: Bool = false
+    @AppStorage("RubyDebug.showLineBandLabels") private var rubyDebugShowLineNumbers: Bool = true
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
+    @AppStorage("debugPixelRulerOverlay") private var debugPixelRulerOverlay: Bool = false
 
     @State private var wotdAuthStatus: UNAuthorizationStatus = .notDetermined
     @State private var wotdPendingCount: Int = 0
@@ -72,6 +77,20 @@ struct SettingsView: View {
         if defaults.object(forKey: "rubyFuriganaLineBands") == nil,
            defaults.bool(forKey: "rubyDebugLineBands") {
             defaults.set(true, forKey: "rubyFuriganaLineBands")
+        }
+
+        // Bisectors used to be implicitly tied to `rubyDebugRects`. Initialize the new toggle
+        // to preserve existing behavior until the user changes it.
+        if defaults.object(forKey: "rubyDebugBisectors") == nil {
+            defaults.set(defaults.bool(forKey: "rubyDebugRects"), forKey: "rubyDebugBisectors")
+        }
+
+        // Default per-type bisectors to ON so the new split doesn't change output.
+        if defaults.object(forKey: "RubyDebug.showHeadwordBisectors") == nil {
+            defaults.set(true, forKey: "RubyDebug.showHeadwordBisectors")
+        }
+        if defaults.object(forKey: "RubyDebug.showRubyBisectors") == nil {
+            defaults.set(true, forKey: "RubyDebug.showRubyBisectors")
         }
     }
 
@@ -450,10 +469,18 @@ struct SettingsView: View {
             Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
             Toggle("View metrics", isOn: $debugViewMetricsHUD)
             Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
+            Toggle("Pixel ruler overlay", isOn: $debugPixelRulerOverlay)
             Toggle("Headword debug rects", isOn: $rubyHeadwordDebugRects)
             Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
+            Toggle("Bisectors", isOn: $rubyDebugBisectors)
+            Toggle("Headword bisectors", isOn: $rubyDebugHeadwordBisectors)
+                .disabled(rubyDebugBisectors == false)
+            Toggle("Ruby bisectors", isOn: $rubyDebugRubyBisectors)
+                .disabled(rubyDebugBisectors == false)
             Toggle("Headword line bands", isOn: $rubyHeadwordLineBands)
             Toggle("Ruby line bands", isOn: $rubyFuriganaLineBands)
+            Toggle("Line numbers", isOn: $rubyDebugShowLineNumbers)
+                .disabled((rubyHeadwordLineBands || rubyFuriganaLineBands) == false)
         }
     }
 

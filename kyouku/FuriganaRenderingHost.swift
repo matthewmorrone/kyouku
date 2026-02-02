@@ -12,6 +12,7 @@ struct FuriganaRenderingHost: View {
     var furiganaText: NSAttributedString?
     var furiganaSpans: [AnnotatedSpan]?
     var semanticSpans: [SemanticSpan]
+    var interTokenSpacing: [Int: CGFloat] = [:]
     var textSize: Double
     var isEditing: Bool
     var showFurigana: Bool
@@ -35,6 +36,8 @@ struct FuriganaRenderingHost: View {
     var bottomObstructionHeight: CGFloat = 0
     var onCharacterTap: ((Int) -> Void)? = nil
     var onSpanSelection: ((RubySpanSelection?) -> Void)? = nil
+    var tokenSpacingValueProvider: ((Int) -> CGFloat)? = nil
+    var onTokenSpacingChanged: ((Int, CGFloat, Bool) -> Void)? = nil
     var enableDragSelection: Bool = false
     var onDragSelectionBegan: (() -> Void)? = nil
     var onDragSelectionEnded: ((NSRange) -> Void)? = nil
@@ -85,15 +88,56 @@ struct FuriganaRenderingHost: View {
         }
     }
 
+    private func resolvedBaseUIFont() -> UIFont {
+        let size = CGFloat(textSize)
+        if readingFontName.isEmpty == false, let font = UIFont(name: readingFontName, size: size) {
+            return font
+        }
+        return UIFont.systemFont(ofSize: size)
+    }
+
+    private func rubyMetrics(baseFont: UIFont) -> (rubyHeadroom: CGFloat, effectiveLineSpacing: CGFloat) {
+        let extraGap = CGFloat(max(0, lineSpacing))
+        let rubyBaselineGap = max(0.5, extraGap * 0.12)
+        let defaultRubyFontSize = max(1, CGFloat(textSize) * 0.6)
+        let attributed = resolvedAttributedText
+
+        let rubyHeadroom = max(
+            0,
+            max(
+                CGFloat(textSize) * 0.6 + extraGap,
+                RubyText.requiredVerticalHeadroomForRuby(
+                    in: attributed,
+                    baseFont: baseFont,
+                    defaultRubyFontSize: defaultRubyFontSize,
+                    rubyBaselineGap: rubyBaselineGap
+                )
+            )
+        )
+
+        // Match RubyText's line spacing behavior when ruby metrics are enabled.
+        let effectiveLineSpacing = max(extraGap, rubyHeadroom)
+        return (rubyHeadroom, effectiveLineSpacing)
+    }
+
     private func editorContent(bottomObstruction: CGFloat) -> some View {
-        let insets = editorInsets(bottomObstruction: bottomObstruction)
+        let baseFont = resolvedBaseUIFont()
+        let metrics = rubyMetrics(baseFont: baseFont)
+        let insets = editorInsets(
+            bottomObstruction: bottomObstruction,
+            rubyHeadroom: metrics.rubyHeadroom,
+            baseFont: baseFont
+        )
         return VStack(spacing: 0) {
             EditingTextView(
                 text: $text,
                 selectedRange: $editorSelectedRange,
                 isEditable: isEditing,
+                fontName: readingFontName.isEmpty ? nil : readingFontName,
                 fontSize: CGFloat(textSize),
-                lineSpacing: CGFloat(lineSpacing),
+                lineSpacing: metrics.effectiveLineSpacing,
+                globalKerning: CGFloat(globalKerningPixels),
+                distinctKanaKanjiFonts: readingDistinctKanaKanjiFonts,
                 wrapLines: wrapLines,
                 scrollSyncGroupID: scrollSyncGroupID,
                 insets: UIEdgeInsets(
@@ -107,9 +151,24 @@ struct FuriganaRenderingHost: View {
         }
     }
 
-    private func editorInsets(bottomObstruction: CGFloat) -> EdgeInsets {
-        let rubyHeadroom = max(0.0, textSize * 0.6 + lineSpacing)
-        let topInset = max(8.0, rubyHeadroom)
+    private func editorInsets(bottomObstruction: CGFloat, rubyHeadroom: CGFloat, baseFont: UIFont) -> EdgeInsets {
+        // Match RubyText's top inset behavior: textInsets.top (8) + ruby headroom.
+        let topInset = 8.0 + max(0.0, Double(rubyHeadroom))
+
+        let attributed = resolvedAttributedText
+        let defaultRubyFontSize = max(1.0, CGFloat(textSize) * 0.6)
+
+        // Match RubyText's horizontal inset behavior when ruby metrics are enabled.
+        // RubyText adds symmetric slack to prevent ruby overhang/clipping at the container edges.
+        // This is independent of headword padding and is required for edit/view origin parity.
+        let rubyHorizontalInset: CGFloat = {
+            let raw = RubyText.requiredHorizontalInsetForRubyOverhang(
+                in: attributed,
+                baseFont: baseFont,
+                defaultRubyFontSize: defaultRubyFontSize
+            )
+            return raw > 0 ? raw : 0
+        }()
 
         // Compute symmetric horizontal overhang to match view mode ruby behavior.
         // Use the same helper RubyText uses so edit/view modes align.
@@ -118,9 +177,6 @@ struct FuriganaRenderingHost: View {
                 // When headword padding is disabled, allow ruby to overhang/clamp naturally.
                 return 0
             }
-            let attributed = furiganaText ?? NSAttributedString(string: text)
-            let baseFont = UIFont.systemFont(ofSize: CGFloat(textSize))
-            let defaultRubyFontSize = max(1.0, CGFloat(textSize) * 0.6)
             let rawOverhang = RubyText.requiredHorizontalInsetForRubyOverhang(
                 in: attributed,
                 baseFont: baseFont,
@@ -128,8 +184,11 @@ struct FuriganaRenderingHost: View {
             )
             return max(ceil(rawOverhang), 2)
         }()
-        let left = 12 + insetOverhang
-        let right = 12 + insetOverhang
+        // Keep the left edge stable regardless of headword padding.
+        // We add any extra ruby overhang slack only on the trailing side so enabling
+        // padding does not indent the entire text block.
+        let left: CGFloat = 12 + rubyHorizontalInset
+        let right = 12 + rubyHorizontalInset + insetOverhang
         return EdgeInsets(
             top: CGFloat(topInset),
             leading: CGFloat(left),
@@ -166,7 +225,7 @@ struct FuriganaRenderingHost: View {
         }()
         let insets = UIEdgeInsets(
             top: 8,
-            left: 12 + insetOverhang,
+            left: 12,
             bottom: 12 + bottomObstruction,
             right: 12 + insetOverhang
         )
@@ -207,12 +266,13 @@ struct FuriganaRenderingHost: View {
             globalKerning: CGFloat(globalKerningPixels),
             padHeadwordSpacing: padHeadwordSpacing,
             rubyHorizontalAlignment: .center,
-            wrapLines: wrapLines,
-            horizontalScrollEnabled: wrapLines == false,
+            wrapLines: (onTokenSpacingChanged != nil) ? true : wrapLines,
+            horizontalScrollEnabled: ((onTokenSpacingChanged != nil) ? true : wrapLines) == false,
             scrollSyncGroupID: scrollSyncGroupID,
             tokenOverlays: tokenColorOverlays,
             tokenColorPalette: tokenPalette,
             semanticSpans: semanticSpans,
+            interTokenSpacing: interTokenSpacing,
             selectedRange: selectedRangeHighlight,
             scrollToSelectedRangeToken: scrollToSelectedRangeToken,
             customizedRanges: customizedRanges,
@@ -226,6 +286,8 @@ struct FuriganaRenderingHost: View {
             onSpanSelection: onSpanSelection,
             contextMenuStateProvider: contextMenuStateProvider,
             onContextMenuAction: onContextMenuAction,
+            tokenSpacingValueProvider: tokenSpacingValueProvider,
+            onTokenSpacingChanged: onTokenSpacingChanged,
             viewMetricsContext: viewMetricsContext,
             onDebugTokenListTextChange: onDebugTokenListTextChange
         )
@@ -418,14 +480,24 @@ private struct EditingTextView: UIViewRepresentable {
     @Binding var text: String
     @Binding var selectedRange: NSRange?
     let isEditable: Bool
+    let fontName: String?
     let fontSize: CGFloat
     let lineSpacing: CGFloat
+    let globalKerning: CGFloat
+    let distinctKanaKanjiFonts: Bool
     let wrapLines: Bool
     let scrollSyncGroupID: String
     let insets: UIEdgeInsets
 
     // Keep this large enough for real-world long lines when wrapping is disabled.
     private static let noWrapContainerWidth: CGFloat = 200_000
+
+    private func resolvedBaseFont(ofSize size: CGFloat) -> UIFont {
+        if let fontName, fontName.isEmpty == false, let font = UIFont(name: fontName, size: size) {
+            return font
+        }
+        return UIFont.systemFont(ofSize: size)
+    }
 
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
@@ -440,14 +512,15 @@ private struct EditingTextView: UIViewRepresentable {
         view.showsHorizontalScrollIndicator = wrapLines == false
         view.textContainer.widthTracksTextView = wrapLines
         view.textContainer.maximumNumberOfLines = 0
-        view.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        // Match RubyText's wrapping behavior.
+        view.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
         view.textContainer.lineFragmentPadding = 0
         view.textContainerInset = insets
         view.keyboardDismissMode = .interactive
         view.autocorrectionType = .no
         view.autocapitalizationType = .none
         view.delegate = context.coordinator
-        view.font = UIFont.systemFont(ofSize: fontSize)
+        view.font = resolvedBaseFont(ofSize: fontSize)
         view.textColor = UIColor.label
 
         if wrapLines == false {
@@ -465,28 +538,50 @@ private struct EditingTextView: UIViewRepresentable {
         let processed = Self.removingRuby(from: baseAttributed)
         let fullRange = NSRange(location: 0, length: (processed.length))
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        if #available(iOS 14.0, *) {
+            // Avoid `.pushOut`: it can push trailing punctuation onto the next line.
+            paragraph.lineBreakStrategy = []
+        }
         paragraph.lineHeightMultiple = max(0.8, 1.0)
         paragraph.lineSpacing = max(0, lineSpacing)
-        let baseFont = UIFont.systemFont(ofSize: fontSize)
+        let baseFont = resolvedBaseFont(ofSize: fontSize)
         let colored = NSMutableAttributedString(attributedString: processed)
         colored.addAttribute(NSAttributedString.Key.paragraphStyle, value: paragraph, range: fullRange)
         colored.addAttribute(NSAttributedString.Key.foregroundColor, value: UIColor.label, range: fullRange)
         colored.addAttribute(NSAttributedString.Key.font, value: baseFont, range: fullRange)
+        if distinctKanaKanjiFonts {
+            let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
+            ScriptFontStyler.applyDistinctKanaKanjiFonts(to: colored, kanjiFont: kanjiFont)
+        }
+        if abs(globalKerning) > 0.001 {
+            colored.addAttribute(.kern, value: globalKerning, range: fullRange)
+        }
         view.attributedText = colored
 
         // Apply paragraph style immediately so the first layout matches view mode metrics.
         let initialLength = view.textStorage.length
         if initialLength > 0 {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+            if #available(iOS 14.0, *) {
+                paragraph.lineBreakStrategy = []
+            }
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
+            let baseFont = resolvedBaseFont(ofSize: fontSize)
             view.textStorage.addAttributes([
                 NSAttributedString.Key.paragraphStyle: paragraph,
                 NSAttributedString.Key.foregroundColor: UIColor.label,
-                NSAttributedString.Key.font: UIFont.systemFont(ofSize: fontSize)
+                NSAttributedString.Key.font: baseFont
             ], range: NSRange(location: 0, length: initialLength))
+            if distinctKanaKanjiFonts {
+                let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
+                ScriptFontStyler.applyDistinctKanaKanjiFonts(to: view.textStorage, kanjiFont: kanjiFont)
+            }
+            if abs(globalKerning) > 0.001 {
+                view.textStorage.addAttribute(.kern, value: globalKerning, range: NSRange(location: 0, length: initialLength))
+            }
         }
 
         view.contentInset = .zero
@@ -512,14 +607,24 @@ private struct EditingTextView: UIViewRepresentable {
             let processed = Self.removingRuby(from: baseAttributed)
             let fullRange = NSRange(location: 0, length: processed.length)
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+            if #available(iOS 14.0, *) {
+                paragraph.lineBreakStrategy = []
+            }
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
-            let baseFont = UIFont.systemFont(ofSize: fontSize)
+            let baseFont = resolvedBaseFont(ofSize: fontSize)
             let colored = NSMutableAttributedString(attributedString: processed)
             colored.addAttribute(NSAttributedString.Key.paragraphStyle, value: paragraph, range: fullRange)
             colored.addAttribute(NSAttributedString.Key.foregroundColor, value: UIColor.label, range: fullRange)
             colored.addAttribute(NSAttributedString.Key.font, value: baseFont, range: fullRange)
+            if distinctKanaKanjiFonts {
+                let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
+                ScriptFontStyler.applyDistinctKanaKanjiFonts(to: colored, kanjiFont: kanjiFont)
+            }
+            if abs(globalKerning) > 0.001 {
+                colored.addAttribute(.kern, value: globalKerning, range: fullRange)
+            }
             if uiView.attributedText?.isEqual(to: colored) == false {
                 let wasFirstResponder = uiView.isFirstResponder
                 let oldSelectedRange = uiView.selectedRange
@@ -535,14 +640,14 @@ private struct EditingTextView: UIViewRepresentable {
         }
 
         uiView.isEditable = isEditable
-        uiView.font = UIFont.systemFont(ofSize: fontSize)
+        uiView.font = resolvedBaseFont(ofSize: fontSize)
         uiView.textColor = UIColor.label
         uiView.textContainerInset = insets
         uiView.alwaysBounceHorizontal = wrapLines == false
         uiView.showsHorizontalScrollIndicator = wrapLines == false
         uiView.textContainer.widthTracksTextView = wrapLines
         uiView.textContainer.maximumNumberOfLines = 0
-        uiView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        uiView.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
         uiView.textContainer.lineFragmentPadding = 0
 
         if wrapLines {
@@ -573,14 +678,25 @@ private struct EditingTextView: UIViewRepresentable {
         let fullLength = uiView.textStorage.length
         if fullLength > 0 {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+            if #available(iOS 14.0, *) {
+                paragraph.lineBreakStrategy = []
+            }
             paragraph.lineHeightMultiple = max(0.8, 1.0)
             paragraph.lineSpacing = max(0, lineSpacing)
+            let baseFont = resolvedBaseFont(ofSize: fontSize)
             uiView.textStorage.addAttributes([
                 NSAttributedString.Key.paragraphStyle: paragraph,
                 NSAttributedString.Key.foregroundColor: UIColor.label,
-                NSAttributedString.Key.font: UIFont.systemFont(ofSize: fontSize)
+                NSAttributedString.Key.font: baseFont
             ], range: NSRange(location: 0, length: fullLength))
+            if distinctKanaKanjiFonts {
+                let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
+                ScriptFontStyler.applyDistinctKanaKanjiFonts(to: uiView.textStorage, kanjiFont: kanjiFont)
+            }
+            if abs(globalKerning) > 0.001 {
+                uiView.textStorage.addAttribute(.kern, value: globalKerning, range: NSRange(location: 0, length: fullLength))
+            }
         }
 
         applyTypingAttributes(to: uiView)
@@ -627,13 +743,19 @@ private struct EditingTextView: UIViewRepresentable {
 
     private func applyTypingAttributes(to textView: UITextView) {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        if #available(iOS 14.0, *) {
+            paragraph.lineBreakStrategy = []
+        }
         paragraph.lineSpacing = max(0, lineSpacing)
         textView.typingAttributes = [
-            NSAttributedString.Key.font: UIFont.systemFont(ofSize: fontSize),
+            NSAttributedString.Key.font: resolvedBaseFont(ofSize: fontSize),
             NSAttributedString.Key.foregroundColor: UIColor.label,
             NSAttributedString.Key.paragraphStyle: paragraph
         ]
+        if abs(globalKerning) > 0.001 {
+            textView.typingAttributes[.kern] = globalKerning
+        }
     }
 
     private static func removingRuby(from attributed: NSAttributedString) -> NSAttributedString {
