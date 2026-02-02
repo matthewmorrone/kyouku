@@ -3,7 +3,7 @@ import NaturalLanguage
 import Combine
 
 @MainActor
-final class NoteClozeStudyViewModel: ObservableObject {
+final class ClozeStudyViewModel: ObservableObject {
     struct Blank: Identifiable, Equatable {
         let id: UUID
         let correct: String

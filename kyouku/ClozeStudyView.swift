@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct NoteClozeStudyView: View {
+struct ClozeStudyView: View {
     @Environment(\.dismiss) private var dismiss
 
     @StateObject private var model: NoteClozeStudyViewModel
