@@ -271,6 +271,7 @@ struct RubyText: UIViewRepresentable {
         renderHasher.combine(rubyMetricsEnabled ? 1 : 0)
         renderHasher.combine(Int((effectiveLineSpacing * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(rubyHorizontalAlignment == .leading ? 1 : 0)
+        renderHasher.combine(padHeadwordSpacing ? 1 : 0)
         renderHasher.combine(wrapLines ? 1 : 0)
         // Ruby visibility affects layout, because we may reserve different vertical headroom
         // (paragraph spacing + top inset) depending on whether ruby should be shown.

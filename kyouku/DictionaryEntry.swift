@@ -117,6 +117,42 @@ actor DictionarySQLiteStore {
         self.db = nil
     }
 
+    // Keep an exact-only variant for contexts like the Details sheet where we
+    // do NOT want substring/token fallback results.
+    private func lookupExactSync(term: String, limit: Int = 30, mode: DictionarySearchMode) throws -> [DictionaryEntry] {
+        try ensureOpen()
+
+        guard db != nil else {
+            return []
+        }
+
+        // IMPORTANT: `term` must already be normalized by `DictionaryKeyPolicy.lookupKey`.
+        guard term.isEmpty == false else {
+            return []
+        }
+
+        let normalized = term
+
+        if case .english = mode {
+            return try selectEntriesByGloss(matching: normalized, limit: limit)
+        }
+
+        // 1) Exact match on kanji/kana_forms + kana normalization fallbacks.
+        var results = try queryExactMatches(for: normalized, limit: limit)
+        if !results.isEmpty { return results }
+
+        // 2) If the query is Latin, try converting to kana and exact-matching.
+        if looksLikeLatinQuery(normalized) {
+            let kanaCandidates = latinToKanaCandidates(for: normalized)
+            for cand in kanaCandidates where !cand.isEmpty {
+                results = try queryExactMatches(for: cand, limit: limit)
+                if !results.isEmpty { return results }
+            }
+        }
+
+        return []
+    }
+
     // Keep the core implementation synchronous inside the actor.
     // We'll expose async wrappers for call sites.
     private func lookupSync(term: String, limit: Int = 30, mode: DictionarySearchMode) throws -> [DictionaryEntry] {
@@ -234,6 +270,12 @@ actor DictionarySQLiteStore {
     /// (e.g., prefer English gloss matches for Latin input).
     func lookup(term: String, limit: Int = 30, mode: DictionarySearchMode) async throws -> [DictionaryEntry] {
         try lookupSync(term: term, limit: limit, mode: mode)
+    }
+
+    /// Exact-only lookup (no substring/token fallback). Useful for Details views
+    /// where we only want the selected surface and its lemma, not component hits.
+    func lookupExact(term: String, limit: Int = 30, mode: DictionarySearchMode = .japanese) async throws -> [DictionaryEntry] {
+        try lookupExactSync(term: term, limit: limit, mode: mode)
     }
 
     func fetchEntryDetails(for entryIDs: [Int64]) async throws -> [DictionaryEntryDetail] {

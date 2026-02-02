@@ -4,11 +4,6 @@ struct FlashcardsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notes: NotesStore
 
-    @State private var clozeMode: ClozeStudyViewModel.Mode = .random
-    @State private var clozeSelectedNoteID: UUID? = nil
-    @State private var clozeStudyNote: Note? = nil
-    @State private var clozeBlanksPerSentence: Int = 1
-
     @State private var session: [Word] = []
     @State private var sessionSource: [Word] = []
     @State private var index: Int = 0
@@ -23,6 +18,12 @@ struct FlashcardsView: View {
     @State private var sessionAgain: Int = 0
 
     @State private var showEndSessionConfirm: Bool = false
+
+    private struct EditingWord: Identifiable {
+        let id: Word.ID
+    }
+
+    @State private var editingWord: EditingWord? = nil
 
     enum ReviewScope: String, CaseIterable, Identifiable {
         case all = "All"
@@ -63,7 +64,7 @@ struct FlashcardsView: View {
                 }
             }
             .padding()
-            .navigationTitle("Review")
+            .navigationTitle("Study")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -105,8 +106,13 @@ struct FlashcardsView: View {
             } message: {
                 Text("This will stop the current review session.")
             }
+            .sheet(item: $editingWord) { item in
+                WordEditView(wordID: item.id)
+            }
         }
         .appThemedRoot()
+        // Hide the Cards tab page dots while actively reviewing flashcards.
+        .preference(key: CardsPageDotsHiddenPreferenceKey.self, value: session.isEmpty == false)
     }
     
     private var header: some View {
@@ -153,6 +159,16 @@ struct FlashcardsView: View {
         HStack(spacing: 16) {
             Button { again() } label: {
                 HStack { Image(systemName: "arrow.uturn.left.circle"); Text("Again") }
+            }
+            .buttonStyle(.bordered)
+
+            Spacer()
+
+            Button {
+                guard session.isEmpty == false else { return }
+                editingWord = EditingWord(id: session[index].id)
+            } label: {
+                HStack { Image(systemName: "pencil"); Text("Edit") }
             }
             .buttonStyle(.bordered)
 
@@ -227,58 +243,6 @@ struct FlashcardsView: View {
     private var reviewHome: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Review")
-                    .font(.title2).bold()
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Label("Cloze Study", systemImage: "rectangle.and.pencil.and.ellipsis")
-                        .font(.headline)
-
-                    Picker("Order", selection: $clozeMode) {
-                        ForEach(ClozeStudyViewModel.Mode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    Stepper("Dropdowns per sentence: \(clozeBlanksPerSentence)", value: $clozeBlanksPerSentence, in: 1...10, step: 1)
-
-                    if notes.notes.isEmpty {
-                        Text("Add a note to study.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Picker("Note", selection: $clozeSelectedNoteID) {
-                            Text("Select a note").tag(UUID?.none)
-                            ForEach(notes.notes) { note in
-                                Text(note.title?.isEmpty == false ? note.title! : "Untitled").tag(UUID?.some(note.id))
-                            }
-                        }
-                        .pickerStyle(.menu)
-                    }
-
-                    Button {
-                        guard let id = clozeSelectedNoteID else { return }
-                        clozeStudyNote = notes.notes.first(where: { $0.id == id })
-                    } label: {
-                        Label("Start Cloze", systemImage: "play.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(clozeSelectedNoteID == nil)
-                }
-                .padding(12)
-                .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 12))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.appBorder, lineWidth: 1)
-                )
-                .onAppear {
-                    if clozeSelectedNoteID == nil {
-                        clozeSelectedNoteID = notes.notes.first?.id
-                    }
-                }
-
                 VStack(alignment: .leading, spacing: 10) {
                     Label("Flashcards", systemImage: "rectangle.on.rectangle.angled")
                         .font(.headline)
@@ -325,9 +289,6 @@ struct FlashcardsView: View {
                 )
             }
             .padding()
-        }
-        .sheet(item: $clozeStudyNote) { note in
-            ClozeStudyView(note: note, initialMode: clozeMode, initialBlanksPerSentence: clozeBlanksPerSentence)
         }
     }
 
@@ -580,19 +541,20 @@ private struct FlashcardCard: View {
         let displaySurface = displaySurfaceForCard(word)
         let displayKana = displayKanaForCard(word, displaySurface: displaySurface)
         VStack(alignment: .center, spacing: 10) {
+            Spacer(minLength: 0)
+
             switch direction {
             case .kanjiToKana:
-                Text(displaySurface).font(.largeTitle.weight(.bold))
+                Text(displaySurface)
+                    .font(.largeTitle.weight(.bold))
+                    .multilineTextAlignment(.center)
             case .kanaToEnglish:
                 Text((displayKana?.isEmpty == false) ? (displayKana ?? displaySurface) : displaySurface)
                     .font(.largeTitle.weight(.bold))
+                    .multilineTextAlignment(.center)
             }
 
             Spacer(minLength: 0)
-
-            Text(word.createdAt, format: .dateTime.year().month().day().hour().minute())
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -601,6 +563,8 @@ private struct FlashcardCard: View {
         let displaySurface = displaySurfaceForCard(word)
         let displayKana = displayKanaForCard(word, displaySurface: displaySurface)
         VStack(alignment: .center, spacing: 10) {
+            Spacer(minLength: 0)
+
             switch direction {
             case .kanjiToKana:
                 // Kanji → Kana: back shows kana only.
@@ -632,10 +596,6 @@ private struct FlashcardCard: View {
             }
 
             Spacer(minLength: 0)
-
-            Text(word.createdAt, format: .dateTime.year().month().day().hour().minute())
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 

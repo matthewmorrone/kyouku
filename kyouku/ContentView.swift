@@ -37,9 +37,9 @@ struct ContentView: View {
                 }
                 .tag(AppTab.dictionary)
 
-            FlashcardsView()
+            CardsTabView()
                 .tabItem {
-                    Label("Cards", systemImage: "rectangle.on.rectangle.angled")
+                    Label("Study", systemImage: "rectangle.on.rectangle.angled")
                 }
                 .tag(AppTab.cards)
 

@@ -34,12 +34,19 @@ struct WordDefinitionsView: View {
     @State private var debugSQL: String = ""
     @State private var expandedDefinitionRowIDs: Set<String> = []
 
+    // Used to prevent stale async work (from a previous headword) from overwriting
+    // the currently displayed definitions when this view is reused inside a sheet.
+    @State private var activeLoadRequestID: UUID = UUID()
+
     @State private var exampleSentences: [ExampleSentence] = []
     @State private var isLoadingExampleSentences: Bool = false
     @State private var showAllExampleSentences: Bool = false
 
     @State private var detectedGrammar: [DetectedGrammarPattern] = []
     @State private var similarWords: [String] = []
+
+    @State private var headerLemmaLine: String? = nil
+    @State private var headerFormLine: String? = nil
 
     @State private var componentPreviewPart: TokenPart? = nil
 
@@ -122,12 +129,41 @@ struct WordDefinitionsView: View {
                     // .modifier(dbgBG(LayoutDebugColor.DBG_TEAL__HeaderNoteRow))
                     // .modifier(dbgRowBG(LayoutDebugColor.DBG_TEAL__HeaderNoteRow))
                 }
-                Text(titleText)
-                    .font(.title2.weight(.semibold))
-                    .padding(.vertical, 2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // .modifier(dbgBG(LayoutDebugColor.DBG_MINT__HeaderTitleRow))
-                    // .modifier(dbgRowBG(LayoutDebugColor.DBG_MINT__HeaderTitleRow))
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(titleText)
+                        .font(.title2.weight(.semibold))
+                        .padding(.vertical, 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        // .modifier(dbgBG(LayoutDebugColor.DBG_MINT__HeaderTitleRow))
+                        // .modifier(dbgRowBG(LayoutDebugColor.DBG_MINT__HeaderTitleRow))
+
+                    Button {
+                        let trimmedKana = kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let trimmedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let speechText = trimmedKana.isEmpty == false ? trimmedKana : trimmedSurface
+                        SpeechManager.shared.speak(text: speechText, language: "ja-JP")
+                    } label: {
+                        Image(systemName: "speaker.wave.2")
+                            .font(.body.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Speak")
+                    .disabled(surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                if let headerLemmaLine {
+                    Text(headerLemmaLine)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let headerFormLine {
+                    Text(headerFormLine)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 if let posLine = partOfSpeechSummaryLine() {
                     Text(posLine)
@@ -292,7 +328,8 @@ struct WordDefinitionsView: View {
         // .modifier(dbgBG(LayoutDebugColor.DBG_GRAY__List))
         .navigationTitle("Details")
         .navigationBarTitleDisplayMode(.inline)
-        .task {
+        .task(id: loadTaskKey) {
+            await updateHeaderLemmaAndFormLines()
             await load()
             refreshContextInsights()
         }
@@ -328,11 +365,99 @@ struct WordDefinitionsView: View {
         }
     }
 
+    private var loadTaskKey: String {
+        let primary = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let secondary = (kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let lemmas = lemmaCandidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+            .joined(separator: "|")
+        return "\(primary)|\(secondary)|\(lemmas)"
+    }
+
     // MARK: Header
     private var titleText: String {
         let primary = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         if primary.isEmpty == false { return primary }
         return kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var primaryLemmaText: String? {
+        lemmaCandidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { $0.isEmpty == false })
+    }
+
+    @MainActor
+    private func updateHeaderLemmaAndFormLines() async {
+        let surfaceText = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard surfaceText.isEmpty == false else {
+            headerLemmaLine = nil
+            headerFormLine = nil
+            return
+        }
+
+        guard let lemmaTextRaw = primaryLemmaText else {
+            headerLemmaLine = nil
+            headerFormLine = nil
+            return
+        }
+
+        let lemmaText = lemmaTextRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard lemmaText.isEmpty == false, lemmaText != surfaceText else {
+            headerLemmaLine = nil
+            headerFormLine = nil
+            return
+        }
+
+        headerLemmaLine = "Lemma: \(lemmaText)"
+
+        func friendlyDeinflectionReason(_ reason: String) -> String {
+            let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = trimmed.lowercased()
+            switch key {
+            case "-te": return "て-form"
+            case "-ta", "past": return "past"
+            case "negative": return "negative"
+            case "polite": return "polite"
+            case "potential": return "potential"
+            case "passive": return "passive"
+            case "causative": return "causative"
+            case "volitional": return "volitional"
+            case "imperative": return "imperative"
+            case "conditional": return "conditional"
+            default:
+                return trimmed.isEmpty ? reason : trimmed
+            }
+        }
+
+        func describeTrace(_ trace: [Deinflector.AppliedRule]) -> String? {
+            guard trace.isEmpty == false else { return nil }
+            var ordered: [String] = []
+            var seen = Set<String>()
+            for step in trace {
+                let label = friendlyDeinflectionReason(step.reason)
+                if label.isEmpty { continue }
+                if seen.insert(label).inserted {
+                    ordered.append(label)
+                }
+            }
+            guard ordered.isEmpty == false else { return nil }
+            if ordered.count == 1 { return ordered[0] }
+            return ordered.joined(separator: " → ")
+        }
+
+        if let deinflector = try? Deinflector.loadBundled(named: "deinflect") {
+            let candidates = deinflector.deinflect(surfaceText, maxDepth: 8, maxResults: 64)
+            if let match = candidates.first(where: { $0.surface == lemmaText }) {
+                if let form = describeTrace(match.trace) {
+                    headerFormLine = "Form: \(form) of \(lemmaText)"
+                    return
+                }
+            }
+        }
+
+        headerFormLine = "Form: inflected of \(lemmaText)"
     }
 
     // MARK: Definitions
@@ -971,22 +1096,20 @@ struct WordDefinitionsView: View {
     }
 
     // MARK: Data Loading
+    @MainActor
     private func load() async {
+        let requestID = UUID()
+        activeLoadRequestID = requestID
+
         let primary = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let secondary = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var terms: [String] = []
+        var primaryTerms: [String] = []
         for t in [primary, secondary].compactMap({ $0 }) {
             guard t.isEmpty == false else { continue }
-            if terms.contains(t) == false { terms.append(t) }
+            if primaryTerms.contains(t) == false { primaryTerms.append(t) }
         }
 
-        for lemma in lemmaCandidates {
-            let trimmed = lemma.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.isEmpty == false else { continue }
-            if terms.contains(trimmed) == false { terms.append(trimmed) }
-        }
-
-        guard terms.isEmpty == false else {
+        guard primaryTerms.isEmpty == false else {
             entries = []
             entryDetails = []
             return
@@ -1001,25 +1124,69 @@ struct WordDefinitionsView: View {
 
         var merged: [DictionaryEntry] = []
         var seen: Set<String> = []
+        var selectedLemmaUsedForLookup: String? = nil
+
+        func selectedLemmaCandidate() -> String? {
+            // Important: `lemmaCandidates` can include component/subtoken lemmas.
+            // Only consider a lemma as a fallback when the surface/kana have no results.
+            let raw = lemmaCandidates
+                .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                .first(where: { $0.isEmpty == false })
+            guard let raw else { return nil }
+            // For non-inflecting categories (particles/adverbs/nouns), lemma fallback
+            // tends to add noise and can look unrelated.
+            switch coarseTokenPOS() {
+            case .verb?, .adjective?, .auxiliary?:
+                return raw
+            default:
+                return nil
+            }
+        }
 
         do {
-            for term in terms {
+            for term in primaryTerms {
+                try Task.checkCancellation()
                 let keys = DictionaryKeyPolicy.keys(forDisplayKey: term)
                 guard keys.lookupKey.isEmpty == false else { continue }
-                let rows = try await Task.detached(priority: .userInitiated) {
-                    try await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 100)
-                }.value
+                let rows = try await DictionarySQLiteStore.shared.lookupExact(term: keys.lookupKey, limit: 100)
                 for row in rows {
                     if seen.insert(row.id).inserted {
                         merged.append(row)
                     }
                 }
             }
+
+            // Only fall back to lemma if the surface/kana did not yield anything.
+            if merged.isEmpty, let lemma = selectedLemmaCandidate() {
+                if primaryTerms.contains(lemma) == false {
+                    try Task.checkCancellation()
+                    let keys = DictionaryKeyPolicy.keys(forDisplayKey: lemma)
+                    if keys.lookupKey.isEmpty == false {
+                        let rows = try await DictionarySQLiteStore.shared.lookupExact(term: keys.lookupKey, limit: 100)
+                        for row in rows {
+                            if seen.insert(row.id).inserted {
+                                merged.append(row)
+                            }
+                        }
+                        if rows.isEmpty == false {
+                            selectedLemmaUsedForLookup = lemma
+                        }
+                    }
+                }
+            }
+
+            guard activeLoadRequestID == requestID else { return }
+            try Task.checkCancellation()
+
             // Display requirement: common entries should appear before non-common ones.
             // Preserve the existing relative order within each group.
             let mergedCommonFirst = merged.filter { $0.isCommon } + merged.filter { $0.isCommon == false }
             entries = mergedCommonFirst
             let details = await loadEntryDetails(for: mergedCommonFirst)
+
+            guard activeLoadRequestID == requestID else { return }
+            try Task.checkCancellation()
+
             let baseOrderedDetails: [DictionaryEntryDetail] = {
                 // Keep any existing ordering, but optionally push POS-matching senses higher.
                 if coarseTokenPOS() != nil {
@@ -1039,11 +1206,28 @@ struct WordDefinitionsView: View {
             // breakdown for compounds.
             await inferTokenPartsIfNeeded()
 
-            let sentenceTerms = sentenceLookupTerms(primaryTerms: terms, entryDetails: details)
+            guard activeLoadRequestID == requestID else { return }
+            try Task.checkCancellation()
+
+            // Example sentences are substring-matched. Prefer surface/lemma terms before kana so
+            // the initial terms don't get dominated by broad kana matches.
+            let sentencePrimaryTerms: [String] = {
+                var ordered: [String] = []
+                func add(_ value: String?) {
+                    guard let value else { return }
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed.isEmpty == false else { return }
+                    if ordered.contains(trimmed) == false { ordered.append(trimmed) }
+                }
+                add(primary)
+                add(selectedLemmaUsedForLookup)
+                add(secondary)
+                return ordered
+            }()
+
+            let sentenceTerms = sentenceLookupTerms(primaryTerms: sentencePrimaryTerms, entryDetails: details)
             do {
-                let sentences = try await Task.detached(priority: .utility) {
-                    try await DictionarySQLiteStore.shared.fetchExampleSentences(containing: sentenceTerms, limit: 8)
-                }.value
+                let sentences = try await DictionarySQLiteStore.shared.fetchExampleSentences(containing: sentenceTerms, limit: 8)
                 exampleSentences = sentences.sorted { lhs, rhs in
                     let ls = exampleSentenceComplexityScore(lhs)
                     let rs = exampleSentenceComplexityScore(rhs)
@@ -1058,10 +1242,12 @@ struct WordDefinitionsView: View {
             isLoadingExampleSentences = false
 
             isLoading = false
-            debugSQL = await Task.detached(priority: .utility) {
-                await DictionarySQLiteStore.shared.debugLastQueryDescription()
-            }.value
+            debugSQL = await DictionarySQLiteStore.shared.debugLastQueryDescription()
+        } catch is CancellationError {
+            // No-op: a new lookup superseded this one.
+            return
         } catch {
+            guard activeLoadRequestID == requestID else { return }
             entries = []
             entryDetails = []
             exampleSentences = []
@@ -1086,7 +1272,9 @@ struct WordDefinitionsView: View {
     }
 
     private func sentenceLookupTerms(primaryTerms: [String], entryDetails: [DictionaryEntryDetail]) -> [String] {
+        let shouldSuppressComponentTerms = tokenParts.count > 1
         let partTerms: Set<String> = {
+            guard shouldSuppressComponentTerms else { return [] }
             var s: Set<String> = []
             for part in tokenParts {
                 let surface = part.surface.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1102,7 +1290,7 @@ struct WordDefinitionsView: View {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.isEmpty == false else { return }
             // Avoid pulling in examples for component terms of a compound (e.g. 思考 + 回路).
-            guard partTerms.contains(trimmed) == false else { return }
+            if shouldSuppressComponentTerms, partTerms.contains(trimmed) { return }
             if out.contains(trimmed) == false { out.append(trimmed) }
         }
 
@@ -1458,10 +1646,17 @@ struct WordDefinitionsView: View {
         }
         guard inferredTokenParts.isEmpty else { return }
 
-        // Prefer the primary headword if we have one loaded.
+        // Prefer the user-selected surface for component splitting.
+        // Using the dictionary's primary headword can swap kana selections into kanji,
+        // which makes the Components display feel wrong (e.g. いつだって → 何時だって).
         let headword: String = {
+            let selected = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            if selected.isEmpty == false, containsJapaneseScript(selected) {
+                return selected
+            }
             if let first = entryDetails.first {
-                return primaryHeadword(for: first).trimmingCharacters(in: .whitespacesAndNewlines)
+                let fromDict = primaryHeadword(for: first).trimmingCharacters(in: .whitespacesAndNewlines)
+                if fromDict.isEmpty == false { return fromDict }
             }
             return titleText.trimmingCharacters(in: .whitespacesAndNewlines)
         }()
@@ -1487,7 +1682,7 @@ struct WordDefinitionsView: View {
         func lookupReading(surface: String) async -> String? {
             let keys = DictionaryKeyPolicy.keys(forDisplayKey: surface)
             guard keys.lookupKey.isEmpty == false else { return nil }
-            let rows: [DictionaryEntry] = (try? await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 1, mode: .japanese)) ?? []
+            let rows: [DictionaryEntry] = (try? await DictionarySQLiteStore.shared.lookupExact(term: keys.lookupKey, limit: 1, mode: .japanese)) ?? []
             return rows.first?.kana
         }
 

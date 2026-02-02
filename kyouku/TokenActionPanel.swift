@@ -1123,6 +1123,15 @@ private struct LookupResultsView: View {
             }
 
             HStack(spacing: 12) {
+                iconActionButton(
+                    systemImage: "speaker.wave.2",
+                    tint: .secondary,
+                    accessibilityLabel: "Speak"
+                ) {
+                    let speechText = showSurfaceReading ? surfaceReading : tokenSurface
+                    SpeechManager.shared.speak(text: speechText, language: "ja-JP")
+                }
+
                 if shouldShowApplyReadingButton {
                     iconActionButton(
                         systemImage: isActiveDictionaryReading ? "checkmark.circle.fill" : "checkmark.circle",

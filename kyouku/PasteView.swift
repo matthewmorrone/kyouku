@@ -1,6 +1,8 @@
 import SwiftUI
 import UIKit
 import Foundation
+import AVFoundation
+import UniformTypeIdentifiers
 
 struct PasteView: View {
     // NOTE: The semantic heatmap/constellation is intentionally disabled for now.
@@ -14,6 +16,9 @@ struct PasteView: View {
     @EnvironmentObject var tokenBoundaries: TokenBoundariesStore
     @Environment(\.undoManager) private var undoManager
     @Environment(\.appColorTheme) private var appColorTheme
+
+    @ObservedObject private var speech = SpeechManager.shared
+    @ObservedObject private var audioKaraoke = AudioKaraokeManager.shared
 
     @State var inputText: String = ""
     @State var currentNote: Note? = nil
@@ -44,6 +49,8 @@ struct PasteView: View {
     @State private var toastText: String? = nil
     @State private var toastDismissWorkItem: DispatchWorkItem? = nil
 
+    @State private var isAudioImporterPresented: Bool = false
+
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
     @State var incrementalPopupHits: [IncrementalLookupHit] = []
     @State var isIncrementalPopupVisible: Bool = false
@@ -67,13 +74,18 @@ struct PasteView: View {
     @State private var isConstellationSheetPresented: Bool = false
     @State private var constellationScrollToSelectedRangeToken: Int = 0
 
-    @State private var showWordDefinitionsSheet: Bool = false
-    @State private var wordDefinitionsSurface: String = ""
-    @State private var wordDefinitionsKana: String? = nil
-    @State private var wordDefinitionsContextSentence: String? = nil
-    @State private var wordDefinitionsLemmaCandidates: [String] = []
-    @State private var wordDefinitionsPartOfSpeech: String? = nil
-    @State private var wordDefinitionsTokenParts: [WordDefinitionsView.TokenPart] = []
+    private struct WordDefinitionsRequest: Identifiable, Hashable {
+        let id = UUID()
+        let surface: String
+        let kana: String?
+        let contextSentence: String?
+        let lemmaCandidates: [String]
+        let tokenPartOfSpeech: String?
+        let sourceNoteID: UUID?
+        let tokenParts: [WordDefinitionsView.TokenPart]
+    }
+
+    @State private var wordDefinitionsRequest: WordDefinitionsRequest? = nil
 
     var tokenSelection: TokenSelectionContext? {
         get { selectionController.tokenSelection }
@@ -237,20 +249,20 @@ struct PasteView: View {
         .onPreferenceChange(PasteAreaFramePreferenceKey.self) { newValue in
             pasteAreaFrame = sanitizeGeometryRect(newValue)
         }
-        .sheet(isPresented: $showWordDefinitionsSheet, onDismiss: {
+        .sheet(item: $wordDefinitionsRequest, onDismiss: {
             // When the dictionary details sheet is dismissed, also clear the
             // token selection in the paste area so the highlight goes away.
             clearSelection(resetPersistent: true)
-        }) {
+        }) { request in
             NavigationStack {
                 WordDefinitionsView(
-                    surface: wordDefinitionsSurface,
-                    kana: wordDefinitionsKana,
-                    contextSentence: wordDefinitionsContextSentence,
-                    lemmaCandidates: wordDefinitionsLemmaCandidates,
-                    tokenPartOfSpeech: wordDefinitionsPartOfSpeech,
-                    sourceNoteID: currentNote?.id,
-                    tokenParts: wordDefinitionsTokenParts
+                    surface: request.surface,
+                    kana: request.kana,
+                    contextSentence: request.contextSentence,
+                    lemmaCandidates: request.lemmaCandidates,
+                    tokenPartOfSpeech: request.tokenPartOfSpeech,
+                    sourceNoteID: request.sourceNoteID,
+                    tokenParts: request.tokenParts
                 )
             }
         }
@@ -268,7 +280,151 @@ struct PasteView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { coreToolbar }
+            .toolbar {
+                coreToolbar
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        // Don't overlap TTS and audio playback.
+                        AudioKaraokeManager.shared.stop(sessionID: noteAudioSessionID)
+                        SpeechManager.shared.togglePlayPause(
+                            sessionID: noteSpeechSessionID,
+                            text: inputText,
+                            language: "ja-JP"
+                        )
+                    } label: {
+                        Image(systemName: noteSpeechIsPlaying ? "pause.circle" : "play.circle")
+                    }
+                    .accessibilityLabel(noteSpeechIsPlaying ? "Pause reading" : (noteSpeechIsPaused ? "Resume reading" : "Read note"))
+                    .accessibilityHint("Speaks the entire note")
+                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .contextMenu {
+                        if let audioURL = noteAudioURL {
+                            Button {
+                                // Stop TTS if active.
+                                SpeechManager.shared.stop(sessionID: noteSpeechSessionID)
+                                Task {
+                                    await AudioKaraokeManager.shared.togglePlayPause(
+                                        sessionID: noteAudioSessionID,
+                                        audioURL: audioURL,
+                                        text: inputText,
+                                        languageCode: "ja-JP",
+                                        cacheURL: noteAudioAlignmentCacheURL
+                                    )
+                                    if AudioKaraokeManager.shared.isAligning {
+                                        showToast("Analyzing audio…")
+                                    } else if noteAudioIsPlaying {
+                                        showToast("Playing audio")
+                                    } else if noteAudioIsPaused {
+                                        showToast("Audio paused")
+                                    }
+                                }
+                            } label: {
+                                Label(noteAudioIsPlaying ? "Pause audio" : (noteAudioIsPaused ? "Resume audio" : "Play audio"), systemImage: "music.note")
+                            }
+
+                            Button(role: .destructive) {
+                                AudioKaraokeManager.shared.stop(sessionID: noteAudioSessionID)
+                                showToast("Audio stopped")
+                            } label: {
+                                Label("Stop audio", systemImage: "stop.circle")
+                            }
+                        }
+
+                        Button {
+                            isAudioImporterPresented = true
+                        } label: {
+                            Label(currentNote?.audioFilename == nil ? "Attach audio" : "Replace audio", systemImage: "paperclip")
+                        }
+
+                        Menu {
+                            Button {
+                                SpeechManager.shared.adjustRate(by: -0.05)
+                                showToast("Rate: \(SpeechManager.formatRate(SpeechManager.shared.preferredRate))")
+                            } label: {
+                                Label("Slower", systemImage: "tortoise")
+                            }
+                            Button {
+                                SpeechManager.shared.adjustRate(by: 0.05)
+                                showToast("Rate: \(SpeechManager.formatRate(SpeechManager.shared.preferredRate))")
+                            } label: {
+                                Label("Faster", systemImage: "hare")
+                            }
+                            Button {
+                                SpeechManager.shared.preferredRate = AVSpeechUtteranceDefaultSpeechRate
+                                showToast("Rate reset")
+                            } label: {
+                                Label("Reset", systemImage: "arrow.counterclockwise")
+                            }
+                        } label: {
+                            Label("Rate", systemImage: "speedometer")
+                        }
+
+                        Menu {
+                            Button {
+                                SpeechManager.shared.adjustPitch(by: -0.1)
+                                showToast("Pitch: \(SpeechManager.formatPitch(SpeechManager.shared.preferredPitch))")
+                            } label: {
+                                Label("Lower", systemImage: "arrow.down")
+                            }
+                            Button {
+                                SpeechManager.shared.adjustPitch(by: 0.1)
+                                showToast("Pitch: \(SpeechManager.formatPitch(SpeechManager.shared.preferredPitch))")
+                            } label: {
+                                Label("Higher", systemImage: "arrow.up")
+                            }
+                            Button {
+                                SpeechManager.shared.preferredPitch = 1.0
+                                showToast("Pitch reset")
+                            } label: {
+                                Label("Reset", systemImage: "arrow.counterclockwise")
+                            }
+                        } label: {
+                            Label("Pitch", systemImage: "waveform")
+                        }
+
+                        Menu {
+                            Button {
+                                SpeechManager.shared.setPreferredVoiceIdentifier(nil)
+                                showToast("Voice: Japanese default")
+                            } label: {
+                                Label("Japanese default", systemImage: "person.crop.circle")
+                            }
+
+                            let voices = SpeechManager.shared.availableVoices(language: "ja-JP")
+                            if voices.isEmpty {
+                                Text("No Japanese voices")
+                            } else {
+                                ForEach(voices) { v in
+                                    Button {
+                                        SpeechManager.shared.setPreferredVoiceIdentifier(v.identifier)
+                                        showToast("Voice: \(v.name)")
+                                    } label: {
+                                        if SpeechManager.shared.preferredVoiceIdentifier == v.identifier {
+                                            Label(v.name, systemImage: "checkmark")
+                                        } else {
+                                            Text(v.name)
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("Voice", systemImage: "speaker.wave.2")
+                        }
+
+                        Button {
+                            SpeechManager.shared.resetSpeechIndicator(sessionID: noteSpeechSessionID)
+                            showToast("Speech indicator reset")
+                        } label: {
+                            Label("Reset indicator", systemImage: "sparkles")
+                        }
+                        Button(role: .destructive) {
+                            SpeechManager.shared.stop(sessionID: noteSpeechSessionID)
+                        } label: {
+                            Label("Stop", systemImage: "stop.circle")
+                        }
+                    }
+                }
+            }
             .overlay {
                 if isTitleEditAlertPresented {
                     titleEditModal
@@ -280,9 +436,24 @@ struct PasteView: View {
             .onDisappear {
                 NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
                 furiganaTaskHandle?.cancel()
+                SpeechManager.shared.stop(sessionID: noteSpeechSessionID)
+                AudioKaraokeManager.shared.stop(sessionID: noteAudioSessionID)
             }
 
-        let inputHandling = base
+        let audioImporter = base
+            .fileImporter(
+                isPresented: $isAudioImporterPresented,
+                allowedContentTypes: [UTType.audio]
+            ) { result in
+                switch result {
+                case .success(let url):
+                    attachAudioFromImportedURL(url)
+                case .failure:
+                    showToast("Audio import cancelled")
+                }
+            }
+
+        let inputHandling = audioImporter
             .onChange(of: inputText) { _, newValue in
                 skipNextInitialFuriganaEnsure = false
                 clearSelection()
@@ -304,7 +475,7 @@ struct PasteView: View {
                 }
                 triggerFuriganaRefreshIfNeeded(reason: "input changed", recomputeSpans: true)
             }
-            .onChange(of: isEditing) { _, editing in
+            .onChange(of: isEditing) { oldValue, editing in
                 if editing {
                     clearSelection()
                 }
@@ -329,14 +500,14 @@ struct PasteView: View {
             .onChange(of: wrapLines) { _, enabled in
                 showToast(enabled ? "Wrapped lines" : "Single-line layout")
             }
-            .onChange(of: alternateTokenColors) { _, enabled in
+            .onChange(of: alternateTokenColors) { oldValue, enabled in
                 triggerFuriganaRefreshIfNeeded(
                     reason: enabled ? "alternate token colors toggled on" : "alternate token colors toggled off",
                     recomputeSpans: false
                 )
                 showToast(enabled ? "Alternate token colors enabled" : "Alternate token colors disabled")
             }
-            .onChange(of: highlightUnknownTokens) { _, enabled in
+            .onChange(of: highlightUnknownTokens) { oldValue, enabled in
                 triggerFuriganaRefreshIfNeeded(
                     reason: enabled ? "unknown highlight toggled on" : "unknown highlight toggled off",
                     recomputeSpans: false
@@ -513,7 +684,14 @@ struct PasteView: View {
 
     private var editorColumn: some View {
         // Precompute helpers outside of the ViewBuilder to avoid non-View statements inside VStack
-        let extraOverlays: [RubyText.TokenOverlay] = incrementalLookupEnabled ? savedWordOverlays : []
+        let speechOverlay = noteSpeechOverlay(for: inputText)
+        let extraOverlays: [RubyText.TokenOverlay] = {
+            var overlays: [RubyText.TokenOverlay] = incrementalLookupEnabled ? savedWordOverlays : []
+            if let speechOverlay {
+                overlays.append(speechOverlay)
+            }
+            return overlays
+        }()
 
         let spanSelectionHandler: ((RubySpanSelection?) -> Void)? = { selection in
             if incrementalLookupEnabled {
@@ -1259,6 +1437,118 @@ struct PasteView: View {
         currentNote?.id ?? scratchNoteID
     }
 
+    private var noteSpeechSessionID: String {
+        "paste-note:\(activeNoteID.uuidString)"
+    }
+
+    private var noteAudioSessionID: String {
+        "paste-audio:\(activeNoteID.uuidString)"
+    }
+
+    private var isNoteAudioActive: Bool {
+        audioKaraoke.activeSessionID == noteAudioSessionID
+    }
+
+    private var noteAudioIsPlaying: Bool {
+        isNoteAudioActive && audioKaraoke.isPlaying
+    }
+
+    private var noteAudioIsPaused: Bool {
+        isNoteAudioActive && audioKaraoke.isPaused
+    }
+
+    private var noteAudioURL: URL? {
+        guard let filename = currentNote?.audioFilename, filename.isEmpty == false else { return nil }
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("note-audio", isDirectory: true).appendingPathComponent(filename)
+    }
+
+    private var noteAudioAlignmentCacheURL: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs
+            .appendingPathComponent("note-audio-alignments", isDirectory: true)
+            .appendingPathComponent("\(activeNoteID.uuidString).json")
+    }
+
+    private var isNoteSpeechActive: Bool {
+        speech.activeSessionID == noteSpeechSessionID
+    }
+
+    private var noteSpeechIsPlaying: Bool {
+        isNoteSpeechActive && speech.isSpeaking && speech.isPaused == false
+    }
+
+    private var noteSpeechIsPaused: Bool {
+        isNoteSpeechActive && speech.isSpeaking && speech.isPaused
+    }
+
+    private func noteSpeechOverlay(for text: String) -> RubyText.TokenOverlay? {
+        if isNoteAudioActive, let range = audioKaraoke.currentSpokenRange {
+            return tokenOverlay(for: text, range: range)
+        }
+
+        guard isNoteSpeechActive else { return nil }
+        guard let range = speech.currentSpokenRange else { return nil }
+        return tokenOverlay(for: text, range: range)
+    }
+
+    private func tokenOverlay(for text: String, range: NSRange) -> RubyText.TokenOverlay? {
+        let ns = text as NSString
+        guard range.location != NSNotFound, range.length > 0 else { return nil }
+        guard NSMaxRange(range) <= ns.length else { return nil }
+        let snippet = ns.substring(with: range)
+        guard snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return nil }
+
+        // `TokenOverlay` maps to `.foregroundColor` (not background highlight),
+        // so choose a high-contrast color that stays readable in dark mode.
+        let color = UIColor.systemOrange
+        return RubyText.TokenOverlay(range: range, color: color)
+    }
+
+    private func attachAudioFromImportedURL(_ url: URL) {
+        guard inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            showToast("Add text first")
+            return
+        }
+
+        // Ensure we have a persisted note to attach the audio to.
+        if currentNote == nil {
+            saveNote()
+        }
+        guard var note = currentNote else {
+            showToast("Save note first")
+            return
+        }
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess { url.stopAccessingSecurityScopedResource() }
+        }
+
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = docs.appendingPathComponent("note-audio", isDirectory: true)
+
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let ext = url.pathExtension.isEmpty ? "m4a" : url.pathExtension
+            let filename = "\(note.id.uuidString).\(ext)"
+            let dest = dir.appendingPathComponent(filename)
+
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.copyItem(at: url, to: dest)
+
+            note.audioFilename = filename
+            notes.updateNote(note)
+            currentNote = note
+
+            showToast("Audio attached")
+        } catch {
+            showToast("Audio attach failed")
+        }
+    }
+
     func clearSelection(resetPersistent: Bool = true) {
         CustomLogger.shared.debug("Clearing selection resetPersistent=\(resetPersistent)")
         let hadSelection = selectionController.tokenSelection != nil
@@ -1494,13 +1784,15 @@ struct PasteView: View {
     }
 
     private func presentWordDefinitions(for selection: TokenSelectionContext) {
-        wordDefinitionsSurface = selection.surface
-        wordDefinitionsKana = normalizedReading(preferredReadingForSelection(selection))
-        wordDefinitionsLemmaCandidates = selection.annotatedSpan.lemmaCandidates
-        wordDefinitionsPartOfSpeech = selection.annotatedSpan.partOfSpeech
-        wordDefinitionsContextSentence = SentenceContextExtractor.sentence(containing: selection.range, in: inputText)?.sentence
-        wordDefinitionsTokenParts = tokenPartsForSelection(selection)
-        showWordDefinitionsSheet = true
+        wordDefinitionsRequest = WordDefinitionsRequest(
+            surface: selection.surface,
+            kana: normalizedReading(preferredReadingForSelection(selection)),
+            contextSentence: SentenceContextExtractor.sentence(containing: selection.range, in: inputText)?.sentence,
+            lemmaCandidates: selection.annotatedSpan.lemmaCandidates,
+            tokenPartOfSpeech: selection.annotatedSpan.partOfSpeech,
+            sourceNoteID: currentNote?.id,
+            tokenParts: tokenPartsForSelection(selection)
+        )
     }
 
     private func tokenPartsForSelection(_ selection: TokenSelectionContext) -> [WordDefinitionsView.TokenPart] {

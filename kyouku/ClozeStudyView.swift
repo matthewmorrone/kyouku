@@ -44,7 +44,7 @@ struct ClozeStudyView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Cloze")
+                Text("Study")
                     .font(.headline)
                 Spacer()
                 Picker("Mode", selection: $model.mode) {
