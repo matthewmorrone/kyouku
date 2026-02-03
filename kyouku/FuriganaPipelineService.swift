@@ -1,6 +1,26 @@
 import Foundation
+import UIKit
 
 struct FuriganaPipelineService {
+    private static let tailMergeDeinflectionCache = DeinflectionCache()
+
+    #if DEBUG
+    // Debug-only: helps verify whether overlap coverage counts (>1) are ever produced.
+    // Dedupes logging to avoid spamming while typing/scrolling.
+    private static var lastDebugDictionaryCoverageLogFingerprint: Int?
+    #endif
+
+    private static let debugHighlightAllDictionaryEntriesDefaultsKey = "debugHighlightAllDictionaryEntries"
+
+    private static func debugHighlightAllDictionaryEntriesEnabled() -> Bool {
+    #if DEBUG
+        if ProcessInfo.processInfo.environment["DEBUG_HIGHLIGHT_ALL_DICT_ENTRIES"] == "1" { return true }
+        return UserDefaults.standard.bool(forKey: debugHighlightAllDictionaryEntriesDefaultsKey)
+    #else
+        return false
+    #endif
+    }
+
     private static func foldKanaToHiragana(_ value: String) -> String {
         value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
     }
@@ -95,11 +115,24 @@ struct FuriganaPipelineService {
         // Newlines are hard boundaries for selection + dictionary lookup.
         let resolvedSemantic = Self.splitSemanticSpansOnLineBreaks(text: input.text, spans: semantic)
 
-        let attributed: NSAttributedString?
+        // Tail-end post pass: attempt to merge adjacent semantic spans into a single
+        // lexicon-valid surface form when safe.
+        //
+        // This is intentionally *not* Stage 1 logic; it runs after the current
+        // pipeline iteration has produced semantic spans and exists to reduce
+        // over-segmentation that can remain even after Stage 2.5 regrouping.
+        let mergedSemantic = await Self.mergeAdjacentSemanticSpansIfValid(
+            text: input.text,
+            spans: resolvedSemantic,
+            hardCuts: input.hardCuts,
+            context: input.context
+        )
+
+        var attributed: NSAttributedString?
         if input.showFurigana {
             let projected = FuriganaAttributedTextBuilder.project(
                 text: input.text,
-                semanticSpans: resolvedSemantic,
+                semanticSpans: mergedSemantic,
                 textSize: input.textSize,
                 furiganaSize: input.furiganaSize,
                 context: input.context,
@@ -110,7 +143,7 @@ struct FuriganaPipelineService {
             } else {
                 attributed = stripRubyForKnownSemanticSpans(
                     attributed: projected,
-                    semanticSpans: resolvedSemantic,
+                    semanticSpans: mergedSemantic,
                     stage2Spans: resolvedSpans,
                     knownSurfaceKeys: input.knownWordSurfaceKeys
                 )
@@ -119,7 +152,398 @@ struct FuriganaPipelineService {
             attributed = nil
         }
 
-        return Result(spans: resolvedSpans, semanticSpans: resolvedSemantic, attributedString: attributed)
+        if Self.debugHighlightAllDictionaryEntriesEnabled() {
+            if attributed == nil {
+                attributed = NSAttributedString(string: input.text)
+            }
+            if let base = attributed {
+                let cachedTrie = await SegmentationService.shared.cachedTrieIfAvailable()
+                let trie: LexiconTrie?
+                if let cachedTrie {
+                    trie = cachedTrie
+                } else {
+                    trie = await SegmentationService.shared.ensureTrieLoaded()
+                }
+                if let trie {
+                    attributed = Self.applyDebugDictionaryEntryHighlights(text: input.text, to: base, trie: trie)
+                }
+            }
+        }
+
+        return Result(spans: resolvedSpans, semanticSpans: mergedSemantic, attributedString: attributed)
+    }
+
+    private static func applyDebugDictionaryEntryHighlights(
+        text: String,
+        to base: NSAttributedString,
+        trie: LexiconTrie
+    ) -> NSAttributedString {
+        let nsText = text as NSString
+        guard nsText.length > 0 else { return base }
+
+        let mutable = NSMutableAttributedString(attributedString: base)
+
+        var globalMaxCoverage = 0
+        var globalOverlapUnits = 0
+        var firstOverlapExampleRange: NSRange?
+
+        // Assume words never cross line boundaries: scan each line independently.
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        nsText.enumerateSubstrings(in: fullRange, options: [.byLines, .substringNotRequired]) { _, lineRange, _, _ in
+            let lineStart = lineRange.location
+            let lineEnd = NSMaxRange(lineRange)
+            let lineLen = lineEnd - lineStart
+            guard lineLen > 0 else { return }
+
+            var coverage: [Int] = Array(repeating: 0, count: lineLen)
+            coverage.reserveCapacity(lineLen)
+
+            func bumpCoverage(localStart: Int, localEnd: Int) {
+                guard localStart >= 0, localEnd <= lineLen, localEnd > localStart else { return }
+                for idx in localStart..<localEnd {
+                    coverage[idx] += 1
+                }
+            }
+
+            // Iterate by composed character sequences to avoid starting inside surrogate pairs.
+            var cursor = lineStart
+            while cursor < lineEnd {
+                let r = nsText.rangeOfComposedCharacterSequence(at: cursor)
+                if r.length == 0 { break }
+                let start = r.location
+
+                // Skip obvious whitespace (within line).
+                let ch = nsText.substring(with: r)
+                if ch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    cursor = NSMaxRange(r)
+                    continue
+                }
+
+                let ends = trie.allMatchEnds(in: nsText, from: start, requireKanji: false)
+                for end in ends {
+                    guard end <= lineEnd else { continue }
+                    bumpCoverage(localStart: start - lineStart, localEnd: end - lineStart)
+                }
+
+                cursor = NSMaxRange(r)
+            }
+
+            if let lineMax = coverage.max() {
+                globalMaxCoverage = max(globalMaxCoverage, lineMax)
+            }
+            for v in coverage {
+                if v >= 2 { globalOverlapUnits += 1 }
+            }
+
+            if firstOverlapExampleRange == nil {
+                var i = 0
+                while i < coverage.count {
+                    if coverage[i] >= 2 {
+                        var j = i + 1
+                        while j < coverage.count, coverage[j] >= 2 {
+                            j += 1
+                        }
+                        firstOverlapExampleRange = NSRange(location: lineStart + i, length: j - i)
+                        break
+                    }
+                    i += 1
+                }
+            }
+
+            func maxCoverage(in utf16Range: NSRange) -> Int {
+                let localStart = max(0, utf16Range.location - lineStart)
+                let localEnd = min(lineLen, NSMaxRange(utf16Range) - lineStart)
+                guard localEnd > localStart else { return 0 }
+                var m = 0
+                for idx in localStart..<localEnd {
+                    m = max(m, coverage[idx])
+                }
+                return m
+            }
+
+            // Apply underline segments, grouped by composed character boundaries.
+            var segCursor = lineStart
+            var segStart = lineStart
+            var segCount = 0
+            var first = true
+
+            while segCursor < lineEnd {
+                let r = nsText.rangeOfComposedCharacterSequence(at: segCursor)
+                if r.length == 0 { break }
+                let c = maxCoverage(in: r)
+
+                if first {
+                    segStart = r.location
+                    segCount = c
+                    first = false
+                } else if c != segCount {
+                    if segCount > 0 {
+                        let range = NSRange(location: segStart, length: segCursor - segStart)
+                        if range.length > 0, NSMaxRange(range) <= mutable.length {
+                            // Store coverage as an attribute and let the renderer decide
+                            // how to visualize it (e.g. circled/outlined spans).
+                            mutable.addAttribute(DebugDictionaryHighlighting.coverageLevelAttribute, value: segCount, range: range)
+                        }
+                    }
+                    segStart = r.location
+                    segCount = c
+                }
+
+                segCursor = NSMaxRange(r)
+            }
+
+            if first == false, segCount > 0 {
+                let range = NSRange(location: segStart, length: lineEnd - segStart)
+                if range.length > 0, NSMaxRange(range) <= mutable.length {
+                    mutable.addAttribute(DebugDictionaryHighlighting.coverageLevelAttribute, value: segCount, range: range)
+                }
+            }
+        }
+
+        #if DEBUG
+        // Print a short summary so we can confirm whether overlaps are being produced at all.
+        // This is intentionally very low-noise and deduped.
+        let fingerprint = text.hashValue ^ (globalMaxCoverage << 8) ^ globalOverlapUnits
+        if lastDebugDictionaryCoverageLogFingerprint != fingerprint {
+            lastDebugDictionaryCoverageLogFingerprint = fingerprint
+            if globalMaxCoverage <= 1 {
+                print("DebugDictionaryHighlighting: maxCoverage=1 (no overlaps detected), overlapUnits=0")
+            } else {
+                if let r = firstOverlapExampleRange, r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= nsText.length {
+                    let raw = nsText.substring(with: r)
+                    let sample = raw.count > 24 ? String(raw.prefix(24)) + "…" : raw
+                    print("DebugDictionaryHighlighting: maxCoverage=\(globalMaxCoverage), overlapUnits=\(globalOverlapUnits), example=\(sample) r=\(r.location)-\(NSMaxRange(r))")
+                } else {
+                    print("DebugDictionaryHighlighting: maxCoverage=\(globalMaxCoverage), overlapUnits=\(globalOverlapUnits)")
+                }
+            }
+        }
+        #endif
+
+        return mutable
+    }
+
+    private static func mergeAdjacentSemanticSpansIfValid(
+        text: String,
+        spans: [SemanticSpan],
+        hardCuts: [Int],
+        context: String
+    ) async -> [SemanticSpan] {
+        guard spans.count >= 2 else { return spans }
+
+        let traceEnabled: Bool = {
+    #if DEBUG
+            return true
+    #else
+            return ProcessInfo.processInfo.environment["PIPELINE_TRACE"] == "1" || UserDefaults.standard.bool(forKey: "debugPipelineTrace")
+    #endif
+        }()
+
+        // Only attempt lexicon validation if the in-memory trie is already warm.
+        // This must not trigger bootstrap work or touch SQLite.
+        let trie = await SegmentationService.shared.cachedTrieIfAvailable()
+        guard let trie else { return spans }
+
+        let nsText = text as NSString
+        let hardCutSet = Set(hardCuts)
+
+        func canJoinBoundary(at utf16Offset: Int) -> Bool {
+            // Respect explicit user boundaries.
+            if hardCutSet.contains(utf16Offset) { return false }
+            return true
+        }
+
+        func mergedSourceSpanIndices(_ a: Range<Int>, _ b: Range<Int>) -> Range<Int> {
+            let lower = min(a.lowerBound, b.lowerBound)
+            let upper = max(a.upperBound, b.upperBound)
+            return lower..<upper
+        }
+
+        func describeSemanticSpans(_ value: [SemanticSpan]) -> String {
+            value.enumerated().map { idx, span in
+                let start = span.range.location
+                let end = NSMaxRange(span.range)
+                let reading = span.readingKana ?? "-"
+                return "\(idx): \(start)-\(end) «\(span.surface)» src=\(span.sourceSpanIndices.lowerBound)..<\(span.sourceSpanIndices.upperBound) r=\(reading)"
+            }.joined(separator: "\n")
+        }
+
+        // Heuristic: allow merges that form common auxiliary verb chains
+        // (even if the whole surface is not a standalone lexicon entry).
+        // This targets tail-end over-segmentation like: 見て + いる -> 見ている.
+        // Keep it conservative: no whitespace/punctuation, capped length.
+        let auxiliarySuffixes: [String] = [
+            "ている", "でいる", "てた", "でた", "ていた", "でいた", "てました", "でました", "てます", "でます", "ています", "でいます", "ていました", "でいました",
+            "てしまう", "てしまった", "てしまいます", "てしまいました",
+            "ておく", "ておいた", "ておきます", "ておきました",
+            "てみる", "てみた", "てみます", "てみました",
+            "てくる", "てきた", "てきます", "てきました",
+            "ていく", "ていった", "ていきます", "ていきました",
+            "てください"
+        ]
+
+        func isHeuristicallyMergeableSurface(_ surface: String, candidateUtf16Length: Int) -> Bool {
+            if candidateUtf16Length <= 0 { return false }
+            if candidateUtf16Length > 24 { return false }
+            if surface.rangeOfCharacter(from: .whitespacesAndNewlines) != nil { return false }
+
+            // Avoid merging across punctuation/symbols with the heuristic.
+            if surface.rangeOfCharacter(from: CharacterSet.punctuationCharacters.union(.symbols)) != nil {
+                return false
+            }
+
+            return auxiliarySuffixes.contains { surface.hasSuffix($0) }
+        }
+
+        // Memoize expensive checks within this call.
+        var surfaceIsMergeableCache: [String: Bool] = [:]
+        surfaceIsMergeableCache.reserveCapacity(min(512, spans.count * 8))
+
+        func isMergeableSurface(_ surface: String) async -> Bool {
+            if let cached = surfaceIsMergeableCache[surface] { return cached }
+
+            // Mirror the dictionary's normalization for ASCII fullwidth characters.
+            let normalizedForLexicon = DictionaryKeyPolicy.normalizeFullWidthASCII(surface)
+
+            if trie.containsWord(surface, requireKanji: false) ||
+                (normalizedForLexicon != surface && trie.containsWord(normalizedForLexicon, requireKanji: false)) {
+                surfaceIsMergeableCache[surface] = true
+                return true
+            }
+
+            // More aggressive: allow merges when the combined surface can deinflect
+            // to a lexicon-valid base form. This is what enables merges like
+            // "食べ"+"ました" -> "食べました" (then lookup deinflects to "食べる").
+            //
+            // Keep this lightweight by using a per-session cache and bounded outputs.
+            let candidates = await tailMergeDeinflectionCache.candidates(for: normalizedForLexicon, maxDepth: 6, maxResults: 24)
+            for cand in candidates {
+                let base = cand.baseForm
+                if trie.containsWord(base, requireKanji: false) {
+                    surfaceIsMergeableCache[surface] = true
+                    return true
+                }
+                let normalizedBase = DictionaryKeyPolicy.normalizeFullWidthASCII(base)
+                if normalizedBase != base && trie.containsWord(normalizedBase, requireKanji: false) {
+                    surfaceIsMergeableCache[surface] = true
+                    return true
+                }
+            }
+
+            surfaceIsMergeableCache[surface] = false
+            return false
+        }
+
+        // Greedy lookahead: for each i, find the longest j>i where spans[i..<j]
+        // form a lexicon word, then merge that run.
+        var out: [SemanticSpan] = []
+        out.reserveCapacity(spans.count)
+
+        var mergedRuns = 0
+
+        var i = 0
+        while i < spans.count {
+            let start = spans[i]
+            if i == spans.count - 1 {
+                out.append(start)
+                break
+            }
+
+            // Disallow merging if the current span is degenerate.
+            if start.range.location == NSNotFound || start.range.length <= 0 {
+                out.append(start)
+                i += 1
+                continue
+            }
+
+            let startLoc = start.range.location
+            var bestEndExclusive: Int? = nil
+            var bestRange: NSRange? = nil
+            var bestReading: String? = nil
+            var bestSourceIndices: Range<Int>? = nil
+
+            var currentEnd = NSMaxRange(start.range)
+            var currentReading = start.readingKana
+            var currentIndices = start.sourceSpanIndices
+
+            // Cap lookahead using trie max word length.
+            let maxUtf16Len = trie.maxLexiconWordLength
+
+            var j = i + 1
+            while j < spans.count {
+                let next = spans[j]
+                guard next.range.location != NSNotFound, next.range.length > 0 else { break }
+
+                // Must be contiguous.
+                if currentEnd != next.range.location { break }
+
+                // Respect explicit boundaries at the join.
+                if canJoinBoundary(at: next.range.location) == false { break }
+
+                let candidateEnd = NSMaxRange(next.range)
+                let candidateLen = candidateEnd - startLoc
+                if candidateLen > maxUtf16Len { break }
+
+                let candidateRange = NSRange(location: startLoc, length: candidateLen)
+                let candidateSurface = nsText.substring(with: candidateRange)
+                if isEffectivelyEmptyTokenSurface(candidateSurface) {
+                    break
+                }
+
+                // Reading: only preserve if all pieces have a reading.
+                if let r = currentReading, let nr = next.readingKana {
+                    currentReading = r + nr
+                } else {
+                    currentReading = nil
+                }
+                currentIndices = mergedSourceSpanIndices(currentIndices, next.sourceSpanIndices)
+
+                let lexiconOk = await isMergeableSurface(candidateSurface)
+                let heuristicOk = isHeuristicallyMergeableSurface(candidateSurface, candidateUtf16Length: candidateLen)
+                if lexiconOk || heuristicOk {
+                    bestEndExclusive = j + 1
+                    bestRange = candidateRange
+                    bestReading = currentReading
+                    bestSourceIndices = currentIndices
+                }
+
+                currentEnd = candidateEnd
+                j += 1
+            }
+
+            if let endExclusive = bestEndExclusive,
+               let range = bestRange,
+               let sourceIndices = bestSourceIndices,
+               endExclusive > i + 1 {
+                let surface = nsText.substring(with: range)
+                out.append(
+                    SemanticSpan(
+                        range: range,
+                        surface: surface,
+                        sourceSpanIndices: sourceIndices,
+                        readingKana: bestReading
+                    )
+                )
+                mergedRuns += 1
+                i = endExclusive
+            } else {
+                out.append(start)
+                i += 1
+            }
+        }
+
+        let mergedSpansDelta = spans.count - out.count
+        if traceEnabled, mergedSpansDelta > 0 {
+            let full = "[PipelineTailMerge] runs=\(mergedRuns) delta=\(mergedSpansDelta) spans \(spans.count)->\(out.count) context=\(context)"
+            CustomLogger.shared.debug(full)
+            NSLog("%@", full)
+
+            // User-requested: full post-pass dump.
+            // Keep it on NSLog to avoid duplicating huge output in multiple sinks.
+            NSLog("%@", "[PipelineTailMergeDump after] context=\(context)\n\(describeSemanticSpans(out))")
+        }
+
+        return out
     }
 
     private func stripRubyForKnownSemanticSpans(

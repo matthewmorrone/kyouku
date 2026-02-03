@@ -5,6 +5,7 @@ import UIKit
 struct FuriganaRenderingHost: View {
     @AppStorage("readingFontName") private var readingFontName: String = ""
     @AppStorage("readingDistinctKanaKanjiFonts") private var readingDistinctKanaKanjiFonts: Bool = false
+    @AppStorage("readingRubyBaselineGap") private var readingRubyBaselineGap: Double = 0.5
     @State private var scrollSyncGroupID: String = UUID().uuidString
 
     @Binding var text: String
@@ -98,7 +99,7 @@ struct FuriganaRenderingHost: View {
 
     private func rubyMetrics(baseFont: UIFont) -> (rubyHeadroom: CGFloat, effectiveLineSpacing: CGFloat) {
         let extraGap = CGFloat(max(0, lineSpacing))
-        let rubyBaselineGap = max(0.5, extraGap * 0.12)
+        let rubyBaselineGap = max(0, CGFloat(readingRubyBaselineGap))
         let defaultRubyFontSize = max(1, CGFloat(textSize) * 0.6)
         let attributed = resolvedAttributedText
 
@@ -244,6 +245,7 @@ struct FuriganaRenderingHost: View {
                     attributed: attributed,
                     fontSize: CGFloat(textSize),
                     extraGap: CGFloat(max(0, lineSpacing)),
+                    rubyBaselineGap: CGFloat(readingRubyBaselineGap),
                     textInsets: insets,
                     distinctKanaKanjiFonts: readingDistinctKanaKanjiFonts
                 )
@@ -258,6 +260,7 @@ struct FuriganaRenderingHost: View {
             fontSize: CGFloat(textSize),
             lineHeightMultiple: 1.0,
             extraGap: CGFloat(max(0, lineSpacing)),
+            rubyBaselineGap: CGFloat(readingRubyBaselineGap),
             textInsets: insets,
             bottomOverlayHeight: bottomObstruction,
             annotationVisibility: annotationVisibility,

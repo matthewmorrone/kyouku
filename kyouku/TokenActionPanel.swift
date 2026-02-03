@@ -592,22 +592,26 @@ private struct LookupResultsView: View {
         }
     }
 
-    // Stable snapshot the UI should render. This stays unchanged while a new lookup is resolving.
-    private var presented: DictionaryLookupViewModel.PresentedLookup? {
-        lookup.presented
+    // Stable snapshot the UI should render, scoped to the current selection.
+    // Without scoping, the inline panel can briefly show stale results (or "No matches")
+    // while a new selection is resolving.
+    private var presentedForSelection: DictionaryLookupViewModel.PresentedLookup? {
+        guard let snapshot = lookup.presented, snapshot.requestID == selection.id else { return nil }
+        return snapshot
     }
 
-    private var effectiveSelection: TokenSelectionContext {
-        presented?.selection ?? selection
+    private var isResolvingSelection: Bool {
+        if case .resolving(let requestID) = lookup.phase {
+            return requestID == selection.id
+        }
+        return false
     }
 
-    private var effectiveResults: [DictionaryEntry] {
-        presented?.results ?? []
-    }
+    private var effectiveSelection: TokenSelectionContext { presentedForSelection?.selection ?? selection }
 
-    private var effectiveError: String? {
-        presented?.errorMessage
-    }
+    private var effectiveResults: [DictionaryEntry] { presentedForSelection?.results ?? [] }
+
+    private var effectiveError: String? { presentedForSelection?.errorMessage }
 
     private var pagingState: PagingState? {
         guard let highlighted = highlightedEntry else { return nil }
@@ -638,7 +642,17 @@ private struct LookupResultsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let error = effectiveError, error.isEmpty == false {
+            if isResolvingSelection {
+                statusCard {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Looking up \(effectiveSelection.surface)…")
+                            .foregroundStyle(.secondary)
+                            .font(.subheadline)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+            } else if let error = effectiveError, error.isEmpty == false {
                 statusCard {
                     Text(error)
                         .foregroundStyle(.secondary)
@@ -948,14 +962,10 @@ private struct LookupResultsView: View {
         highlightedEntryDetailTask?.cancel()
         highlightedEntryDetail = nil
 
-        // Defer detail fetch while a different request is in-flight.
-        // We keep showing the last `presented` snapshot during `.resolving`; avoid fetching
-        // details that are likely to be replaced moments later.
-        if case .resolving(let active) = lookup.phase,
-           let presentedID = presented?.requestID,
-           active != presentedID {
-            return
-        }
+        // Defer detail fetch while the lookup for this selection is in-flight.
+        // The panel shows a loading state during `.resolving`, so fetching details would
+        // be wasted work and can race against a soon-to-arrive result set.
+        if isResolvingSelection { return }
 
         guard let entry = highlightedEntry?.entry else { return }
         let entryID = entry.entryID

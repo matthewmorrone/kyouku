@@ -29,6 +29,21 @@ struct SpanReadingAttacher {
         let semanticSpans: [SemanticSpan]
     }
 
+    /// Materialize the MeCab token stream for the full input text.
+    ///
+    /// This is a pure in-memory operation. Callers may reuse this output across
+    /// multiple pipeline stages (e.g. Stage 1.5 + Stage 2) to avoid tokenizing
+    /// the same text more than once.
+    static func materializeAnnotations(text: String, tokenizer: Tokenizer) -> [MeCabAnnotation] {
+        tokenizer.tokenize(text: text).compactMap { annotation -> MeCabAnnotation? in
+            let nsRange = NSRange(annotation.range, in: text)
+            guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
+            let surface = String(text[annotation.range])
+            let pos = String(describing: annotation.partOfSpeech)
+            return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm, partOfSpeech: pos)
+        }
+    }
+
     func attachReadings(text: String, spans: [TextSpan]) async -> [AnnotatedSpan] {
         let result = await attachReadings(text: text, spans: spans, treatSpanBoundariesAsAuthoritative: false, hardCuts: [])
         return result.annotatedSpans
@@ -53,7 +68,8 @@ struct SpanReadingAttacher {
         text: String,
         spans: [TextSpan],
         treatSpanBoundariesAsAuthoritative: Bool,
-        hardCuts: [Int] = []
+        hardCuts: [Int] = [],
+        precomputedAnnotations: [MeCabAnnotation]? = nil
     ) async -> Result {
         guard text.isEmpty == false, spans.isEmpty == false else {
             let passthrough = spans.map { AnnotatedSpan(span: $0, readingKana: nil) }
@@ -76,6 +92,29 @@ struct SpanReadingAttacher {
             return cached
         }
 
+        // TEMP DIAGNOSTICS (2026-02-02)
+        // Opt-in logging only; must not affect behavior.
+        let traceEnabled: Bool = {
+            let env = ProcessInfo.processInfo.environment
+            return env["PIPELINE_TRACE"] == "1" || env["STAGE2_TRACE"] == "1"
+        }()
+        func describeSpans(_ spans: [TextSpan]) -> String {
+            spans
+                .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+                .joined(separator: ", ")
+        }
+        func describeSemantic(_ spans: [SemanticSpan]) -> String {
+            spans
+                .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+                .joined(separator: ", ")
+        }
+        func log(_ message: String) {
+            guard traceEnabled else { return }
+            let full = "[S2.5] \(message)"
+            CustomLogger.shared.info(full)
+            NSLog("%@", full)
+        }
+
         let tokStart = CFAbsoluteTimeGetCurrent()
         let tokInterval = Self.signposter.beginInterval("Tokenizer Acquire")
         let tokenizerOpt: Tokenizer? = Self.tokenizer()
@@ -96,15 +135,14 @@ struct SpanReadingAttacher {
             return result
         }
 
-        let tokenizeInterval = Self.signposter.beginInterval("MeCab Tokenize", "len=\(text.count)")
-        let annotations: [MeCabAnnotation] = tokenizer.tokenize(text: text).compactMap { annotation -> MeCabAnnotation? in
-            let nsRange = NSRange(annotation.range, in: text)
-            guard nsRange.location != NSNotFound, nsRange.length > 0 else { return nil }
-            let surface = String(text[annotation.range])
-            let pos = String(describing: annotation.partOfSpeech)
-            return MeCabAnnotation(range: nsRange, reading: annotation.reading, surface: surface, dictionaryForm: annotation.dictionaryForm, partOfSpeech: pos)
+        let annotations: [MeCabAnnotation]
+        if let provided = precomputedAnnotations {
+            annotations = provided
+        } else {
+            let tokenizeInterval = Self.signposter.beginInterval("MeCab Tokenize", "len=\(text.count)")
+            annotations = Self.materializeAnnotations(text: text, tokenizer: tokenizer)
+            Self.signposter.endInterval("MeCab Tokenize", tokenizeInterval)
         }
-        Self.signposter.endInterval("MeCab Tokenize", tokenizeInterval)
 
         var annotated: [AnnotatedSpan] = []
         annotated.reserveCapacity(spans.count)
@@ -115,6 +153,12 @@ struct SpanReadingAttacher {
             let finalReading = sanitizeRubyReading(override ?? attachment.reading)
 
             annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas, partOfSpeech: attachment.partOfSpeech))
+        }
+
+        if traceEnabled {
+            let cuts = hardCuts.sorted().map(String.init).joined(separator: ",")
+            log("before regrouping treatSpanBoundariesAsAuthoritative=\(treatSpanBoundariesAsAuthoritative) hardCuts=[\(cuts)]")
+            log("input spans: \(describeSpans(spans))")
         }
 
         let semantic: [SemanticSpan] = await Task(priority: .userInitiated) { [self] in
@@ -128,6 +172,11 @@ struct SpanReadingAttacher {
                 hardCuts: hardCuts
             )
         }.value
+
+        if traceEnabled {
+            log("after regrouping semanticSpans.count=\(semantic.count)")
+            log("output semantic spans: \(describeSemantic(semantic))")
+        }
 
         let result = Result(annotatedSpans: annotated, semanticSpans: semantic)
         await Self.cache.store(result, for: key)

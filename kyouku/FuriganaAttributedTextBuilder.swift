@@ -3,6 +3,26 @@ import UIKit
 import CoreText
 
 enum FuriganaAttributedTextBuilder {
+    private static let stageDumpLock = NSLock()
+    private static var lastStageDumpKey: String = ""
+
+    private static func stageDumpKey(
+        text: String,
+        context: String,
+        tokenBoundaries: [Int],
+        readingOverridesCount: Int,
+        baseSpans: [TextSpan]?
+    ) -> String {
+        // Keep it cheap: we need stable de-duping, not cryptographic uniqueness.
+        let cutsSig = tokenBoundaries.prefix(64).map(String.init).joined(separator: ",")
+        let baseSig: String = {
+            guard let baseSpans else { return "nil" }
+            let r = baseSpans.prefix(64).map { "\($0.range.location):\($0.range.length)" }.joined(separator: ",")
+            return "n=\(baseSpans.count)|\(r)"
+        }()
+        return "ctx=\(context)|h=\(SpanReadingAttacher.hash(text))|cuts=\(cutsSig)|ovr=\(readingOverridesCount)|base=\(baseSig)"
+    }
+
     static func build(
         text: String,
         textSize: Double,
@@ -51,6 +71,45 @@ enum FuriganaAttributedTextBuilder {
         }
         let start = CFAbsoluteTimeGetCurrent()
 
+        // TEMP DIAGNOSTICS (2026-02-02)
+        // Goal: concise dumps at each stage, without requiring toggles.
+        // Guardrail: dedupe by input so we don't spam logs on rerenders.
+        let pipelineTraceEnabled: Bool = {
+    #if DEBUG
+            return true
+    #else
+            let env = ProcessInfo.processInfo.environment
+            return env["PIPELINE_TRACE"] == "1" || env["STAGE15_TRACE"] == "1" || env["STAGE2_TRACE"] == "1" || UserDefaults.standard.bool(forKey: "debugPipelineTrace")
+    #endif
+        }()
+
+        let shouldDumpStages: Bool = {
+            guard pipelineTraceEnabled else { return false }
+
+    #if DEBUG
+            let key = stageDumpKey(
+            text: text,
+            context: context,
+            tokenBoundaries: tokenBoundaries,
+            readingOverridesCount: readingOverrides.count,
+            baseSpans: baseSpans
+            )
+            stageDumpLock.lock()
+            defer { stageDumpLock.unlock() }
+            if key == lastStageDumpKey { return false }
+            lastStageDumpKey = key
+            return true
+    #else
+            return true
+    #endif
+        }()
+        func log(_ prefix: String, _ message: String) {
+            guard shouldDumpStages else { return }
+            let full = "[\(prefix)] \(message)"
+            CustomLogger.shared.info(full)
+            NSLog("%@", full)
+        }
+
         let segmentationStart = CFAbsoluteTimeGetCurrent()
         let segmented: [TextSpan]
         if let baseSpans {
@@ -61,11 +120,29 @@ enum FuriganaAttributedTextBuilder {
         let nsText = text as NSString
         let adjustedSpans = normalizeCoverage(spans: segmented, text: nsText)
 
+        // Materialize MeCab annotations once per pipeline run and reuse them across
+        // Stage 1.25 (merge-only), Stage 1.5 (split-only), and Stage 2 reading attachment.
+        let tokenizer = SpanReadingAttacher.tokenizer()
+        let mecabAnnotations: [SpanReadingAttacher.MeCabAnnotation] = {
+            guard let tokenizer else { return [] }
+            return SpanReadingAttacher.materializeAnnotations(text: text, tokenizer: tokenizer)
+        }()
+
+        // Hard cuts that Stage 1.25 must respect.
+        // Start with user/token boundaries; refinement stages may add more structural hard cuts.
+        var stage125HardCuts = tokenBoundaries
+
+        log("S1", "spans after normalizeCoverage: \(describe(spans: adjustedSpans))")
+
         // Optional embedding-based boundary refinement stage.
         // This never rewrites strings; it selects a best-cover over token-aligned spans
         // derived by slicing the original text.
         var spansForAttachment = adjustedSpans
         var boundariesAuthoritative = (baseSpans != nil)
+        if pipelineTraceEnabled, baseSpans != nil {
+            log("MIG", "skipped (baseSpans provided)")
+            log("EBS", "skipped (baseSpans provided)")
+        }
         if baseSpans == nil {
             let session = EmbeddingSession()
             if session.isFeatureEnabled(.tokenBoundaryResolution) {
@@ -106,8 +183,14 @@ enum FuriganaAttributedTextBuilder {
                 var combinedHardCuts = tokenBoundaries
 
                 // (2) Verb-headed spans: boundary-frozen.
+                if pipelineTraceEnabled {
+                    log("MIG", "before: \(describe(spans: workingSpans))")
+                }
                 let gated = MorphologicalIntegrityGate.apply(text: nsText, spans: workingSpans, hardCuts: combinedHardCuts, trie: trie)
                 workingSpans = gated.spans
+                if pipelineTraceEnabled {
+                    log("MIG", "after: \(describe(spans: workingSpans))")
+                }
 
                 // (3) Reduplication is structural.
                 if let trie {
@@ -131,6 +214,10 @@ enum FuriganaAttributedTextBuilder {
                         }
                     }
                 }
+
+                // Preserve any structural hard cuts computed in this refinement path
+                // so Stage 1.25 does not merge across them.
+                stage125HardCuts = combinedHardCuts
 
                 // Boundary refinement is CONDITIONAL.
                 // We skip refinement if any verb-phrase gating occurred OR any deinflection lock occurred.
@@ -206,6 +293,12 @@ enum FuriganaAttributedTextBuilder {
                     let textString = text
                     let hardCutsSnapshot = combinedHardCuts
                     let trieSnapshot = trie
+
+                    if pipelineTraceEnabled {
+                        let cutList = hardCutsSnapshot.sorted().map(String.init).joined(separator: ",")
+                        log("EBS", "before refine spans: \(describe(spans: snapshot)) ; hardCuts=[\(cutList)]")
+                    }
+
                     spansForAttachment = await withCheckedContinuation { continuation in
                         DispatchQueue.global(qos: .userInitiated).async {
                             let localText = textString as NSString
@@ -213,8 +306,16 @@ enum FuriganaAttributedTextBuilder {
                             continuation.resume(returning: refined)
                         }
                     }
+
+                    if pipelineTraceEnabled {
+                        log("EBS", "after refine spans: \(describe(spans: spansForAttachment))")
+                    }
                 } else {
                     spansForAttachment = workingSpans
+
+                    if pipelineTraceEnabled {
+                        log("EBS", "refine skipped; spans: \(describe(spans: spansForAttachment))")
+                    }
                 }
 
                 boundariesAuthoritative = true
@@ -229,23 +330,95 @@ enum FuriganaAttributedTextBuilder {
                         "Embedding boundary refinement disabled. metadataOK=\(status.enabled) reason=\(reason)"
                     )
                 }
+
+                if pipelineTraceEnabled {
+                    log("MIG", "skipped (tokenBoundaryResolution disabled)")
+                    log("EBS", "skipped (tokenBoundaryResolution disabled)")
+                }
             }
         }
 
         _ = elapsedMilliseconds(since: segmentationStart)
 
         let attachmentStart = CFAbsoluteTimeGetCurrent()
+
+        // Stage 1.5: POS-aware boundary enforcement (split-only).
+        //
+        // Important constraints:
+        // - Must be pure in-memory (no SQLite, no trie lookups).
+        // - May split spans, must never merge.
+        // - Downstream Stage 2.5 must not merge across these enforced boundaries.
+        //   We pass them as ephemeral `hardCuts` (not persisted) so existing merge
+        //   logic remains unchanged.
+        //
+        // IMPORTANT: When `baseSpans` is provided, spans are user-authored. Do not
+        // auto-split them here; otherwise manual merges can appear to “not work”
+        // because Stage 1.5 immediately reintroduces boundaries.
+        if baseSpans == nil {
+            let stage15 = Stage1_5PosBoundaryNormalizer.apply(
+                text: nsText,
+                spans: spansForAttachment,
+                mecab: mecabAnnotations
+            )
+
+            // Stage 1.5 snaps spans to MeCab token boundaries. This must run before merge logic
+            // (Stage 1.25) so later stages can safely reason about span ranges vs MeCab ranges.
+            spansForAttachment = stage15.spans
+
+            if shouldDumpStages {
+                let cutList = stage15.forcedCuts.sorted().map(String.init).joined(separator: ",")
+                log("S1.5", "spans after apply: \(describe(spans: stage15.spans))")
+                log("S1.5", "forcedCuts emitted: [\(cutList)]")
+            }
+        } else if pipelineTraceEnabled {
+            log("S1.5", "skipped (baseSpans provided)")
+        }
+
+        // NOTE:
+        // Stage 1.5 `forcedCuts` represent snap-splits introduced to align spans to MeCab token
+        // boundaries. They are not treated as hard cuts for downstream merge logic; Stage 1.25
+        // is responsible for syntactic merging after snapping.
+        let combinedHardCuts = tokenBoundaries
+
+        if shouldDumpStages {
+            let cutList = combinedHardCuts.sorted().map(String.init).joined(separator: ",")
+            log("S1.5", "combinedHardCuts after Stage 1.5: [\(cutList)]")
+        }
+
+        // Stage 1.25: syntactic merge stage (merge-only).
+        // Hard blocks:
+        // - never cross user/token hardCuts
+        // - never run when spans are externally provided (user-authored segmentation)
+        if baseSpans == nil {
+            let stage125 = AuxiliaryChainMerger.apply(
+                text: nsText,
+                spans: spansForAttachment,
+                hardCuts: stage125HardCuts,
+                mecab: mecabAnnotations
+            )
+            spansForAttachment = stage125.spans
+            if shouldDumpStages {
+                log("S1.25", "after apply merges=\(stage125.merges): \(describe(spans: spansForAttachment))")
+            }
+        } else if pipelineTraceEnabled {
+            log("S1.25", "skipped (baseSpans provided)")
+        }
+
         let stage2 = await SpanReadingAttacher().attachReadings(
             text: text,
             spans: spansForAttachment,
             treatSpanBoundariesAsAuthoritative: boundariesAuthoritative,
-            hardCuts: tokenBoundaries
+            hardCuts: combinedHardCuts,
+            precomputedAnnotations: mecabAnnotations.isEmpty ? nil : mecabAnnotations
         )
 
         // Apply user overrides to Stage-2 outputs. This preserves the existing
         // precedence rule: user overrides only apply on exact range matches.
         let resolvedAnnotated = applyReadingOverrides(stage2.annotatedSpans, overrides: readingOverrides)
         let resolvedSemantic = applyReadingOverrides(stage2.semanticSpans, overrides: readingOverrides)
+
+        log("S2", "annotatedSpans: \(describe(annotatedSpans: resolvedAnnotated))")
+        log("S2.5", "semanticSpans: \(describe(semanticSpans: resolvedSemantic))")
 
         _ = elapsedMilliseconds(since: attachmentStart)
 
@@ -562,6 +735,24 @@ enum FuriganaAttributedTextBuilder {
     private static func describe(spans: [TextSpan]) -> String {
         spans
             .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
+            .joined(separator: ", ")
+    }
+
+    private static func describe(annotatedSpans: [AnnotatedSpan]) -> String {
+        annotatedSpans
+            .map { span in
+                let r = span.readingKana.map { " [\($0)]" } ?? ""
+                return "\(span.span.range.location)-\(NSMaxRange(span.span.range)) «\(span.span.surface)»\(r)"
+            }
+            .joined(separator: ", ")
+    }
+
+    private static func describe(semanticSpans: [SemanticSpan]) -> String {
+        semanticSpans
+            .map { span in
+                let r = span.readingKana.map { " [\($0)]" } ?? ""
+                return "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»\(r)"
+            }
             .joined(separator: ", ")
     }
 }

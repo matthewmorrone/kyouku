@@ -20,6 +20,8 @@ struct RubyText: UIViewRepresentable {
     var fontSize: CGFloat
     var lineHeightMultiple: CGFloat
     var extraGap: CGFloat
+    /// Absolute gap between ruby and headword (in points). 0 means “touching”.
+    var rubyBaselineGap: CGFloat = 0.5
     var textInsets: UIEdgeInsets = RubyText.defaultInsets
     var bottomOverlayHeight: CGFloat = 0
     var annotationVisibility: RubyAnnotationVisibility = .visible
@@ -191,9 +193,9 @@ struct RubyText: UIViewRepresentable {
             }
         }
 
-        // Gap between ruby and headword. Keep it small and stable so ruby feels anchored.
-        // (Previously this was a bit too large, making ruby feel "detached".)
-        let rubyBaselineGap = max(0.5, extraGap * 0.12)
+        // Gap between ruby and headword.
+        // This is an absolute value; 0 means the ruby bottom sits flush on the headword top.
+        let resolvedRubyBaselineGap = max(0, rubyBaselineGap)
 
         // Compute extra headroom for ruby above the baseline.
         // We reserve enough vertical space for the *largest* ruby run so that
@@ -207,7 +209,7 @@ struct RubyText: UIViewRepresentable {
                     in: attributed,
                     baseFont: baseFont,
                     defaultRubyFontSize: defaultRubyFontSize,
-                    rubyBaselineGap: rubyBaselineGap
+                    rubyBaselineGap: resolvedRubyBaselineGap
                 )
             )
         )
@@ -238,7 +240,7 @@ struct RubyText: UIViewRepresentable {
         }
 
         uiView.rubyHighlightHeadroom = rubyHeadroom
-        uiView.rubyBaselineGap = rubyBaselineGap
+        uiView.rubyBaselineGap = resolvedRubyBaselineGap
         uiView.rubyReservedTopMargin = 0
 
         // IMPORTANT:
@@ -267,6 +269,7 @@ struct RubyText: UIViewRepresentable {
         renderHasher.combine(Int((lineHeightMultiple * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((extraGap * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((globalKerning * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(Int((max(0, rubyBaselineGap) * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((rubyHeadroom * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(rubyMetricsEnabled ? 1 : 0)
         renderHasher.combine(Int((effectiveLineSpacing * 1000).rounded(.toNearestOrEven)))

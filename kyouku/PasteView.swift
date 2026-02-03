@@ -40,6 +40,7 @@ struct PasteView: View {
     @State private var customizedRanges: [NSRange] = []
     @State private var showTokensPopover: Bool = false
     @State private var debugTokenListText: String = ""
+    @State private var lastLoggedTokenListText: String = ""
     @State private var pendingRouterResetNoteID: UUID? = nil
     @State private var skipNextInitialFuriganaEnsure: Bool = false
     @State private var isDictionarySheetPresented: Bool = false
@@ -137,6 +138,7 @@ struct PasteView: View {
     @AppStorage("readingGlobalKerningPixels") private var readingGlobalKerningPixels: Double = 0
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingShowFurigana") private var showFurigana: Bool = true
+    @AppStorage("debugPipelineTrace") private var debugPipelineTrace: Bool = false
     @AppStorage("readingWrapLines") private var wrapLines: Bool = false
     @AppStorage("readingAlternateTokenColors") private var alternateTokenColors: Bool = false
     @AppStorage("readingHighlightUnknownTokens") private var highlightUnknownTokens: Bool = false
@@ -157,6 +159,7 @@ struct PasteView: View {
     @AppStorage("extractPropagateTokenEdits") private var propagateTokenEdits: Bool = false
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
+    @AppStorage("debugHighlightAllDictionaryEntries") private var debugHighlightAllDictionaryEntries: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
 
     private var scratchNoteID: UUID {
@@ -239,6 +242,11 @@ struct PasteView: View {
         return max(0, value)
     }
 
+    private func emitTokenListLog(_ message: String) {
+        CustomLogger.shared.print(message)
+        NSLog("%@", message)
+    }
+
     var body: some View {
         NavigationStack {
             applyDictionarySheet(to: coreContent)
@@ -248,6 +256,19 @@ struct PasteView: View {
         }
         .onPreferenceChange(PasteAreaFramePreferenceKey.self) { newValue in
             pasteAreaFrame = sanitizeGeometryRect(newValue)
+        }
+        .onChange(of: debugPipelineTrace) { _, enabled in
+            guard enabled else { return }
+            guard debugTokenListText.isEmpty == false else {
+                emitTokenListLog("[TokenList] (no cached token list yet)")
+                return
+            }
+            emitTokenListLog("[TokenList]\n\(debugTokenListText)")
+            lastLoggedTokenListText = debugTokenListText
+        }
+        .onChange(of: debugHighlightAllDictionaryEntries) { _, _ in
+            // Ensure toggling the setting immediately updates the rendered text.
+            triggerFuriganaRefreshIfNeeded(reason: "debug highlight all dictionary entries toggled", recomputeSpans: false)
         }
         .sheet(item: $wordDefinitionsRequest, onDismiss: {
             // When the dictionary details sheet is dismissed, also clear the
@@ -821,6 +842,14 @@ struct PasteView: View {
                 // Avoid thrashing SwiftUI state with identical strings.
                 if text != debugTokenListText {
                     debugTokenListText = text
+                }
+
+                // Also emit token list text to logs for debugging.
+                // Keep it behind the in-app toggle; log even if the string hasn't changed
+                // (toggling tracing on shouldn't require a layout/text change to re-emit).
+                if debugPipelineTrace, text != lastLoggedTokenListText {
+                    emitTokenListLog("[TokenList]\n\(text)")
+                    lastLoggedTokenListText = text
                 }
             },
             liveSemanticFeedback: liveSemanticFeedback,
@@ -1657,7 +1686,15 @@ struct PasteView: View {
             return
         }
 
-        let tokens = furiganaSpans?.map(\.span) ?? []
+        // Use semantic spans (post Stage 2.5 + tail merge) as the token basis for
+        // dictionary candidate generation. This makes late-stage token combining
+        // visible to lookup behavior without requiring user-authored base spans.
+        let tokens: [TextSpan] = {
+            if furiganaSemanticSpans.isEmpty == false {
+                return furiganaSemanticSpans.map { TextSpan(range: $0.range, surface: $0.surface, isLexiconMatch: false) }
+            }
+            return furiganaSpans?.map(\.span) ?? []
+        }()
         let selectedRange = selection.range
         let currentText = inputText
         let selectionID = selection.id
@@ -2359,13 +2396,26 @@ struct PasteView: View {
         guard let union else { return }
         persistentSelectionRange = union
         pendingSelectionRange = union
-        let mergedIndex = mergeRange.lowerBound
+
+        // `index` is a semantic-span index (into `furiganaSemanticSpans`).
+        // `mergeRange` is a Stage-1 span index range.
+        // Keep the selection in semantic space; otherwise merging from the token list
+        // can jump the selection to the wrong token (index-space mismatch).
+        let mergedStage1Index = mergeRange.lowerBound
+        let mergedSemanticIndex: Int = {
+            switch direction {
+            case .previous:
+                return max(0, index - 1)
+            case .next:
+                return index
+            }
+        }()
         let textStorage = inputText as NSString
         guard NSMaxRange(union) <= textStorage.length else { return }
         let surface = textStorage.substring(with: union)
-        let semantic = SemanticSpan(range: union, surface: surface, sourceSpanIndices: mergedIndex..<(mergedIndex + 1), readingKana: nil)
+        let semantic = SemanticSpan(range: union, surface: surface, sourceSpanIndices: mergedStage1Index..<(mergedStage1Index + 1), readingKana: nil)
         let ephemeral = AnnotatedSpan(span: TextSpan(range: union, surface: surface, isLexiconMatch: false), readingKana: nil, lemmaCandidates: [])
-        let ctx = TokenSelectionContext(tokenIndex: mergedIndex, range: union, surface: surface, semanticSpan: semantic, sourceSpanIndices: semantic.sourceSpanIndices, annotatedSpan: ephemeral)
+        let ctx = TokenSelectionContext(tokenIndex: mergedSemanticIndex, range: union, surface: surface, semanticSpan: semantic, sourceSpanIndices: semantic.sourceSpanIndices, annotatedSpan: ephemeral)
         tokenSelection = ctx
         if sheetDictionaryPanelEnabled {
             sheetSelection = ctx
@@ -2481,13 +2531,20 @@ struct PasteView: View {
         let trimmedKana = overrideKana.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedKana.isEmpty == false else { return }
 
-        let override = ReadingOverride(
-            noteID: activeNoteID,
-            rangeStart: selection.range.location,
-            rangeLength: selection.range.length,
-            userKana: trimmedKana
-        )
-        applyOverridesChange(range: selection.range, newOverrides: [override], actionName: "Apply Reading")
+        let targetRanges: [NSRange] = {
+            guard propagateTokenEdits else { return [selection.range] }
+            return propagatedTokenRanges(referenceRange: selection.range, referenceSurface: selection.surface)
+        }()
+
+        let overrides: [ReadingOverride] = targetRanges.map { r in
+            ReadingOverride(
+                noteID: activeNoteID,
+                rangeStart: r.location,
+                rangeLength: r.length,
+                userKana: trimmedKana
+            )
+        }
+        applyOverridesChange(removing: targetRanges, adding: overrides, actionName: "Apply Reading")
     }
 
     private func applyCustomReading(_ kana: String) {
@@ -2503,7 +2560,49 @@ struct PasteView: View {
             rangeLength: selection.range.length,
             userKana: normalized
         )
-        applyOverridesChange(range: selection.range, newOverrides: [override], actionName: "Apply Custom Reading")
+
+        if propagateTokenEdits {
+            let targetRanges = propagatedTokenRanges(referenceRange: selection.range, referenceSurface: selection.surface)
+            let overrides: [ReadingOverride] = targetRanges.map { r in
+                ReadingOverride(
+                    noteID: activeNoteID,
+                    rangeStart: r.location,
+                    rangeLength: r.length,
+                    userKana: normalized
+                )
+            }
+            applyOverridesChange(removing: targetRanges, adding: overrides, actionName: "Apply Custom Reading")
+        } else {
+            applyOverridesChange(removing: [selection.range], adding: [override], actionName: "Apply Custom Reading")
+        }
+    }
+
+    private func propagatedTokenRanges(referenceRange: NSRange, referenceSurface: String) -> [NSRange] {
+        let nsText = inputText as NSString
+        guard nsText.length > 0 else { return [referenceRange] }
+
+        let targetSurface = referenceSurface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard targetSurface.isEmpty == false else { return [referenceRange] }
+
+        // Use semantic spans (post-Stage-2.5 + tail merge) so reading overrides follow
+        // the currently visible/selected tokenization.
+        var out: [NSRange] = []
+        out.reserveCapacity(min(64, furiganaSemanticSpans.count))
+        for span in furiganaSemanticSpans {
+            let r = span.range
+            guard r.location != NSNotFound, r.length > 0 else { continue }
+            guard NSMaxRange(r) <= nsText.length else { continue }
+            let surface = nsText.substring(with: r).trimmingCharacters(in: .whitespacesAndNewlines)
+            if surface == targetSurface {
+                out.append(r)
+            }
+        }
+
+        // Fallback: if tokenization is unavailable/unexpected, at least apply to the current selection.
+        if out.isEmpty {
+            return [referenceRange]
+        }
+        return out
     }
 
     private func normalizeOverrideKana(_ text: String) -> String {
@@ -2527,13 +2626,25 @@ struct PasteView: View {
         pendingSelectionRange = union
         pendingSplitFocusSelectionID = nil
 
-        let mergedIndex = mergeRange.lowerBound
+        // `TokenSelectionContext.tokenIndex` is a semantic-span index (into `furiganaSemanticSpans`).
+        // `mergeRange` is a Stage-1 span index range.
+        // After merging, keep the selection's tokenIndex in semantic space so subsequent
+        // merge/split actions still resolve correctly.
+        let mergedStage1Index = mergeRange.lowerBound
+        let mergedSemanticIndex: Int = {
+            switch direction {
+            case .previous:
+                return max(0, selection.tokenIndex - 1)
+            case .next:
+                return selection.tokenIndex
+            }
+        }()
         let textStorage = inputText as NSString
         guard NSMaxRange(union) <= textStorage.length else { return }
         let surface = textStorage.substring(with: union)
-        let semantic = SemanticSpan(range: union, surface: surface, sourceSpanIndices: mergedIndex..<(mergedIndex + 1), readingKana: nil)
+        let semantic = SemanticSpan(range: union, surface: surface, sourceSpanIndices: mergedStage1Index..<(mergedStage1Index + 1), readingKana: nil)
         let ephemeral = AnnotatedSpan(span: TextSpan(range: union, surface: surface, isLexiconMatch: false), readingKana: nil, lemmaCandidates: [])
-        let ctx = TokenSelectionContext(tokenIndex: mergedIndex, range: union, surface: surface, semanticSpan: semantic, sourceSpanIndices: semantic.sourceSpanIndices, annotatedSpan: ephemeral)
+        let ctx = TokenSelectionContext(tokenIndex: mergedSemanticIndex, range: union, surface: surface, semanticSpan: semantic, sourceSpanIndices: semantic.sourceSpanIndices, annotatedSpan: ephemeral)
         tokenSelection = ctx
 
         // Keep the Extract Words sheet's in-sheet dictionary panel in sync.
@@ -2947,21 +3058,35 @@ struct PasteView: View {
         resetAllCustomSpans()
     }
 
-    private func applyOverridesChange(range: NSRange, newOverrides: [ReadingOverride], actionName: String) {
+    private func applyOverridesChange(removing ranges: [NSRange], adding newOverrides: [ReadingOverride], actionName: String) {
         let noteID = activeNoteID
-        let previous = readingOverrides.overrides(for: noteID, overlapping: range)
-        CustomLogger.shared.debug("Applying overrides action=\(actionName) note=\(noteID) range=\(range.location)-\(NSMaxRange(range)) replacing=\(previous.count) inserting=\(newOverrides.count)")
-        readingOverrides.apply(noteID: noteID, removing: range, adding: newOverrides)
+        let previous = readingOverrides.overrides(for: noteID).filter { existing in
+            ranges.contains { existing.overlaps($0) }
+        }
+        let rangeSummary: String = {
+            if ranges.count == 1 {
+                let r = ranges[0]
+                return "\(r.location)-\(NSMaxRange(r))"
+            }
+            return "count=\(ranges.count)"
+        }()
+        CustomLogger.shared.debug("Applying overrides action=\(actionName) note=\(noteID) ranges=\(rangeSummary) replacing=\(previous.count) inserting=\(newOverrides.count)")
+
+        readingOverrides.apply(noteID: noteID, removing: ranges, adding: newOverrides)
         overrideSignature = computeOverrideSignature()
         updateCustomizedRanges()
         triggerFuriganaRefreshIfNeeded(reason: "manual token override", recomputeSpans: true)
-        registerUndo(previousOverrides: previous, range: range, actionName: actionName)
+        registerUndo(previousOverrides: previous, ranges: ranges, actionName: actionName)
     }
 
-    private func registerUndo(previousOverrides: [ReadingOverride], range: NSRange, actionName: String) {
+    private func applyOverridesChange(range: NSRange, newOverrides: [ReadingOverride], actionName: String) {
+        applyOverridesChange(removing: [range], adding: newOverrides, actionName: actionName)
+    }
+
+    private func registerUndo(previousOverrides: [ReadingOverride], ranges: [NSRange], actionName: String) {
         guard let undoManager else { return }
         let token = OverrideUndoToken { [self] in
-            applyOverridesChange(range: range, newOverrides: previousOverrides, actionName: actionName)
+            applyOverridesChange(removing: ranges, adding: previousOverrides, actionName: actionName)
         }
         undoManager.registerUndo(withTarget: token) { target in
             target.perform()

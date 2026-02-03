@@ -92,6 +92,23 @@ final class ReadingOverridesStore: ObservableObject {
         notifyChange()
     }
 
+    func apply(noteID: UUID, removing ranges: [NSRange], adding newOverrides: [ReadingOverride]) {
+        guard ranges.isEmpty == false else {
+            overrides.append(contentsOf: newOverrides)
+            save()
+            notifyChange()
+            return
+        }
+
+        overrides.removeAll { existing in
+            guard existing.noteID == noteID else { return false }
+            return ranges.contains { existing.overlaps($0) }
+        }
+        overrides.append(contentsOf: newOverrides)
+        save()
+        notifyChange()
+    }
+
     func remove(noteID: UUID, in range: NSRange) {
         let before = overrides.count
         overrides.removeAll { $0.noteID == noteID && $0.overlaps(range) }

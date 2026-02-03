@@ -52,6 +52,22 @@ actor SegmentationService {
         trieCache
     }
 
+    /// Ensures the trie is loaded, triggering bootstrap work if needed.
+    ///
+    /// This is intended for optional downstream features (debug overlays, etc.)
+    /// that want to reliably query the lexicon even when Stage 1 segmentation
+    /// hasn't run yet in this session.
+    func ensureTrieLoaded() async -> LexiconTrie? {
+        if let trieCache {
+            return trieCache
+        }
+        do {
+            return try await getTrie()
+        } catch {
+            return nil
+        }
+    }
+
     func segment(text: String) async throws -> [TextSpan] {
         guard text.isEmpty == false else { return [] }
         let segInterval = signposter.beginInterval("Segment", id: .exclusive, "len=\(text.count)")
@@ -651,7 +667,11 @@ actor SegmentationService {
             guard let firstScalar = UnicodeScalar(firstUnit) else { continue }
 
             if Self.isKanji(firstUnit) || Self.isWhitespaceOrNewline(firstScalar) || Self.isPunctuation(firstScalar) {
-                assert(r.length == 1, "Stage1 invariant failed: boundary singleton expanded (\(start), len=\(r.length))")
+                let expected = nsSwift.rangeOfComposedCharacterSequence(at: start)
+                assert(
+                    NSEqualRanges(r, expected),
+                    "Stage1 invariant failed: boundary singleton expanded (\(start), len=\(r.length), expectedLen=\(expected.length))"
+                )
                 continue
             }
 

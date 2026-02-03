@@ -12,6 +12,8 @@ struct CoreTextRubyText: UIViewRepresentable {
     var attributed: NSAttributedString
     var fontSize: CGFloat
     var extraGap: CGFloat
+    /// Absolute gap between ruby and headword (in points). 0 means “touching”.
+    var rubyBaselineGap: CGFloat = 0.5
     var textInsets: UIEdgeInsets
     var distinctKanaKanjiFonts: Bool = false
 
@@ -28,6 +30,7 @@ struct CoreTextRubyText: UIViewRepresentable {
     func updateUIView(_ uiView: CoreTextRubyScrollView, context: Context) {
         uiView.renderView.fontSize = fontSize
         uiView.renderView.extraGap = extraGap
+        uiView.renderView.rubyBaselineGap = rubyBaselineGap
         uiView.renderView.textInsets = textInsets
         uiView.renderView.distinctKanaKanjiFonts = distinctKanaKanjiFonts
         uiView.renderView.setAttributedText(attributed)
@@ -63,6 +66,7 @@ final class CoreTextRubyRenderView: UIView {
 
     var fontSize: CGFloat = 17
     var extraGap: CGFloat = 0
+    var rubyBaselineGap: CGFloat = 0.5
     var textInsets: UIEdgeInsets = .zero
     var distinctKanaKanjiFonts: Bool = false
 
@@ -318,7 +322,7 @@ private extension CoreTextRubyRenderView {
             var leading: CGFloat = 0
             _ = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
 
-            let gap = max(1.0, extraGap * 0.12)
+            let gap = max(0, rubyBaselineGap)
             let y = origin.y + ascent + gap
 
             // Draw ruby (remember: we're in flipped CoreText coords already).

@@ -14,6 +14,10 @@ struct SettingsView: View {
     @AppStorage("readingTextSize") private var readingTextSize: Double = 17
     @AppStorage("readingFuriganaSize") private var readingFuriganaSize: Double = 9
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
+    // Absolute gap between ruby and headword (in points). 0 means “touching”.
+    @AppStorage("readingRubyBaselineGap") private var readingRubyBaselineGap: Double = 0.5
+    // Legacy: additive adjustment used by older builds.
+    @AppStorage("readingRubyBaselineGapAdjustment") private var readingRubyBaselineGapAdjustment: Double = 0
     @AppStorage("readingGlobalKerningPixels") private var readingGlobalKerningPixels: Double = 0
     /// Preferred base font PostScript name for reading text.
     /// Empty string means "System".
@@ -42,7 +46,9 @@ struct SettingsView: View {
     @AppStorage("rubyHeadwordLineBands") private var rubyHeadwordLineBands: Bool = false
     @AppStorage("rubyFuriganaLineBands") private var rubyFuriganaLineBands: Bool = false
     @AppStorage("RubyDebug.showLineBandLabels") private var rubyDebugShowLineNumbers: Bool = true
+    @AppStorage("debugPipelineTrace") private var debugPipelineTrace: Bool = false
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
+    @AppStorage("debugHighlightAllDictionaryEntries") private var debugHighlightAllDictionaryEntries: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
     @AppStorage("debugPixelRulerOverlay") private var debugPixelRulerOverlay: Bool = false
 
@@ -91,6 +97,19 @@ struct SettingsView: View {
         }
         if defaults.object(forKey: "RubyDebug.showRubyBisectors") == nil {
             defaults.set(true, forKey: "RubyDebug.showRubyBisectors")
+        }
+
+        // Migrate the old "adjustment" style setting to an absolute gap.
+        // We treat the historical default baseline gap as 0.5pt.
+        if defaults.bool(forKey: "didMigrateReadingRubyBaselineGap") == false {
+            defaults.set(true, forKey: "didMigrateReadingRubyBaselineGap")
+            let old = defaults.double(forKey: "readingRubyBaselineGapAdjustment")
+            if old != 0 {
+                defaults.set(max(0, 0.5 + old), forKey: "readingRubyBaselineGap")
+                defaults.set(0.0, forKey: "readingRubyBaselineGapAdjustment")
+            } else if defaults.object(forKey: "readingRubyBaselineGap") == nil {
+                defaults.set(0.5, forKey: "readingRubyBaselineGap")
+            }
         }
     }
 
@@ -250,6 +269,7 @@ struct SettingsView: View {
                 fontSize: CGFloat(pendingReadingTextSize),
                 lineHeightMultiple: 1.0,
                 extraGap: CGFloat(pendingReadingLineSpacing),
+                rubyBaselineGap: CGFloat(readingRubyBaselineGap),
                 isScrollEnabled: true,
                 globalKerning: CGFloat(readingGlobalKerningPixels),
                 padHeadwordSpacing: readingHeadwordSpacingPadding,
@@ -327,6 +347,17 @@ struct SettingsView: View {
                 }
             )
 
+            HStack {
+                Text("Ruby Gap")
+                Spacer()
+                Text(String(format: "%.2f pt", readingRubyBaselineGap))
+                    .foregroundStyle(.secondary)
+            }
+            Slider(
+                value: $readingRubyBaselineGap,
+                in: 0.0...12.0,
+                step: 0.25
+            )
             HStack {
                 Text("Kerning")
                 Spacer()
@@ -467,6 +498,8 @@ struct SettingsView: View {
     private var debugSection: some View {
         Section("Debug") {
             Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
+            Toggle("Pipeline trace (token lists)", isOn: $debugPipelineTrace)
+            Toggle("Highlight all dictionary entries (overlaps)", isOn: $debugHighlightAllDictionaryEntries)
             Toggle("View metrics", isOn: $debugViewMetricsHUD)
             Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
             Toggle("Pixel ruler overlay", isOn: $debugPixelRulerOverlay)

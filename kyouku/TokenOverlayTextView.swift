@@ -827,7 +827,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
     var lastAppliedRenderKey: Int? = nil
 
     // Vertical gap between the headword and ruby text.
-    var rubyBaselineGap: CGFloat = 1.0
+    var rubyBaselineGap: CGFloat = 0.5
 
     var rubyHorizontalAlignment: RubyHorizontalAlignment = .center {
         didSet {
@@ -1535,6 +1535,60 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         ]
         return layer
     }()
+
+    // Debug overlay: circled/outlined dictionary match spans.
+    private let debugDictionaryOutlineLevel1Layer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemTeal.withAlphaComponent(0.75).cgColor
+        layer.lineWidth = 1.5
+        layer.lineJoin = .round
+        layer.lineCap = .round
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+
+    private let debugDictionaryOutlineLevel2Layer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemYellow.withAlphaComponent(0.95).cgColor
+        layer.lineWidth = 2.25
+        layer.lineJoin = .round
+        layer.lineCap = .round
+        layer.lineDashPattern = [6, 3]
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+
+    private let debugDictionaryOutlineLevel3PlusLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.systemRed.withAlphaComponent(0.9).cgColor
+        layer.lineWidth = 2.75
+        layer.lineJoin = .round
+        layer.lineCap = .round
+        layer.lineDashPattern = [2, 2]
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
     private let rubyHighlightLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
         layer.fillColor = UIColor.systemYellow.withAlphaComponent(0.25).cgColor
@@ -1632,6 +1686,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
     private var cachedRubyRuns: [RubyRun] = []
     private var scrollRedrawScheduled: Bool = false
+    private var hasDebugDictionaryCoverageAttributes: Bool = false
     private var isClampingHorizontalOffset: Bool = false
     private var softLineStartRubyPaddingFixScheduled: Bool = false
     private var lastSoftLineStartRubyPaddingFixSignature: Int = 0
@@ -2213,7 +2268,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             if viewMetricsHUDEnabled {
                 updateViewMetricsHUD()
             }
-            if headwordLineBandsEnabled || rubyLineBandsEnabled || rubyDebugRectsEnabled {
+            if headwordLineBandsEnabled || rubyLineBandsEnabled || rubyDebugRectsEnabled || hasDebugDictionaryCoverageAttributes {
                 scheduleDebugOverlaysUpdate()
             }
             warmVisibleSemanticSpanLayoutIfNeeded()
@@ -2227,6 +2282,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             guard let self else { return }
             self.scrollRedrawScheduled = false
 
+            if self.hasDebugDictionaryCoverageAttributes {
+                self.updateDebugDictionaryEntryOutlinePaths()
+            }
             if self.headwordLineBandsEnabled || self.rubyLineBandsEnabled {
                 self.updateRubyDebugLineBands()
             }
@@ -2236,6 +2294,23 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 self.updateRubyHeadwordBisectors()
             }
         }
+    }
+
+    private func containsDebugDictionaryCoverageAttribute(in text: NSAttributedString) -> Bool {
+        guard text.length > 0 else { return false }
+        let full = NSRange(location: 0, length: text.length)
+        var found = false
+        text.enumerateAttribute(
+            DebugDictionaryHighlighting.coverageLevelAttribute,
+            in: full,
+            options: [.longestEffectiveRangeNotRequired]
+        ) { value, _, stop in
+            if value != nil {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
     }
 
     private func updateDebugBoundingStrokeAppearance() {
@@ -2361,8 +2436,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             "opacity": NSNull(),
             "hidden": NSNull()
         ]
+        debugDictionaryOutlineLevel1Layer.contentsScale = traitCollection.displayScale
+        debugDictionaryOutlineLevel2Layer.contentsScale = traitCollection.displayScale
+        debugDictionaryOutlineLevel3PlusLayer.contentsScale = traitCollection.displayScale
         baseHighlightLayer.contentsScale = traitCollection.displayScale
         rubyHighlightLayer.contentsScale = traitCollection.displayScale
+
+        // Put dictionary outlines below selection highlights.
+        highlightOverlayContainerLayer.addSublayer(debugDictionaryOutlineLevel1Layer)
+        highlightOverlayContainerLayer.addSublayer(debugDictionaryOutlineLevel2Layer)
+        highlightOverlayContainerLayer.addSublayer(debugDictionaryOutlineLevel3PlusLayer)
         highlightOverlayContainerLayer.addSublayer(rubyHighlightLayer)
         highlightOverlayContainerLayer.addSublayer(baseHighlightLayer)
 
@@ -2545,6 +2628,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         }
         if needsHighlightUpdate {
             updateSelectionHighlightPath()
+            updateDebugDictionaryEntryOutlinePaths()
             needsHighlightUpdate = false
             if Self.verboseRubyLoggingEnabled {
                 CustomLogger.shared.debug("layoutSubviews: performed highlight update")
@@ -3016,6 +3100,79 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         rubyDebugRectsLayer.frame = CGRect(origin: .zero, size: contentSize)
         rubyDebugRectsLayer.path = path.isEmpty ? nil : path
+    }
+
+    private func updateDebugDictionaryEntryOutlinePaths() {
+        guard let attributedText, attributedText.length > 0 else {
+            debugDictionaryOutlineLevel1Layer.path = nil
+            debugDictionaryOutlineLevel2Layer.path = nil
+            debugDictionaryOutlineLevel3PlusLayer.path = nil
+            return
+        }
+
+        let doc = NSRange(location: 0, length: attributedText.length)
+
+        // Keep debug work bounded to the viewport.
+        let visible = visibleUTF16Range() ?? doc
+        let scan = expandRange(visible, by: 256)
+
+        let path1 = CGMutablePath()
+        let path2 = CGMutablePath()
+        let path3 = CGMutablePath()
+        var added = 0
+        let maxRects = 1024
+
+        func coverageCount(from value: Any?) -> Int {
+            if let n = value as? Int { return n }
+            if let num = value as? NSNumber { return num.intValue }
+            return 0
+        }
+
+        func addRoundedOutlineRects(for range: NSRange, ringCount: Int, to path: CGMutablePath) {
+            let rects = unionRectsByLine(baseHighlightRectsInContentCoordinates(in: range))
+            for rect in rects.prefix(6) {
+                guard added < maxRects else { return }
+                // Slightly expand so the outline doesn't touch glyph ink.
+                // For overlaps, draw multiple concentric rings to make stacking obvious.
+                let rings = max(1, min(3, ringCount))
+                for ring in 0..<rings {
+                    guard added < maxRects else { return }
+                    let dx = -2.0 - (CGFloat(ring) * 1.8)
+                    let dy = -1.0 - (CGFloat(ring) * 1.2)
+                    let expanded = rect.insetBy(dx: dx, dy: dy)
+                    guard expanded.width > 1, expanded.height > 1 else { continue }
+                    let radius = min(16, max(4, expanded.height * 0.50))
+                    path.addPath(UIBezierPath(roundedRect: expanded, cornerRadius: radius).cgPath)
+                    added += 1
+                }
+            }
+        }
+
+        attributedText.enumerateAttribute(
+            DebugDictionaryHighlighting.coverageLevelAttribute,
+            in: NSIntersectionRange(scan, doc),
+            options: []
+        ) { value, range, _ in
+            let c = coverageCount(from: value)
+            guard c > 0 else { return }
+            guard range.location != NSNotFound, range.length > 0 else { return }
+
+            if c >= 3 {
+                addRoundedOutlineRects(for: range, ringCount: 3, to: path3)
+            } else if c == 2 {
+                addRoundedOutlineRects(for: range, ringCount: 2, to: path2)
+            } else {
+                addRoundedOutlineRects(for: range, ringCount: 1, to: path1)
+            }
+        }
+
+        debugDictionaryOutlineLevel1Layer.frame = CGRect(origin: .zero, size: contentSize)
+        debugDictionaryOutlineLevel2Layer.frame = CGRect(origin: .zero, size: contentSize)
+        debugDictionaryOutlineLevel3PlusLayer.frame = CGRect(origin: .zero, size: contentSize)
+
+        debugDictionaryOutlineLevel1Layer.path = path1.isEmpty ? nil : path1
+        debugDictionaryOutlineLevel2Layer.path = path2.isEmpty ? nil : path2
+        debugDictionaryOutlineLevel3PlusLayer.path = path3.isEmpty ? nil : path3
     }
 
     private func updateHeadwordBoundingRects() {
@@ -3723,7 +3880,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { continue }
 
             let baseUnionInContent = preferredUnionInContent
-            let gap = max(1.0, self.rubyBaselineGap)
+            let gap = max(0, self.rubyBaselineGap)
             // Center ruby over the base glyph bounds.
             // (If we shift ruby to eliminate left overhang, the extra width appears only on the right.)
             let xUnclamped: CGFloat = {
@@ -3968,7 +4125,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
                 // Bottom-anchor ruby near the headword: keep a small consistent gap and let
                 // the top edge move when ruby size changes.
-                let gap = max(1.0, rubyBaselineGap)
+                let gap = max(0, rubyBaselineGap)
                 let y = (baseUnion.minY - gap) - size.height
                 (run.reading as NSString).draw(at: CGPoint(x: x, y: y), withAttributes: attrs)
             }
@@ -4338,6 +4495,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         let wasFirstResponder = isFirstResponder
         let oldSelectedRange = selectedRange
         attributedText = text
+        hasDebugDictionaryCoverageAttributes = containsDebugDictionaryCoverageAttribute(in: text)
         attributedTextRevision &+= 1
         rebuildRubyRunCache(from: text)
         rubyOverlayDirty = true
