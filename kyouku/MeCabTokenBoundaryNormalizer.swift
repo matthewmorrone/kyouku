@@ -1,13 +1,16 @@
 import Foundation
 
-/// Stage 1.5: boundary normalization.
+/// Stage 1.5: MeCab token-boundary normalization.
 ///
 /// This stage runs *after* Stage 1 segmentation and *before* Stage 2 reading attachment.
 ///
 /// Invariant: Stage 1.5 must never split inside a single MeCab token. Splits are allowed only
 /// at boundaries *between adjacent MeCab tokens*.
-enum Stage1_5PosBoundaryNormalizer {
+enum MeCabTokenBoundaryNormalizer {
     typealias MeCabAnnotation = SpanReadingAttacher.MeCabAnnotation
+
+    private static let smallTsuHiragana: unichar = 0x3063 // っ
+    private static let smallTsuKatakana: unichar = 0x30C3 // ッ
 
     struct Result {
         /// Split (but never merged) spans to pass into Stage 2.
@@ -28,6 +31,19 @@ enum Stage1_5PosBoundaryNormalizer {
     static func apply(text: NSString, spans: [TextSpan], mecab: [MeCabAnnotation]) -> Result {
         guard spans.isEmpty == false else {
             return Result(spans: [], forcedCuts: [])
+        }
+
+        func isBoundaryScalar(_ scalar: UnicodeScalar) -> Bool {
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || CharacterSet.punctuationCharacters.contains(scalar)
+                || CharacterSet.symbols.contains(scalar)
+        }
+
+        func endsWithSokuon(_ r: NSRange) -> Bool {
+            let end = NSMaxRange(r)
+            guard end > r.location, end <= text.length else { return false }
+            let unit = text.character(at: end - 1)
+            return unit == smallTsuHiragana || unit == smallTsuKatakana
         }
 
         // TEMP DIAGNOSTICS (2026-02-02)
@@ -208,13 +224,42 @@ enum Stage1_5PosBoundaryNormalizer {
             .sorted()
 
         // Precompute all legal MeCab boundaries once.
+        //
+        // Hard linguistic constraint:
+        // Do not introduce a split immediately after small っ/ッ when the next character
+        // is not a boundary (whitespace/punctuation). This prevents Stage 1.5 from
+        // emitting spans like “ぼっ” + “ちよ” for “ぼっちよ”.
         let tokenBoundariesSorted: [Int] = {
+            // Boundaries to exclude entirely (both as an end-of-token and start-of-next-token).
+            // This prevents creating spans that terminate on small っ/ッ.
+            var illegalCuts: Set<Int> = []
+            illegalCuts.reserveCapacity(16)
+            for t in tokens {
+                let end = NSMaxRange(t.range)
+                guard end >= 0, end < text.length else { continue }
+                guard endsWithSokuon(t.range) else { continue }
+                let nextUnit = text.character(at: end)
+                guard let nextScalar = UnicodeScalar(nextUnit) else { continue }
+                if isBoundaryScalar(nextScalar) == false {
+                    illegalCuts.insert(end)
+                }
+            }
+
             var b: Set<Int> = []
             b.reserveCapacity(tokens.count * 2)
             for t in tokens {
-                b.insert(t.range.location)
-                b.insert(NSMaxRange(t.range))
+                let start = t.range.location
+                let end = NSMaxRange(t.range)
+                if start >= 0, start <= text.length, illegalCuts.contains(start) == false {
+                    b.insert(start)
+                }
+                if end >= 0, end <= text.length, illegalCuts.contains(end) == false {
+                    b.insert(end)
+                }
             }
+            // Always ensure start/end-of-text are available as cuts.
+            b.insert(0)
+            b.insert(text.length)
             return b.sorted()
         }()
 

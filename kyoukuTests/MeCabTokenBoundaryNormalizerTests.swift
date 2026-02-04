@@ -1,7 +1,7 @@
 import XCTest
 @testable import kyouku
 
-final class Stage1_5PosBoundaryNormalizerTests: XCTestCase {
+final class MeCabTokenBoundaryNormalizerTests: XCTestCase {
     private func mecab(_ range: NSRange, surface: String, pos: String) -> SpanReadingAttacher.MeCabAnnotation {
         SpanReadingAttacher.MeCabAnnotation(
             range: range,
@@ -23,7 +23,7 @@ final class Stage1_5PosBoundaryNormalizerTests: XCTestCase {
             mecab(NSRange(location: 2, length: 1), surface: "る", pos: "助動詞")
         ]
 
-        let result = Stage1_5PosBoundaryNormalizer.apply(text: nsText, spans: spans, mecab: mecab)
+        let result = MeCabTokenBoundaryNormalizer.apply(text: nsText, spans: spans, mecab: mecab)
 
         let expected = [
             TextSpan(range: NSRange(location: 0, length: 2), surface: nsText.substring(with: NSRange(location: 0, length: 2)), isLexiconMatch: false),
@@ -44,9 +44,29 @@ final class Stage1_5PosBoundaryNormalizerTests: XCTestCase {
             mecab(NSRange(location: 2, length: 1), surface: "る", pos: "助動詞")
         ]
 
-        let result = Stage1_5PosBoundaryNormalizer.apply(text: nsText, spans: spans, mecab: mecab)
+        let result = MeCabTokenBoundaryNormalizer.apply(text: nsText, spans: spans, mecab: mecab)
 
         XCTAssertEqual(result.spans, spans)
+        XCTAssertTrue(result.forcedCuts.isEmpty)
+    }
+
+    func testDoesNotSplitImmediatelyAfterSokuonWhenNextIsNotBoundary() {
+        // Regression guard: avoid emitting spans that end with small っ/ッ
+        // (e.g. "ぼっ" + "ちよ" for "ぼっちよ").
+        let text = "ぼっちよ"
+        let nsText = text as NSString
+        let spans = [
+            TextSpan(range: NSRange(location: 0, length: nsText.length), surface: text, isLexiconMatch: true)
+        ]
+        let mecab = [
+            mecab(NSRange(location: 0, length: 2), surface: "ぼっ", pos: "名詞"),
+            mecab(NSRange(location: 2, length: 2), surface: "ちよ", pos: "名詞")
+        ]
+
+        let result = MeCabTokenBoundaryNormalizer.apply(text: nsText, spans: spans, mecab: mecab)
+
+        XCTAssertEqual(result.spans.count, 1)
+        XCTAssertEqual(result.spans.first?.surface, text)
         XCTAssertTrue(result.forcedCuts.isEmpty)
     }
 }

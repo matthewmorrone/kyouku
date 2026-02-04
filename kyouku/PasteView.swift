@@ -1698,7 +1698,73 @@ struct PasteView: View {
         let selectedRange = selection.range
         let currentText = inputText
         let selectionID = selection.id
-        let lemmaFallbacks = selection.annotatedSpan.lemmaCandidates
+
+        // If a semantic token is a merge of multiple Stage-1 spans, the merged surface may not exist
+        // as a dictionary headword even when some components do. Keep determinism (single transaction),
+        // but add bounded component/n-gram fallbacks so the popup doesn't dead-end on a made-up composite.
+        let lemmaFallbacks: [String] = {
+            func normalized(_ raw: String) -> String {
+                raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            var out: [String] = []
+            out.reserveCapacity(16)
+            var seen: Set<String> = []
+
+            func appendUnique(_ raw: String) {
+                let trimmed = normalized(raw)
+                guard trimmed.isEmpty == false else { return }
+                if seen.insert(trimmed).inserted {
+                    out.append(trimmed)
+                }
+            }
+
+            // 1) Aggregated MeCab lemma candidates (existing behavior).
+            for lemma in selection.annotatedSpan.lemmaCandidates {
+                appendUnique(lemma)
+            }
+
+            // 2) If this selection covers multiple Stage-1 spans, also try component surfaces and
+            //    short adjacent concatenations (e.g. A, B, AB, BC, ABC) as fallbacks.
+            if selection.sourceSpanIndices.count > 1, let stage1 = furiganaSpans {
+                let idx = selection.sourceSpanIndices
+                if idx.lowerBound >= 0, idx.upperBound <= stage1.count {
+                    let group = Array(stage1[idx.lowerBound..<idx.upperBound])
+                    let surfaces = group.map { normalized($0.span.surface) }.filter { $0.isEmpty == false }
+
+                    for s in surfaces {
+                        appendUnique(s)
+                    }
+
+                    // Bounded n-grams: keep small to avoid doing too many dictionary queries.
+                    let maxGram = min(4, surfaces.count)
+                    if surfaces.count >= 2 {
+                        for i in 0..<surfaces.count {
+                            var combined = ""
+                            for len in 2...maxGram {
+                                let j = i + len
+                                if j > surfaces.count { break }
+                                if combined.isEmpty {
+                                    combined = surfaces[i..<j].joined(separator: "")
+                                } else {
+                                    combined += surfaces[j - 1]
+                                }
+                                appendUnique(combined)
+                            }
+                        }
+                    }
+
+                    // Include any per-span lemma candidates that might not have been surfaced by aggregation.
+                    for span in group {
+                        for lemma in span.lemmaCandidates {
+                            appendUnique(lemma)
+                        }
+                    }
+                }
+            }
+
+            return out
+        }()
 
         Task { [selection, tokens, selectedRange, currentText, selectionID, lemmaFallbacks] in
             // Treat surface/deinflection + lemma fallbacks as ONE transaction.

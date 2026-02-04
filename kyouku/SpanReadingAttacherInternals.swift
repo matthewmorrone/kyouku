@@ -195,34 +195,86 @@ extension SpanReadingAttacher {
         nsText: NSString,
         range: NSRange
     ) -> String? {
-        guard surface == "何" else { return reading }
         guard let reading else { return reading }
         let trimmed = reading.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else { return reading }
 
-        // Only rewrite the common dictionary-like "なに".
         let normalized = Self.toHiragana(trimmed)
-        guard normalized == "なに" else { return reading }
 
-        // Look ahead in the original text.
-        let end = NSMaxRange(range)
-        guard end >= 0, end < nsText.length else { return reading }
-        let lookaheadLen = min(6, nsText.length - end)
-        guard lookaheadLen > 0 else { return reading }
-        let remainder = nsText.substring(with: NSRange(location: end, length: lookaheadLen))
-
-        // Common "なん" contexts: 何で / 何でも / 何だ / 何て / 何と / 何の / 何なら.
-        if remainder.hasPrefix("で") ||
-            remainder.hasPrefix("だ") ||
-            remainder.hasPrefix("て") ||
-            remainder.hasPrefix("と") ||
-            remainder.hasPrefix("の") ||
-            remainder.hasPrefix("なら")
-        {
-            return "なん"
+        func composedCharacterString(at utf16Index: Int) -> String? {
+            guard utf16Index >= 0, utf16Index < nsText.length else { return nil }
+            let r = nsText.rangeOfComposedCharacterSequence(at: utf16Index)
+            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= nsText.length else { return nil }
+            return nsText.substring(with: r)
         }
 
-        return reading
+        func isNumericKanji(_ s: String) -> Bool {
+            // Covers common numeric kanji used in compounds like 二人三脚 / 一人二役.
+            // Keep this intentionally narrow and best-effort.
+            guard s.count == 1 else { return false }
+            return "一二三四五六七八九十百千".contains(s)
+        }
+
+        func containsKanjiGlyph(_ s: String) -> Bool {
+            s.unicodeScalars.contains { scalar in
+                switch scalar.value {
+                case 0x3400...0x4DBF, // CJK Ext A
+                     0x4E00...0x9FFF: // CJK Unified
+                    return true
+                default:
+                    return false
+                }
+            }
+        }
+
+        switch surface {
+        case "一人":
+            if normalized == "いちにん" || normalized == "いちじん" {
+                let end = NSMaxRange(range)
+                if let next = composedCharacterString(at: end), containsKanjiGlyph(next), isNumericKanji(next) {
+                    return reading
+                }
+                return "ひとり"
+            }
+            return reading
+
+        case "二人":
+            if normalized == "ににん" {
+                let end = NSMaxRange(range)
+                if let next = composedCharacterString(at: end), containsKanjiGlyph(next), isNumericKanji(next) {
+                    return reading
+                }
+                return "ふたり"
+            }
+            return reading
+
+        case "何":
+            // Only rewrite the common dictionary-like "なに".
+            guard normalized == "なに" else { return reading }
+
+            // Look ahead in the original text.
+            let end = NSMaxRange(range)
+            guard end >= 0, end < nsText.length else { return reading }
+            let lookaheadLen = min(6, nsText.length - end)
+            guard lookaheadLen > 0 else { return reading }
+            let remainder = nsText.substring(with: NSRange(location: end, length: lookaheadLen))
+
+            // Common "なん" contexts: 何で / 何でも / 何だ / 何て / 何と / 何の / 何なら.
+            if remainder.hasPrefix("で") ||
+                remainder.hasPrefix("だ") ||
+                remainder.hasPrefix("て") ||
+                remainder.hasPrefix("と") ||
+                remainder.hasPrefix("の") ||
+                remainder.hasPrefix("なら")
+            {
+                return "なん"
+            }
+
+            return reading
+
+        default:
+            return reading
+        }
     }
 
     func attachmentForSpan(_ span: TextSpan, annotations: [MeCabAnnotation], tokenizer: Tokenizer) -> SpanAttachmentResult {

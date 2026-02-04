@@ -989,7 +989,6 @@ private struct LookupResultsView: View {
         let entryReading = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
         let isActiveDictionaryReading = activeReading.isEmpty == false && entryReading.isEmpty == false && activeReading == entryReading
         let isActiveCustomReading = activeReading.isEmpty == false && (activeReading != entryReading)
-        let shouldShowApplyReadingButton = true
 
         let tokenSurface = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokenReading = (selection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -997,6 +996,7 @@ private struct LookupResultsView: View {
         let tokenLemma = (selection.annotatedSpan.lemmaCandidates.first ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
         let surfaceHasKanji = tokenSurface.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+        let shouldShowApplyReadingButton = surfaceHasKanji
 
         // Treat the dictionary headword as the canonical lemma.
         // NOTE: For some nouns, MeCab may provide a kana-only lemma (e.g. 一人 -> ひとり).
@@ -1062,17 +1062,38 @@ private struct LookupResultsView: View {
             return reading.hasSuffix(okurigana) ? reading : (reading + okurigana)
         }
 
-        // Surface reading should reflect the actual surface form when the token is inflected,
-        // but still allow paging alternate dictionary readings when the surface is lemma-like.
+        // Surface reading should preview how THIS dictionary entry's reading would apply
+        // to the selected surface form.
+        //
+        // If we instead always show the current token reading when surface != lemma,
+        // we can end up with mixed pairs like:
+        //   抱かれ(いだかれ)
+        //   抱く(だく)
+        // which is confusing when paging alternate readings.
         let dictionaryReading = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func conjugatedSurfaceReading(from lemmaReading: String, lemmaSurface: String, tokenSurface: String) -> String {
+            guard lemmaReading.isEmpty == false else { return "" }
+            let tokenSuffix = trailingKanaRun(in: tokenSurface)
+            let lemmaSuffix = trailingKanaRun(in: lemmaSurface)
+            guard tokenSuffix.isEmpty == false, lemmaSuffix.isEmpty == false else { return lemmaReading }
+            guard lemmaReading.hasSuffix(lemmaSuffix) else { return lemmaReading }
+            let stem = String(lemmaReading.dropLast(lemmaSuffix.count))
+            return stem + tokenSuffix
+        }
+
         let surfaceReadingBase: String = {
-            if tokenReading.isEmpty == false {
-                // Prefer MeCab's surface reading when surface != lemma (e.g., ひいた -> ひいた),
-                // and for kana-only surfaces where okurigana logic doesn't apply.
-                if tokenSurface != lemmaSurface { return tokenReading }
-                if surfaceHasKanji == false { return tokenReading }
+            if tokenSurface != lemmaSurface {
+                // Prefer entry-derived preview when the token looks inflected.
+                if dictionaryReading.isEmpty == false {
+                    return conjugatedSurfaceReading(from: dictionaryReading, lemmaSurface: lemmaSurface, tokenSurface: tokenSurface)
+                }
+                return tokenReading
             }
-            return dictionaryReading.isEmpty ? tokenReading : dictionaryReading
+
+            // Lemma-like surface: show the dictionary reading when available.
+            if dictionaryReading.isEmpty == false { return dictionaryReading }
+            return tokenReading
         }()
         let surfaceReading = readingIncludingOkurigana(surface: tokenSurface, reading: surfaceReadingBase)
 

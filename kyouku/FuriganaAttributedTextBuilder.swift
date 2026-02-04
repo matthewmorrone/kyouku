@@ -354,7 +354,7 @@ enum FuriganaAttributedTextBuilder {
 
         let attachmentStart = CFAbsoluteTimeGetCurrent()
 
-        // Stage 1.5: POS-aware boundary enforcement (split-only).
+        // Stage 1.5: MeCab token-boundary enforcement (split-only).
         //
         // Important constraints:
         // - Must be pure in-memory (no SQLite, no trie lookups).
@@ -367,7 +367,7 @@ enum FuriganaAttributedTextBuilder {
         // auto-split them here; otherwise manual merges can appear to “not work”
         // because Stage 1.5 immediately reintroduces boundaries.
         if baseSpans == nil {
-            let stage15 = Stage1_5PosBoundaryNormalizer.apply(
+            let stage15 = MeCabTokenBoundaryNormalizer.apply(
                 text: nsText,
                 spans: spansForAttachment,
                 mecab: mecabAnnotations
