@@ -404,7 +404,9 @@ private extension CoreTextRubyRenderView {
 
         return [
             kCTRunDelegateAttributeName as NSAttributedString.Key: delegate as Any,
-            .foregroundColor: UIColor.clear
+            .foregroundColor: UIColor.clear,
+            // CoreText uses this attribute (CGColor) for text fill.
+            kCTForegroundColorAttributeName as NSAttributedString.Key: UIColor.clear.cgColor
         ]
     }
 }

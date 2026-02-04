@@ -48,6 +48,8 @@ struct WordDefinitionsView: View {
     @State private var headerLemmaLine: String? = nil
     @State private var headerFormLine: String? = nil
 
+    @State private var showAllConjugations: Bool = false
+
     @State private var componentPreviewPart: TokenPart? = nil
 
     @State private var inferredTokenParts: [TokenPart] = []
@@ -209,6 +211,61 @@ struct WordDefinitionsView: View {
                 }
             }
 
+            if shouldShowVerbConjugations {
+                Section("Conjugations") {
+                    if let verbConjugationHeaderLine {
+                        Text(verbConjugationHeaderLine)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    let visible = verbConjugations(set: .common)
+                    ForEach(Array(visible.enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(item.label)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 140, alignment: .leading)
+
+                            Text(item.surface)
+                                .font(.body.weight(.semibold))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .textSelection(.enabled)
+                    }
+
+                    if showAllConjugations {
+                        Divider()
+                            .padding(.vertical, 4)
+
+                        let commonLabelSet = Set(visible.map(\.label))
+                        let all = verbConjugations(set: .all).filter { commonLabelSet.contains($0.label) == false }
+                        ForEach(Array(all.enumerated()), id: \.offset) { _, item in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text(item.label)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 140, alignment: .leading)
+
+                                Text(item.surface)
+                                    .font(.body)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .textSelection(.enabled)
+                        }
+                    }
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showAllConjugations.toggle()
+                        }
+                    } label: {
+                        Text(showAllConjugations ? "Show fewer" : "Show all conjugations")
+                            .font(.callout.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
             // Definitions list
             Section {
                 if isLoading {
@@ -329,6 +386,8 @@ struct WordDefinitionsView: View {
         .navigationTitle("Details")
         .navigationBarTitleDisplayMode(.inline)
         .task(id: loadTaskKey) {
+            ViewedDictionaryHistoryStore.shared.record(surface: titleText, kana: kana)
+            showAllConjugations = false
             await updateHeaderLemmaAndFormLines()
             await load()
             refreshContextInsights()
@@ -1844,6 +1903,60 @@ struct WordDefinitionsView: View {
             }
             return tag
         }
+    }
+
+    // MARK: Verb conjugations
+    private var shouldShowVerbConjugations: Bool {
+        guard entryDetails.isEmpty == false else { return false }
+        guard verbConjugationVerbClass != nil else { return false }
+        guard verbConjugationBaseForm.isEmpty == false else { return false }
+        return true
+    }
+
+    private var verbConjugationHeaderLine: String? {
+        guard let verbClass = verbConjugationVerbClass else { return nil }
+        let cls: String
+        switch verbClass {
+        case .ichidan: cls = "ichidan"
+        case .godan: cls = "godan"
+        case .suru: cls = "suru"
+        case .kuru: cls = "kuru"
+        }
+        return "Based on lemma: \(verbConjugationBaseForm) (\(cls) verb)"
+    }
+
+    private var verbConjugationBaseForm: String {
+        let lemma = (primaryLemmaText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if lemma.isEmpty == false { return lemma }
+        return titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var verbConjugationVerbClass: JapaneseVerbConjugator.VerbClass? {
+        let tags = verbPosTags
+        return JapaneseVerbConjugator.detectVerbClass(fromJMDictPosTags: tags)
+    }
+
+    private var verbPosTags: [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        for detail in entryDetails {
+            for sense in detail.senses {
+                for tag in sense.partsOfSpeech {
+                    let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed.isEmpty == false else { continue }
+                    let key = trimmed.lowercased()
+                    if seen.insert(key).inserted {
+                        out.append(trimmed)
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    private func verbConjugations(set: JapaneseVerbConjugator.ConjugationSet) -> [JapaneseVerbConjugation] {
+        guard let verbClass = verbConjugationVerbClass else { return [] }
+        return JapaneseVerbConjugator.conjugations(for: verbConjugationBaseForm, verbClass: verbClass, set: set)
     }
 
     private func japaneseHighlightTermsForSentences() -> [String] {

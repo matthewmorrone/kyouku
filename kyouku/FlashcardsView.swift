@@ -34,8 +34,8 @@ struct FlashcardsView: View {
     }
 
     enum CardDirection: String, CaseIterable, Identifiable {
-        case kanjiToKana = "Kanji → Kana"
-        case kanaToEnglish = "Kana → English"
+        case kanjiToKana = "漢字 → かな"
+        case kanaToEnglish = "かな → English"
         var id: String { rawValue }
     }
 
@@ -46,7 +46,7 @@ struct FlashcardsView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
+            Group {
                 if store.words.isEmpty {
                     emptySavedState
                 } else if session.isEmpty {
@@ -56,17 +56,28 @@ struct FlashcardsView: View {
                         sessionCompleteState
                     }
                 } else {
-                    header
-                    Spacer(minLength: 8)
-                    cardStack
-                    Spacer(minLength: 8)
-                    controls
+                    VStack(spacing: 16) {
+                        header
+                        Spacer(minLength: 8)
+                        cardStack
+                        Spacer(minLength: 8)
+                        controls
+                    }
+                    .padding()
                 }
             }
-            .padding()
-            .navigationTitle("Study")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                /*ToolbarItem(placement: .principal) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "rectangle.on.rectangle.angled")
+                        Text("Flashcards")
+                    }
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Flashcards")
+                }*/
                 ToolbarItem(placement: .topBarLeading) {
                     if session.isEmpty == false {
                         Button {
@@ -86,16 +97,18 @@ struct FlashcardsView: View {
                     .help("Restart")
                     .disabled(sessionSource.isEmpty)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        shuffled.toggle()
-                        if !sessionSource.isEmpty {
-                            startSession()
+                if session.isEmpty == false || sessionSource.isEmpty == false {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            shuffled.toggle()
+                            if !sessionSource.isEmpty {
+                                startSession()
+                            }
+                        } label: {
+                            Image(systemName: shuffled ? "shuffle" : "shuffle.slash")
                         }
-                    } label: {
-                        Image(systemName: shuffled ? "shuffle" : "shuffle.slash")
+                        .help(shuffled ? "Shuffle On" : "Shuffle Off")
                     }
-                    .help(shuffled ? "Shuffle On" : "Shuffle Off")
                 }
             }
             .alert("End session?", isPresented: $showEndSessionConfirm) {
@@ -241,54 +254,72 @@ struct FlashcardsView: View {
     }
 
     private var reviewHome: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label("Flashcards", systemImage: "rectangle.on.rectangle.angled")
-                        .font(.headline)
-
-                    Picker("Scope", selection: $scope) {
-                        ForEach(ReviewScope.allCases) { s in
-                            Text(s.rawValue).tag(s)
-                        }
+        Form {
+            Section {
+                Picker("Scope", selection: $scope) {
+                    ForEach(ReviewScope.allCases) { s in
+                        Text(s.rawValue).tag(s)
                     }
-                    .pickerStyle(.segmented)
-
-                    if scope == .mostRecent {
-                        Stepper("Most recent: \u{200E}\(mostRecentCount)", value: $mostRecentCount, in: 5...200, step: 5)
-                    } else if scope == .fromNote {
-                        NotePicker(selectedNoteID: $selectedNoteID)
-                    }
-
-                    Picker("Direction", selection: $direction) {
-                        ForEach(CardDirection.allCases) { d in
-                            Text(d.rawValue).tag(d)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    let matchingCount = wordsMatchingSelection().count
-                    Text(matchingCount == 0 ? "No cards match this selection" : "Cards in selection: \(matchingCount)")
-                        .font(.footnote)
-                        .foregroundStyle(matchingCount == 0 ? .red : .secondary)
-
-                    Button {
-                        startSessionFromHome()
-                    } label: {
-                        Label("Start Flashcards", systemImage: "play.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(matchingCount == 0)
                 }
-                .padding(12)
-                .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 12))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.appBorder, lineWidth: 1)
-                )
+                .pickerStyle(.segmented)
+
+                if scope == .mostRecent {
+                    Stepper("Most recent: \u{200E}\(mostRecentCount)", value: $mostRecentCount, in: 5...200, step: 5)
+                } else if scope == .fromNote {
+                    NotePicker(selectedNoteID: $selectedNoteID)
+                }
+            } header: {
+                Label("Flashcards", systemImage: "rectangle.on.rectangle.angled")
             }
-            .padding()
+
+            Section {
+                Picker("Direction", selection: $direction) {
+                    ForEach(CardDirection.allCases) { d in
+                        Text(d.rawValue).tag(d)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }/* header: {
+                Text("Direction")
+            }*/
+
+            Section {
+                let matchingCount = wordsMatchingSelection().count
+
+                Button {
+                    shuffled.toggle()
+                } label: {
+                    Label(shuffled ? "Shuffle On" : "Shuffle Off", systemImage: shuffled ? "shuffle" : "shuffle.slash")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cards in selection")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("\(matchingCount)")
+                        .font(.largeTitle.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(matchingCount == 0 ? .red : Color.appTextPrimary)
+
+                    if matchingCount == 0 {
+                        Text("No cards match this selection")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+
+                Button {
+                    startSessionFromHome()
+                } label: {
+                    Label("Start Flashcards", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(matchingCount == 0)
+            }
         }
     }
 

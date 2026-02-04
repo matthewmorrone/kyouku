@@ -14,11 +14,26 @@ private enum WordsListFilter: Hashable {
     }
 }
 
+private enum DictionaryHomeShelf: String, CaseIterable, Identifiable {
+    case favorites
+    case history
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .favorites: return "Favorites"
+        case .history: return "History"
+        }
+    }
+}
+
 struct WordsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notesStore: NotesStore
     @EnvironmentObject var router: AppRouter
     @StateObject private var lookup = DictionaryLookupViewModel()
+    @ObservedObject private var viewedHistory = ViewedDictionaryHistoryStore.shared
     @State private var searchText: String = ""
     @State private var searchMode: DictionarySearchMode = .japanese
     @State private var editModeState: EditMode = .inactive
@@ -29,6 +44,7 @@ struct WordsView: View {
     @State private var showListsBrowserSheet: Bool = false
     @State private var showNewWordSheet: Bool = false
     @AppStorage("wordsShowEntrySourceLabels") private var showEntrySourceLabels: Bool = false
+    @AppStorage("dictionaryHomeShelf") private var dictionaryHomeShelfRaw: String = DictionaryHomeShelf.favorites.rawValue
     @State private var suppressedSearchTaskID: String? = nil
 
     private struct EditingWord: Identifiable {
@@ -41,6 +57,9 @@ struct WordsView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 searchBar
+                if hasActiveSearch == false {
+                    dictionaryHomeToggle
+                }
                 mainList
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -70,74 +89,87 @@ struct WordsView: View {
                             Label("Show Source", systemImage: "tag")
                         }
 
-                        Button {
-                            selectedFilter = .all
-                        } label: {
-                            HStack {
-                                Text("All Words")
-                                if selectedFilter.isAll {
-                                    Spacer()
-                                    Image(systemName: "checkmark")
+                        if dictionaryHomeShelf == .favorites {
+                            Button {
+                                selectedFilter = .all
+                            } label: {
+                                HStack {
+                                    Text("All Words")
+                                    if selectedFilter.isAll {
+                                        Spacer()
+                                        Image(systemName: "checkmark")
+                                    }
                                 }
                             }
-                        }
 
-                        if store.lists.isEmpty == false {
-                            Divider()
-                            ForEach(store.lists) { list in
-                                let count = store.wordCount(inList: list.id)
-                                Button {
-                                    selectedFilter = .list(list.id)
-                                } label: {
-                                    HStack {
-                                        Text(list.name)
-                                        Spacer()
-                                        Text("\(count)")
-                                            .foregroundStyle(.secondary)
-                                        if selectedFilter == .list(list.id) {
-                                            Image(systemName: "checkmark")
+                            if store.lists.isEmpty == false {
+                                Divider()
+                                ForEach(store.lists) { list in
+                                    let count = store.wordCount(inList: list.id)
+                                    Button {
+                                        selectedFilter = .list(list.id)
+                                    } label: {
+                                        HStack {
+                                            Text(list.name)
+                                            Spacer()
+                                            Text("\(count)")
+                                                .foregroundStyle(.secondary)
+                                            if selectedFilter == .list(list.id) {
+                                                Image(systemName: "checkmark")
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        let noteLists = noteListItems
-                        if noteLists.isEmpty == false {
-                            Divider()
-                            ForEach(noteLists) { item in
-                                Button {
-                                    selectedFilter = .note(item.id)
-                                } label: {
-                                    HStack {
-                                        Text(item.title)
-                                        Spacer()
-                                        Text("\(item.count)")
-                                            .foregroundStyle(.secondary)
-                                        if selectedFilter == .note(item.id) {
-                                            Image(systemName: "checkmark")
+                            let noteLists = noteListItems
+                            if noteLists.isEmpty == false {
+                                Divider()
+                                ForEach(noteLists) { item in
+                                    Button {
+                                        selectedFilter = .note(item.id)
+                                    } label: {
+                                        HStack {
+                                            Text(item.title)
+                                            Spacer()
+                                            Text("\(item.count)")
+                                                .foregroundStyle(.secondary)
+                                            if selectedFilter == .note(item.id) {
+                                                Image(systemName: "checkmark")
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        Divider()
-                        Button {
-                            showListsBrowserSheet = true
-                        } label: {
-                            Label("Browse Lists", systemImage: "folder")
-                        }
+                            Divider()
+                            Button {
+                                showListsBrowserSheet = true
+                            } label: {
+                                Label("Browse Lists", systemImage: "folder")
+                            }
 
-                        Button {
-                            showListsSheet = true
-                        } label: {
-                            Label("Manage Saved Lists", systemImage: "folder.badge.gear")
+                            Button {
+                                showListsSheet = true
+                            } label: {
+                                Label("Manage Saved Lists", systemImage: "folder.badge.gear")
+                            }
+                        } else {
+                            Divider()
+                            Button(role: .destructive) {
+                                viewedHistory.clear()
+                            } label: {
+                                Label("Clear Viewed History", systemImage: "trash")
+                            }
+                            .disabled(viewedHistory.items.isEmpty)
                         }
                     } label: {
-                        Image(systemName: selectedFilter.isAll ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                        Image(systemName: dictionaryHomeShelf == .favorites
+                            ? (selectedFilter.isAll ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                            : "ellipsis.circle"
+                        )
                     }
-                    .accessibilityLabel("Filter lists")
+                    .accessibilityLabel(dictionaryHomeShelf == .favorites ? "Filter lists" : "History options")
 
                     if isEditing {
                         if canEditSavedWords {
@@ -176,6 +208,12 @@ struct WordsView: View {
             }
         }
         .onChange(of: selectedFilter) { oldValue, newValue in
+            if oldValue != newValue {
+                selectedWordIDs.removeAll()
+                editModeState = .inactive
+            }
+        }
+        .onChange(of: dictionaryHomeShelfRaw) { oldValue, newValue in
             if oldValue != newValue {
                 selectedWordIDs.removeAll()
                 editModeState = .inactive
@@ -322,11 +360,40 @@ struct WordsView: View {
             }
             .appThemedScrollBackground()
         } else {
-            List(selection: $selectedWordIDs) {
-                savedSection
+            if dictionaryHomeShelf == .favorites {
+                List(selection: $selectedWordIDs) {
+                    savedSection
+                }
+                .appThemedScrollBackground()
+            } else {
+                List {
+                    historySection
+                }
+                .appThemedScrollBackground()
             }
-            .appThemedScrollBackground()
         }
+    }
+
+    private var dictionaryHomeShelf: DictionaryHomeShelf {
+        DictionaryHomeShelf(rawValue: dictionaryHomeShelfRaw) ?? .favorites
+    }
+
+    private var dictionaryHomeShelfSelection: Binding<DictionaryHomeShelf> {
+        Binding(
+            get: { dictionaryHomeShelf },
+            set: { dictionaryHomeShelfRaw = $0.rawValue }
+        )
+    }
+
+    private var dictionaryHomeToggle: some View {
+        Picker("Dictionary", selection: dictionaryHomeShelfSelection) {
+            ForEach(DictionaryHomeShelf.allCases) { shelf in
+                Text(shelf.title).tag(shelf)
+            }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal)
+        .padding(.bottom, 8)
     }
 
     @ViewBuilder
@@ -389,6 +456,56 @@ struct WordsView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var historySection: some View {
+        if viewedHistory.items.isEmpty {
+            Text("Words you view in Details appear here.")
+                .foregroundStyle(Color.appTextSecondary)
+        } else {
+            ForEach(viewedHistory.items) { item in
+                NavigationLink {
+                    WordDefinitionsView(
+                        surface: item.surface,
+                        kana: item.kana,
+                        contextSentence: nil,
+                        lemmaCandidates: [],
+                        tokenPartOfSpeech: nil,
+                        sourceNoteID: nil,
+                        tokenParts: []
+                    )
+                } label: {
+                    historyRow(item)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        viewedHistory.remove(id: item.id)
+                    } label: {
+                        Label("Remove", systemImage: "trash")
+                    }
+                }
+            }
+        }
+    }
+
+    private func historyRow(_ item: ViewedDictionaryHistoryStore.Item) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.surface)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+
+                if let kana = item.kana, kana.isEmpty == false, kana != item.surface {
+                    Text(kana)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
     }
 
     private func savedRow(_ word: Word) -> some View {
@@ -908,7 +1025,7 @@ private struct WordListsBrowserView: View {
     }
 
     private var canEditSavedWords: Bool {
-        hasActiveSearch == false && store.words.isEmpty == false
+        hasActiveSearch == false && dictionaryHomeShelf == .favorites && store.words.isEmpty == false
     }
 
     private func toggleSelection(for word: Word) {

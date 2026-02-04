@@ -8,13 +8,15 @@ struct ClozeStudyView: View {
     init(
         note: Note,
         initialMode: ClozeStudyViewModel.Mode = .random,
-        initialBlanksPerSentence: Int = 1
+        initialBlanksPerSentence: Int = 1,
+        excludeDuplicateLines: Bool = true
     ) {
         _model = StateObject(
             wrappedValue: ClozeStudyViewModel(
                 note: note,
                 initialMode: initialMode,
-                initialBlanksPerSentence: initialBlanksPerSentence
+                initialBlanksPerSentence: initialBlanksPerSentence,
+                excludeDuplicateLines: excludeDuplicateLines
             )
         )
     }
@@ -29,9 +31,22 @@ struct ClozeStudyView: View {
                 Spacer(minLength: 0)
             }
             .padding(16)
-            .navigationTitle(model.note.title?.isEmpty == false ? model.note.title! : "Study")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    let titleText = (model.note.title?.isEmpty == false ? model.note.title! : "Study")
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "rectangle.and.pencil.and.ellipsis")
+                        Text(titleText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(titleText)
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Done") { dismiss() }
                 }

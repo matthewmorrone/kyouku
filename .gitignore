@@ -5,10 +5,10 @@ scripts/sentence-pairs.tsv
 scripts/cc.ja.300.pruned.f32
 scripts/__pycache__/
 *.pyc
-dictionary.sqlite3
-kyouku/dictionary.sqlite3
-kyouku/jmdict.sqlite3
-kyouku.xcodeproj/xcuserdata/matthewmorrone.xcuserdatad/xcdebugger/Breakpoints_v2.xcbkptlist
+*.sqlite3
+
+# Local scratch datasets / large corpora
+data/
 
 # Local CLI DerivedData output
 .derivedData-device/

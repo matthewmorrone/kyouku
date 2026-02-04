@@ -1835,19 +1835,19 @@ struct PasteView: View {
     private func tokenPartsForSelection(_ selection: TokenSelectionContext) -> [WordDefinitionsView.TokenPart] {
         let indices = selection.sourceSpanIndices
         guard indices.isEmpty == false else { return [] }
-        guard furiganaSemanticSpans.isEmpty == false else { return [] }
+        guard let stage1 = furiganaSpans, stage1.isEmpty == false else { return [] }
 
         var parts: [WordDefinitionsView.TokenPart] = []
         parts.reserveCapacity(min(8, indices.count))
         var seen: Set<String> = []
 
         for idx in indices {
-            guard furiganaSemanticSpans.indices.contains(idx) else { continue }
-            let semantic = furiganaSemanticSpans[idx]
-            guard let trimmed = trimmedRangeAndSurface(for: semantic.range) else { continue }
+            guard stage1.indices.contains(idx) else { continue }
+            let annotated = stage1[idx]
+            guard let trimmed = trimmedRangeAndSurface(for: annotated.span.range) else { continue }
             guard isHardBoundaryOnly(trimmed.surface) == false else { continue }
 
-            let reading = normalizedReading(preferredReading(for: trimmed.range, fallback: semantic.readingKana))
+            let reading = normalizedReading(preferredReading(for: trimmed.range, fallback: annotated.readingKana))
             let key = "\(trimmed.range.location)#\(trimmed.range.length)"
             guard seen.contains(key) == false else { continue }
             seen.insert(key)

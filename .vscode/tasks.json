@@ -1,25 +1,88 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "Sim: Build + Install + Launch",
-      "type": "shell",
-      "command": "bash",
-      "args": [
-        "${workspaceFolder}/scripts/sim-run.sh"
-      ],
-      "problemMatcher": [],
-      "group": "build"
-    },
-    {
-      "label": "Device: Build + Install + Launch",
-      "type": "shell",
-      "command": "bash",
-      "args": [
-        "${workspaceFolder}/scripts/device-run.sh"
-      ],
-      "problemMatcher": [],
-      "group": "build"
-    }
-  ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Sim: Build + Install + Launch",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"${workspaceFolder}/scripts/sim-run.sh"
+			],
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Device: Build + Install + Launch",
+			"type": "shell",
+			"command": "bash",
+			"args": [
+				"${workspaceFolder}/scripts/device-run.sh"
+			],
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build (generic iOS, no signing)",
+			"type": "shell",
+			"command": "xcodebuild",
+			"args": [
+				"-project",
+				"kyouku.xcodeproj",
+				"-scheme",
+				"kyouku",
+				"-configuration",
+				"Debug",
+				"-destination",
+				"generic/platform=iOS",
+				"CODE_SIGNING_ALLOWED=NO",
+				"CODE_SIGNING_REQUIRED=NO",
+				"build"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build (generic iOS, no signing)",
+			"type": "shell",
+			"command": "xcodebuild",
+			"args": [
+				"-project",
+				"kyouku.xcodeproj",
+				"-scheme",
+				"kyouku",
+				"-configuration",
+				"Debug",
+				"-destination",
+				"generic/platform=iOS",
+				"CODE_SIGNING_ALLOWED=NO",
+				"CODE_SIGNING_REQUIRED=NO",
+				"build"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build (generic iOS, no signing)",
+			"type": "shell",
+			"command": "xcodebuild",
+			"args": [
+				"-project",
+				"kyouku.xcodeproj",
+				"-scheme",
+				"kyouku",
+				"-configuration",
+				"Debug",
+				"-destination",
+				"generic/platform=iOS",
+				"CODE_SIGNING_ALLOWED=NO",
+				"CODE_SIGNING_REQUIRED=NO",
+				"build"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
 }

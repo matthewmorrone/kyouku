@@ -71,4 +71,4 @@ Constraints:
 - Tests are XCTest in `kyoukuTests/` (notably `SpanReadingAttacherTests`, `FuriganaPipelineServiceTests`, `TextRangeTests`).
 
 ## Updating the dictionary DB
-- `generate-db.py` builds `kyouku/dictionary.sqlite3` from `jmdict-eng-3.6.1.json`; ensure Xcode bundles the updated DB.
+- `scripts/generate-db.py` builds `kyouku/dictionary.sqlite3` from `jmdict-eng-*.json`; ensure Xcode bundles the updated DB.

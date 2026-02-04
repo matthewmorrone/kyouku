@@ -141,192 +141,124 @@ enum Stage1_5PosBoundaryNormalizer {
         // Stage 1.5 is a split-only normalization pass.
         //
         // Correctness hardening:
-        // Stage 1 segmentation can emit spans whose ranges *straddle* MeCab token boundaries
-        // (i.e. a span overlaps parts of two MeCab tokens). That makes later logic that relies on
-        // MeCab ranges unreliable and can produce invalid surfaces.
+        // Stage 1 segmentation can emit spans whose boundaries fall strictly inside a chosen
+        // MeCab token (i.e. the boundary is not a MeCab token boundary). Later stages that
+        // rely on MeCab boundary metadata then fail to merge/split correctly.
         //
-        // Therefore, Stage 1.5 snaps spans to MeCab token boundaries by splitting any span at
-        // boundaries between adjacent MeCab tokens.
+        // Strategy:
+        // 1) Snap every Stage-1 span boundary to a valid MeCab token boundary when it is interior.
+        //    (Deterministic majority-side assignment; tie breaks toward token start.)
+        // 2) Split any resulting ranges only at MeCab token boundaries.
         var out: [TextSpan] = []
         out.reserveCapacity(spans.count)
 
-        // `forcedCuts` record the boundary indices we introduced by snapping.
+        // `forcedCuts` record the boundary indices introduced or adjusted by snapping.
         // These are ephemeral (not persisted).
         var forcedCuts: Set<Int> = []
         forcedCuts.reserveCapacity(min(128, spans.count))
 
-        var tokenIndex = 0
-
-
-        func clamp(_ r: NSRange) -> NSRange {
-            let length = text.length
-            guard length > 0 else { return NSRange(location: NSNotFound, length: 0) }
-            let start = max(0, min(length, r.location))
-            let end = max(start, min(length, NSMaxRange(r)))
-            return NSRange(location: start, length: end - start)
+        func clampIndex(_ idx: Int) -> Int {
+            max(0, min(text.length, idx))
         }
 
+        func snapToTokenBoundaryIfInterior(_ boundary: Int) -> Int {
+            let b = clampIndex(boundary)
+            guard b > 0, b < text.length else { return b }
+            guard let t = tokenCoveringLocation(b) else { return b }
+            let start = t.range.location
+            let end = NSMaxRange(t.range)
+            guard start < b, b < end else { return b }
+
+            let leftLen = b - start
+            let rightLen = end - b
+            if leftLen < rightLen { return start }
+            if rightLen < leftLen { return end }
+            return start
+        }
+
+        guard tokens.isEmpty == false else {
+            return Result(spans: spans, forcedCuts: [])
+        }
+
+        let originalCuts: Set<Int> = {
+            var s: Set<Int> = []
+            s.reserveCapacity(spans.count + 2)
+            s.insert(0)
+            s.insert(text.length)
+            for span in spans {
+                let end = clampIndex(NSMaxRange(span.range))
+                s.insert(end)
+            }
+            return s
+        }()
+
+        var snappedCuts: [Int] = []
+        snappedCuts.reserveCapacity(spans.count + 2)
+        snappedCuts.append(0)
         for span in spans {
-            let spanRange = clamp(span.range)
-            guard spanRange.location != NSNotFound, spanRange.length > 0 else {
+            let rawEnd = clampIndex(NSMaxRange(span.range))
+            let snapped = snapToTokenBoundaryIfInterior(rawEnd)
+            snappedCuts.append(snapped)
+        }
+        snappedCuts.append(text.length)
+
+        // Sort + dedupe, and ensure strict monotonic coverage.
+        let cuts = Array(Set(snappedCuts))
+            .map(clampIndex)
+            .sorted()
+
+        // Precompute all legal MeCab boundaries once.
+        let tokenBoundariesSorted: [Int] = {
+            var b: Set<Int> = []
+            b.reserveCapacity(tokens.count * 2)
+            for t in tokens {
+                b.insert(t.range.location)
+                b.insert(NSMaxRange(t.range))
+            }
+            return b.sorted()
+        }()
+
+        for i in 0..<(cuts.count - 1) {
+            let start = cuts[i]
+            let end = cuts[i + 1]
+            guard end > start else { continue }
+
+            // If we cannot guarantee token-boundary alignment (e.g. missing MeCab coverage), keep range as-is.
+            if allowedBoundaries.contains(start) == false || allowedBoundaries.contains(end) == false {
+                let r = NSRange(location: start, length: end - start)
+                out.append(TextSpan(range: r, surface: text.substring(with: r), isLexiconMatch: false))
                 continue
             }
 
-            let spanStart = spanRange.location
-            let spanEnd = NSMaxRange(spanRange)
-
-            // If this span is fully contained in a single chosen MeCab token, never split it.
-            // This is the non-negotiable token-atomic invariant.
-            if let t = tokenCoveringLocation(spanStart), NSMaxRange(t.range) >= spanEnd {
-                out.append(TextSpan(range: spanRange, surface: text.substring(with: spanRange), isLexiconMatch: span.isLexiconMatch))
-                if traceEnabled {
-                    log("decision: keep (span fully contained in token \(fmt(t.range)) «\(t.surface)»)")
-                }
+            // Split at any internal MeCab boundaries.
+            let internalCuts = tokenBoundariesSorted.filter { $0 > start && $0 < end }
+            if internalCuts.isEmpty {
+                let r = NSRange(location: start, length: end - start)
+                out.append(TextSpan(range: r, surface: text.substring(with: r), isLexiconMatch: false))
                 continue
             }
 
-            if traceEnabled {
-                log("input span range=\(fmt(spanRange)) surface=«\(text.substring(with: spanRange))»")
-            }
-
-            // Advance global token index so tokens[tokenIndex] ends after the span start.
-            while tokenIndex < tokens.count {
-                let tEnd = NSMaxRange(tokens[tokenIndex].range)
-                if tEnd <= spanStart {
-                    tokenIndex += 1
-                    continue
-                }
-                break
-            }
-
-            // Collect overlapping tokens.
-            var overlapping: [MeCabAnnotation] = []
-            var j = tokenIndex
-            while j < tokens.count {
-                let t = tokens[j]
-                if t.range.location >= spanEnd { break }
-                if NSIntersectionRange(t.range, spanRange).length > 0 {
-                    overlapping.append(t)
-                }
-                j += 1
-            }
-
-            if traceEnabled {
-                if overlapping.isEmpty {
-                    log("overlapping MeCab tokens: <none>")
-                } else {
-                    let tokenLines = overlapping.map { tok in
-                        "- \(fmt(tok.range)) «\(tok.surface)» POS=\(tok.partOfSpeech)"
-                    }.joined(separator: " | ")
-                    log("overlapping MeCab tokens: \(tokenLines)")
-                }
-            }
-
-            // If MeCab provides no usable overlap (should be rare), keep the original span.
-            if overlapping.isEmpty {
-                out.append(TextSpan(range: spanRange, surface: text.substring(with: spanRange), isLexiconMatch: span.isLexiconMatch))
-                if traceEnabled {
-                    log("decision: keep (no MeCab overlap)")
-                }
-                continue
-            }
-
-            // If this span is fully covered by exactly one MeCab token, never split it.
-            if overlapping.count == 1 {
-                let t = overlapping[0].range
-                if t.location <= spanStart, NSMaxRange(t) >= spanEnd {
-                    out.append(TextSpan(range: spanRange, surface: text.substring(with: spanRange), isLexiconMatch: span.isLexiconMatch))
-                    continue
-                }
-            }
-
-            // Only split at boundaries BETWEEN adjacent MeCab tokens; never split inside a token.
-            var cuts: [Int] = []
-            cuts.reserveCapacity(4)
-            if overlapping.count >= 2 {
-                for localIndex in 0..<(overlapping.count - 1) {
-                    let left = overlapping[localIndex]
-                    let right = overlapping[localIndex + 1]
-                    let boundary = NSMaxRange(left.range)
-                    guard boundary == right.range.location else { continue }
-                    if boundary > spanStart, boundary < spanEnd {
-                        cuts.append(boundary)
-                    }
-                }
-            }
-
-            // Emit sub-spans for this Stage-1 span.
-            // No merges: we only slice the original span at the chosen cut points.
-            if cuts.isEmpty {
-                out.append(TextSpan(range: spanRange, surface: text.substring(with: spanRange), isLexiconMatch: span.isLexiconMatch))
-                if traceEnabled {
-                    log("decision: keep (already aligned; no enforced cuts)")
-                }
-                continue
-            }
-
-            // Defensive dedupe in case the input spans overlap weirdly.
-            let uniqueCuts = Array(Set(cuts)).sorted().filter { cut in
-                // Forced cuts inside a MeCab token are forbidden: they create illegal
-                // over-segmentation (e.g. splitting auxiliaries into individual characters).
-                if let t = tokenCoveringLocation(cut), t.range.location < cut, cut < NSMaxRange(t.range) {
-                    if traceEnabled {
-                        log("skip cut=\(cut) (interior) token=\(fmt(t.range)) «\(t.surface)»")
-                    }
-                    return false
-                }
-
-                // Only allow forced cuts at exact token boundaries.
-                guard allowedBoundaries.contains(cut) else { return false }
-                return true
-            }
-
-            if uniqueCuts.isEmpty {
-                out.append(TextSpan(range: spanRange, surface: text.substring(with: spanRange), isLexiconMatch: span.isLexiconMatch))
-                if traceEnabled {
-                    log("decision: keep (all candidate cuts were interior to tokens)")
-                }
-                continue
-            }
-
-            if traceEnabled {
-                let uniq = uniqueCuts.map(String.init).joined(separator: ",")
-                log("decision: split at [\(uniq)]")
-            }
-
-            var cursor = spanStart
-            for cut in uniqueCuts {
-                if cut <= cursor { continue }
+            var cursor = start
+            for cut in internalCuts {
+                guard cut > cursor else { continue }
                 let r = NSRange(location: cursor, length: cut - cursor)
                 guard r.length > 0 else { continue }
-                let surface = text.substring(with: r)
-                // These boundaries are not trie-derived, so do not claim lexicon-match.
-                out.append(TextSpan(range: r, surface: surface, isLexiconMatch: false))
-                // Record the boundary index introduced by snapping.
-                var didInsertForcedCut = false
-                if cut > 0, cut < text.length,
-                   let left = mecabTokenIndex(at: cut - 1),
-                   let right = mecabTokenIndex(at: cut),
-                   left == right {
-                } else {
-                    forcedCuts.insert(cut)
-                    didInsertForcedCut = true
-                }
-                if traceEnabled, didInsertForcedCut {
-                    log("emit subspan range=\(fmt(r)) surface=«\(surface)» ; forcedCut=\(cut)")
-                }
+                out.append(TextSpan(range: r, surface: text.substring(with: r), isLexiconMatch: false))
                 cursor = cut
             }
-
-            if cursor < spanEnd {
-                let r = NSRange(location: cursor, length: spanEnd - cursor)
+            if cursor < end {
+                let r = NSRange(location: cursor, length: end - cursor)
                 if r.length > 0 {
-                    let surface = text.substring(with: r)
-                    out.append(TextSpan(range: r, surface: surface, isLexiconMatch: false))
-                    if traceEnabled {
-                        log("emit tail subspan range=\(fmt(r)) surface=«\(surface)»")
-                    }
+                    out.append(TextSpan(range: r, surface: text.substring(with: r), isLexiconMatch: false))
                 }
+            }
+        }
+
+        // forcedCuts = output boundaries not present in the original Stage-1 cuts.
+        for span in out {
+            let end = clampIndex(NSMaxRange(span.range))
+            if end > 0, end < text.length, originalCuts.contains(end) == false {
+                forcedCuts.insert(end)
             }
         }
 

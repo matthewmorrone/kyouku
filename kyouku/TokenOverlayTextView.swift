@@ -1063,6 +1063,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let delegate = CTRunDelegateCreate(&callbacks, ref)
             mutable.addAttribute(kCTRunDelegateAttributeName as NSAttributedString.Key, value: delegate as Any, range: NSRange(location: index, length: 1))
             mutable.addAttribute(.foregroundColor, value: UIColor.clear, range: NSRange(location: index, length: 1))
+            mutable.addAttribute(kCTForegroundColorAttributeName as NSAttributedString.Key, value: UIColor.clear.cgColor, range: NSRange(location: index, length: 1))
         }
 
         func makeLinePaddingSpacer(width: CGFloat, sampleAttributesFrom displayIndex: Int) -> NSAttributedString {
@@ -1091,6 +1092,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 attributes: [
                     kCTRunDelegateAttributeName as NSAttributedString.Key: delegate as Any,
                     .foregroundColor: UIColor.clear,
+                    kCTForegroundColorAttributeName as NSAttributedString.Key: UIColor.clear.cgColor,
                     .font: baseFont
                 ]
             )
@@ -1885,7 +1887,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
     private let headwordBoundingRectsLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
         layer.fillColor = UIColor.clear.cgColor
-        layer.strokeColor = UIColor.black.withAlphaComponent(0.75).cgColor
+        // These rects exist for stability/diagnostics; keep them non-visible by default.
+        layer.strokeColor = UIColor.clear.cgColor
         layer.lineWidth = 1.0
         layer.lineDashPattern = RubyTextConstants.debugBoundingDashPattern
         layer.actions = [
@@ -1897,6 +1900,25 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         ]
         layer.isHidden = true
         layer.zPosition = 40
+        return layer
+    }()
+
+    private let rubyBoundingRectsLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        // These rects exist for stability/diagnostics; keep them non-visible by default.
+        layer.strokeColor = UIColor.clear.cgColor
+        layer.lineWidth = 1.0
+        layer.lineDashPattern = RubyTextConstants.debugBoundingDashPattern
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        layer.zPosition = 41
         return layer
     }()
 
@@ -2318,6 +2340,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         rubyDebugRectsLayer.strokeColor = strokeColor.cgColor
         rubyDebugRectsLayer.lineDashPattern = RubyTextConstants.debugBoundingDashPattern
 
+        updateStabilityRectAppearance()
+
         if headwordDebugRectsEnabled {
             updateHeadwordDebugRects()
         }
@@ -2332,6 +2356,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             return RubyTextConstants.debugBoundingDarkModeStrokeColor
         }
         return RubyTextConstants.debugBoundingDefaultStrokeColor
+    }
+
+    private func updateStabilityRectAppearance() {
+        // If these layers are enabled for stability, they should never be visually prominent.
+        // Use fully transparent stroke/fill so light-mode doesn't show black boxes.
+        let stroke = UIColor.clear
+        headwordBoundingRectsLayer.strokeColor = stroke.cgColor
+        rubyBoundingRectsLayer.strokeColor = stroke.cgColor
+        headwordBoundingRectsLayer.fillColor = UIColor.clear.cgColor
+        rubyBoundingRectsLayer.fillColor = UIColor.clear.cgColor
     }
 
     private func resolvedDebugStrokeColor(at index: Int) -> UIColor? {
@@ -2465,6 +2499,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         headwordBoundingRectsLayer.contentsScale = traitCollection.displayScale
         layer.addSublayer(headwordBoundingRectsLayer)
+
+        rubyBoundingRectsLayer.contentsScale = traitCollection.displayScale
+        layer.addSublayer(rubyBoundingRectsLayer)
 
         if viewMetricsHUDEnabled {
             addSubview(viewMetricsHUDLabel)
@@ -2827,6 +2864,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let delegate = CTRunDelegateCreate(&callbacks, ref)
             mutable.addAttribute(kCTRunDelegateAttributeName as NSAttributedString.Key, value: delegate as Any, range: NSRange(location: index, length: 1))
             mutable.addAttribute(.foregroundColor, value: UIColor.clear, range: NSRange(location: index, length: 1))
+            mutable.addAttribute(kCTForegroundColorAttributeName as NSAttributedString.Key, value: UIColor.clear.cgColor, range: NSRange(location: index, length: 1))
         }
 
         var didChange = false
@@ -2934,7 +2972,27 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         super.traitCollectionDidChange(previousTraitCollection)
         if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
             updateDebugBoundingStrokeAppearance()
+            updateStabilityRectAppearance()
         }
+    }
+
+    private func updateRubyBoundingRects(resolvedFramesByRunStart: [Int: CGRect]) {
+        let path = CGMutablePath()
+
+        // Bound work; ruby overlay can be large in long docs.
+        var added = 0
+        let maxRects = 512
+        for rect in resolvedFramesByRunStart.values {
+            if added >= maxRects { break }
+            let r = rect.insetBy(dx: 0.5, dy: 0.5)
+            guard r.width > 0, r.height > 0 else { continue }
+            path.addRect(r)
+            added += 1
+        }
+
+        rubyBoundingRectsLayer.frame = CGRect(origin: .zero, size: contentSize)
+        rubyBoundingRectsLayer.path = path.isEmpty ? nil : path
+        rubyBoundingRectsLayer.isHidden = path.isEmpty
     }
 
     private func updateViewMetricsHUD() {
@@ -3773,6 +3831,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 rubyOverlayContainerLayer.sublayers = nil
             }
             rubyResolvedFramesByRunStart = [:]
+            rubyBoundingRectsLayer.path = nil
+            rubyBoundingRectsLayer.isHidden = true
             rubyOverlayDirty = false
             lastRubyOverlayLayoutSignature = signature
             return
@@ -3788,6 +3848,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         guard cachedRubyRuns.isEmpty == false else {
             rubyOverlayContainerLayer.sublayers = nil
             rubyResolvedFramesByRunStart = [:]
+            rubyBoundingRectsLayer.path = nil
+            rubyBoundingRectsLayer.isHidden = true
             rubyOverlayDirty = false
             lastRubyOverlayLayoutSignature = signature
             return
@@ -3797,6 +3859,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         guard headroom > 0 else {
             rubyOverlayContainerLayer.sublayers = nil
             rubyResolvedFramesByRunStart = [:]
+            rubyBoundingRectsLayer.path = nil
+            rubyBoundingRectsLayer.isHidden = true
             rubyOverlayDirty = false
             lastRubyOverlayLayoutSignature = signature
             return
@@ -3991,6 +4055,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         rubyOverlayContainerLayer.sublayers = layers
         rubyResolvedFramesByRunStart = resolvedFramesByRunStart
+        updateRubyBoundingRects(resolvedFramesByRunStart: resolvedFramesByRunStart)
         rubyOverlayDirty = false
         lastRubyOverlayLayoutSignature = signature
     }
@@ -4836,8 +4901,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         }
 
         let highlightPath = CGMutablePath()
+        let highlightOutset: CGFloat = 5
         for r in highlightRectsInContent {
-            highlightPath.addPath(UIBezierPath(roundedRect: r, cornerRadius: 6).cgPath)
+            let rr = r.insetBy(dx: -highlightOutset, dy: -highlightOutset)
+            guard rr.isNull == false, rr.isEmpty == false, rr.width.isFinite, rr.height.isFinite else { continue }
+            let radius = min(6, max(0, min(rr.width, rr.height) * 0.5))
+            highlightPath.addPath(UIBezierPath(roundedRect: rr, cornerRadius: radius).cgPath)
         }
         baseHighlightLayer.path = highlightPath.isEmpty ? nil : highlightPath
 

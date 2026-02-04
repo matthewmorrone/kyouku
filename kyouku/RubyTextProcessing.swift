@@ -160,7 +160,10 @@ enum RubyTextProcessing {
 
     private static func makeWidthAttachmentAttributes(width: CGFloat) -> [NSAttributedString.Key: Any] {
         guard width.isFinite else {
-            return [.foregroundColor: UIColor.clear]
+            return [
+                .foregroundColor: UIColor.clear,
+                kCTForegroundColorAttributeName as NSAttributedString.Key: UIColor.clear.cgColor
+            ]
         }
         let w = width
 
@@ -187,7 +190,9 @@ enum RubyTextProcessing {
 
         return [
             kCTRunDelegateAttributeName as NSAttributedString.Key: delegate as Any,
-            .foregroundColor: UIColor.clear
+            .foregroundColor: UIColor.clear,
+            // CoreText draws the replacement glyph; make it truly invisible.
+            kCTForegroundColorAttributeName as NSAttributedString.Key: UIColor.clear.cgColor
         ]
     }
 

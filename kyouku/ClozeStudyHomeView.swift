@@ -7,68 +7,82 @@ struct ClozeStudyHomeView: View {
     @State private var blanksPerSentence: Int = 1
     @State private var selectedNoteID: UUID? = nil
 
+    @AppStorage("clozeExcludeDuplicateLines") private var excludeDuplicateLines: Bool = true
+
     @State private var activeNote: Note? = nil
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Cloze", systemImage: "rectangle.and.pencil.and.ellipsis")
-                            .font(.headline)
-
-                        Picker("Order", selection: $mode) {
-                            ForEach(ClozeStudyViewModel.Mode.allCases) { m in
-                                Text(m.displayName).tag(m)
-                            }
+            Form {
+                Section {
+                    Picker("Order", selection: $mode) {
+                        ForEach(ClozeStudyViewModel.Mode.allCases) { m in
+                            Text(m.displayName).tag(m)
                         }
-                        .pickerStyle(.segmented)
-
-                        Stepper(
-                            "Dropdowns per sentence: \(blanksPerSentence)",
-                            value: $blanksPerSentence,
-                            in: 1...10,
-                            step: 1
-                        )
-
-                        if notes.notes.isEmpty {
-                            Text("Add a note to study.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Picker("Note", selection: $selectedNoteID) {
-                                Text("Select a note").tag(UUID?.none)
-                                ForEach(notes.notes) { note in
-                                    Text(note.title?.isEmpty == false ? note.title! : "Untitled")
-                                        .tag(UUID?.some(note.id))
-                                }
-                            }
-                            .pickerStyle(.menu)
-                        }
-
-                        Button {
-                            guard let id = selectedNoteID else { return }
-                            activeNote = notes.notes.first(where: { $0.id == id })
-                        } label: {
-                            Label("Start Cloze", systemImage: "play.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(selectedNoteID == nil)
                     }
-                    .padding(12)
-                    .background(Color.appSurface, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.appBorder, lineWidth: 1)
+                    .pickerStyle(.segmented)
+
+                    Stepper(
+                        "Dropdowns per sentence: \(blanksPerSentence)",
+                        value: $blanksPerSentence,
+                        in: 1...10,
+                        step: 1
                     )
+
+                    Toggle("Exclude duplicate lines", isOn: $excludeDuplicateLines)
+                }/* header: {
+                    Label("Cloze", systemImage: "rectangle.and.pencil.and.ellipsis")
+                }*/
+
+                Section {
+                    if notes.notes.isEmpty {
+                        Text("Add a note to study.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Note", selection: $selectedNoteID) {
+                            Text("Select a note").tag(UUID?.none)
+                            ForEach(notes.notes) { note in
+                                Text(note.title?.isEmpty == false ? note.title! : "Untitled")
+                                    .tag(UUID?.some(note.id))
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Source")
                 }
-                .padding()
+
+                Section {
+                    Button {
+                        guard let id = selectedNoteID else { return }
+                        activeNote = notes.notes.first(where: { $0.id == id })
+                    } label: {
+                        Label("Start Cloze", systemImage: "play.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectedNoteID == nil)
+                }
             }
-            .navigationTitle("Study")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "rectangle.and.pencil.and.ellipsis")
+                        Text("Cloze")
+                    }
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Cloze")
+                }
+            }
             .navigationDestination(item: $activeNote) { note in
-                ClozeStudyView(note: note, initialMode: mode, initialBlanksPerSentence: blanksPerSentence)
+                ClozeStudyView(
+                    note: note,
+                    initialMode: mode,
+                    initialBlanksPerSentence: blanksPerSentence,
+                    excludeDuplicateLines: excludeDuplicateLines
+                )
             }
             .onAppear {
                 if selectedNoteID == nil {

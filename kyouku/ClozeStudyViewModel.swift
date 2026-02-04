@@ -71,13 +71,14 @@ final class ClozeStudyViewModel: ObservableObject {
         note: Note,
         numberOfChoices: Int = 5,
         initialMode: Mode = .random,
-        initialBlanksPerSentence: Int = 1
+        initialBlanksPerSentence: Int = 1,
+        excludeDuplicateLines: Bool = true
     ) {
         self.note = note
         self.numberOfChoices = max(2, min(8, numberOfChoices))
         self.mode = initialMode
         self.blanksPerSentence = max(1, initialBlanksPerSentence)
-        self.sentences = Self.uniqueSentences(from: note.text)
+        self.sentences = Self.sentences(from: note.text, excludeDuplicateLines: excludeDuplicateLines)
         self.sentenceCount = sentences.count
         resetRandomBag()
     }
@@ -429,22 +430,30 @@ final class ClozeStudyViewModel: ObservableObject {
         }
     }
 
-    private static func uniqueSentences(from text: String) -> [String] {
+    private static func sentences(from text: String, excludeDuplicateLines: Bool) -> [String] {
         let ns = text as NSString
         let ranges = SentenceRangeResolver.sentenceRanges(in: ns)
         if ranges.isEmpty { return [] }
 
-        var seen: Set<String> = []
         var out: [String] = []
         out.reserveCapacity(ranges.count)
+
+        var seen: Set<String> = []
+        if excludeDuplicateLines {
+            seen.reserveCapacity(min(ranges.count, 64))
+        }
 
         for r in ranges {
             guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= ns.length else { continue }
             let s = ns.substring(with: r)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard s.isEmpty == false else { continue }
-            if seen.contains(s) { continue }
-            seen.insert(s)
+
+            if excludeDuplicateLines {
+                if seen.contains(s) { continue }
+                seen.insert(s)
+            }
+
             out.append(s)
         }
 

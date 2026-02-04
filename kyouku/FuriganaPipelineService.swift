@@ -399,16 +399,61 @@ struct FuriganaPipelineService {
         var surfaceIsMergeableCache: [String: Bool] = [:]
         surfaceIsMergeableCache.reserveCapacity(min(512, spans.count * 8))
 
+        // Hot-path-safe normalization variants that help resolve common colloquial contractions
+        // without calling MeCab or touching SQLite.
+        //
+        // Goal: allow deinflection + trie checks to succeed on surfaces like:
+        // - じゃなくて -> ではなくて -> (deinflect) ではない
+        func tailMergeContractionNormalize(_ surface: String) -> String {
+            // じゃ is the common contraction of では.
+            // We keep this intentionally narrow and best-effort.
+            if surface.contains("じゃ") {
+                return surface.replacingOccurrences(of: "じゃ", with: "では")
+            }
+            return surface
+        }
+
+        func tailMergeLexiconVariants(_ surface: String) -> [String] {
+            var out: [String] = []
+            out.reserveCapacity(4)
+
+            func appendUnique(_ s: String) {
+                guard s.isEmpty == false else { return }
+                if out.contains(s) == false {
+                    out.append(s)
+                }
+            }
+
+            appendUnique(surface)
+
+            let asciiNormalized = DictionaryKeyPolicy.normalizeFullWidthASCII(surface)
+            if asciiNormalized != surface {
+                appendUnique(asciiNormalized)
+            }
+
+            let contractionNormalized = tailMergeContractionNormalize(surface)
+            if contractionNormalized != surface {
+                appendUnique(contractionNormalized)
+                let contractionAscii = DictionaryKeyPolicy.normalizeFullWidthASCII(contractionNormalized)
+                if contractionAscii != contractionNormalized {
+                    appendUnique(contractionAscii)
+                }
+            }
+
+            return out
+        }
+
         func isMergeableSurface(_ surface: String) async -> Bool {
             if let cached = surfaceIsMergeableCache[surface] { return cached }
 
-            // Mirror the dictionary's normalization for ASCII fullwidth characters.
-            let normalizedForLexicon = DictionaryKeyPolicy.normalizeFullWidthASCII(surface)
+            // Mirror dictionary normalization and also try a tiny set of contraction normalizations.
+            let surfaceVariants = tailMergeLexiconVariants(surface)
 
-            if trie.containsWord(surface, requireKanji: false) ||
-                (normalizedForLexicon != surface && trie.containsWord(normalizedForLexicon, requireKanji: false)) {
-                surfaceIsMergeableCache[surface] = true
-                return true
+            for v in surfaceVariants {
+                if trie.containsWord(v, requireKanji: false) {
+                    surfaceIsMergeableCache[surface] = true
+                    return true
+                }
             }
 
             // More aggressive: allow merges when the combined surface can deinflect
@@ -416,17 +461,15 @@ struct FuriganaPipelineService {
             // "食べ"+"ました" -> "食べました" (then lookup deinflects to "食べる").
             //
             // Keep this lightweight by using a per-session cache and bounded outputs.
-            let candidates = await tailMergeDeinflectionCache.candidates(for: normalizedForLexicon, maxDepth: 6, maxResults: 24)
-            for cand in candidates {
-                let base = cand.baseForm
-                if trie.containsWord(base, requireKanji: false) {
-                    surfaceIsMergeableCache[surface] = true
-                    return true
-                }
-                let normalizedBase = DictionaryKeyPolicy.normalizeFullWidthASCII(base)
-                if normalizedBase != base && trie.containsWord(normalizedBase, requireKanji: false) {
-                    surfaceIsMergeableCache[surface] = true
-                    return true
+            for v in surfaceVariants {
+                let candidates = await tailMergeDeinflectionCache.candidates(for: v, maxDepth: 6, maxResults: 24)
+                for cand in candidates {
+                    for baseVariant in tailMergeLexiconVariants(cand.baseForm) {
+                        if trie.containsWord(baseVariant, requireKanji: false) {
+                            surfaceIsMergeableCache[surface] = true
+                            return true
+                        }
+                    }
                 }
             }
 
@@ -434,8 +477,10 @@ struct FuriganaPipelineService {
             return false
         }
 
-        // Greedy lookahead: for each i, find the longest j>i where spans[i..<j]
-        // form a lexicon word, then merge that run.
+        // Greedy incremental merge: for each i, attempt to merge with i+1.
+        // Track the longest mergeable concatenation, but keep scanning forward
+        // as long as the current concatenation is still a *lexicon prefix*.
+        // Stop only once the concatenation is neither mergeable nor a prefix.
         var out: [SemanticSpan] = []
         out.reserveCapacity(spans.count)
 
@@ -505,6 +550,26 @@ struct FuriganaPipelineService {
                     bestRange = candidateRange
                     bestReading = currentReading
                     bestSourceIndices = currentIndices
+                } else {
+                    // Keep extending while the concatenation remains a lexicon prefix.
+                    // This enables cases where intermediate concatenations are not valid words
+                    // (e.g. inflected fragments) but can still lead to a later full hit.
+                    var prefixOk = trie.hasPrefix(in: nsText, from: startLoc, through: candidateEnd)
+                    if prefixOk == false {
+                        // Try the same lightweight variant set used for mergeability.
+                        for variant in tailMergeLexiconVariants(candidateSurface) {
+                            if variant == candidateSurface { continue }
+                            let nsVariant = variant as NSString
+                            if trie.hasPrefix(in: nsVariant, from: 0, through: nsVariant.length) {
+                                prefixOk = true
+                                break
+                            }
+                        }
+                    }
+
+                    if prefixOk == false {
+                        break
+                    }
                 }
 
                 currentEnd = candidateEnd

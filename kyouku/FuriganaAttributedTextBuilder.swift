@@ -6,6 +6,18 @@ enum FuriganaAttributedTextBuilder {
     private static let stageDumpLock = NSLock()
     private static var lastStageDumpKey: String = ""
 
+    private actor DeinflectorCache {
+        static let shared = DeinflectorCache()
+        private var cached: Deinflector?
+
+        func get() throws -> Deinflector {
+            if let cached { return cached }
+            let loaded = try Deinflector.loadBundled(named: "deinflect")
+            cached = loaded
+            return loaded
+        }
+    }
+
     private static func stageDumpKey(
         text: String,
         context: String,
@@ -402,6 +414,34 @@ enum FuriganaAttributedTextBuilder {
             }
         } else if pipelineTraceEnabled {
             log("S1.25", "skipped (baseSpans provided)")
+        }
+
+        // Stage 1.75: Deinflection hard-stop merge (merge-only).
+        // This ensures dictionary/deinflection-lockable multi-token spans get coalesced even when
+        // embedding refinement is disabled.
+        if baseSpans == nil {
+            let trie: LexiconTrie?
+            if let t = await SegmentationService.shared.cachedTrieIfAvailable() {
+                trie = t
+            } else {
+                trie = await LexiconProvider.shared.cachedTrieIfAvailable()
+            }
+
+            if let trie, let deinflector = try? await DeinflectorCache.shared.get() {
+                let merged = DeinflectionHardStopMerger.apply(
+                    text: nsText,
+                    spans: spansForAttachment,
+                    hardCuts: stage125HardCuts,
+                    trie: trie,
+                    deinflector: deinflector
+                )
+                spansForAttachment = merged.spans
+                if shouldDumpStages {
+                    log("S1.75", "after apply locks=\(merged.deinflectionLocks): \(describe(spans: spansForAttachment))")
+                }
+            }
+        } else if pipelineTraceEnabled {
+            log("S1.75", "skipped (baseSpans provided)")
         }
 
         let stage2 = await SpanReadingAttacher().attachReadings(

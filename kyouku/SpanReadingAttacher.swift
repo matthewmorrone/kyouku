@@ -147,10 +147,14 @@ struct SpanReadingAttacher {
         var annotated: [AnnotatedSpan] = []
         annotated.reserveCapacity(spans.count)
 
+        let nsText = text as NSString
+
         for span in spans {
             let attachment = attachmentForSpan(span, annotations: annotations, tokenizer: tokenizer)
             let override = await ReadingOverridePolicy.shared.overrideReading(for: span.surface, mecabReading: attachment.reading)
-            let finalReading = sanitizeRubyReading(override ?? attachment.reading)
+            let candidate = override ?? attachment.reading
+            let contextAdjusted = Self.applyContextualReadingRules(surface: span.surface, reading: candidate, nsText: nsText, range: span.range)
+            let finalReading = sanitizeRubyReading(contextAdjusted)
 
             annotated.append(AnnotatedSpan(span: span, readingKana: finalReading, lemmaCandidates: attachment.lemmas, partOfSpeech: attachment.partOfSpeech))
         }
@@ -814,7 +818,9 @@ struct SpanReadingAttacher {
             let mecabReadingRaw = readingForSegment(seg)
             let mecabReading = mecabReadingRaw.map { Self.toHiragana($0) }
             let override = await ReadingOverridePolicy.shared.overrideReading(for: surfaceText, mecabReading: mecabReading)
-            let finalReading = sanitizeRubyReading(override ?? mecabReading)
+            let candidate = override ?? mecabReading
+            let contextAdjusted = Self.applyContextualReadingRules(surface: surfaceText, reading: candidate, nsText: nsText, range: seg.range)
+            let finalReading = sanitizeRubyReading(contextAdjusted)
 
             semantic.append(
                 SemanticSpan(

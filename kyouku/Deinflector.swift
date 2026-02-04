@@ -8,7 +8,19 @@ import Foundation
 /// - This is a deterministic breadth-first rewrite system over suffix rules.
 /// - This does not perform normalization beyond what callers choose to apply.
 ///   Callers should normalize dictionary lookup keys via `DictionaryKeyPolicy`.
-struct Deinflector: Sendable {
+nonisolated struct Deinflector: Sendable {
+    enum LoadError: Error {
+        case resourceNotFound
+        case decodeFailed
+    }
+
+    private let reasonsInStableOrder: [String]
+    private let rulesByReason: [String: [Rule]]
+    private let initialRuleUniverse: Set<String>
+
+}
+
+nonisolated extension Deinflector {
     struct Rule: Codable, Hashable, Sendable {
         let kanaIn: String
         let kanaOut: String
@@ -29,14 +41,6 @@ struct Deinflector: Sendable {
         var baseForm: String { surface }
     }
 
-    enum LoadError: Error {
-        case decodeFailed
-    }
-
-    private let reasonsInStableOrder: [String]
-    private let rulesByReason: [String: [Rule]]
-    private let initialRuleUniverse: Set<String>
-
     init(rulesByReason: [String: [Rule]]) {
         self.rulesByReason = rulesByReason
         self.reasonsInStableOrder = rulesByReason.keys.sorted()
@@ -56,20 +60,11 @@ struct Deinflector: Sendable {
         let url = bundle.url(forResource: baseName, withExtension: "json")
             ?? bundle.url(forResource: "deinflect.min", withExtension: "json")
 
-        if let url {
-            let data = try Data(contentsOf: url)
-            do {
-                let decoded = try JSONDecoder().decode([String: [Rule]].self, from: data)
-                return Deinflector(rulesByReason: decoded)
-            } catch {
-                throw LoadError.decodeFailed
-            }
+        guard let url else {
+            throw LoadError.resourceNotFound
         }
 
-        // Fallback: embedded minimal subset (verbatim Yomichan-compatible rules for common cases).
-        guard let data = embeddedMinimalRulesJSON.data(using: .utf8) else {
-            throw LoadError.decodeFailed
-        }
+        let data = try Data(contentsOf: url)
         do {
             let decoded = try JSONDecoder().decode([String: [Rule]].self, from: data)
             return Deinflector(rulesByReason: decoded)
@@ -77,31 +72,6 @@ struct Deinflector: Sendable {
             throw LoadError.decodeFailed
         }
     }
-
-    // Keep this minimal: it is intended as a safety net when the full Yomichan
-    // rules file isn't bundled. Drop a full `deinflect.json` into the app bundle
-    // to expand coverage.
-        private static let embeddedMinimalRulesJSON: String = #"""
-{
-    "-ba": [
-        {"kanaIn": "れば", "kanaOut": "る", "rulesIn": [], "rulesOut": ["v1", "v5", "vk", "vs", "vz"]}
-    ],
-    "-tai": [
-        {"kanaIn": "たい", "kanaOut": "る", "rulesIn": ["adj-i"], "rulesOut": ["v1"]}
-    ],
-    "-te": [
-        {"kanaIn": "て", "kanaOut": "る", "rulesIn": ["iru"], "rulesOut": ["v1"]},
-        {"kanaIn": "んで", "kanaOut": "む", "rulesIn": ["iru"], "rulesOut": ["v5"]},
-        {"kanaIn": "して", "kanaOut": "する", "rulesIn": ["iru"], "rulesOut": ["vs"]}
-    ],
-    "negative": [
-        {"kanaIn": "ない", "kanaOut": "る", "rulesIn": ["adj-i"], "rulesOut": ["v1"]}
-    ],
-    "progressive or perfect": [
-        {"kanaIn": "ている", "kanaOut": "て", "rulesIn": ["v1"], "rulesOut": ["iru"]}
-    ]
-}
-"""#
 
     /// Deterministically produce ranked deinflection candidates for `surface`.
     ///

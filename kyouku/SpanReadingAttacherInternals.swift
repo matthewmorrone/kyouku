@@ -185,6 +185,46 @@ extension SpanReadingAttacher {
         return trimmed
     }
 
+    /// Contextual reading rewrites.
+    ///
+    /// Keep these narrow and predictable. They exist to match common phrase-level
+    /// realizations without doing phrase-aware tokenization.
+    static func applyContextualReadingRules(
+        surface: String,
+        reading: String?,
+        nsText: NSString,
+        range: NSRange
+    ) -> String? {
+        guard surface == "何" else { return reading }
+        guard let reading else { return reading }
+        let trimmed = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return reading }
+
+        // Only rewrite the common dictionary-like "なに".
+        let normalized = Self.toHiragana(trimmed)
+        guard normalized == "なに" else { return reading }
+
+        // Look ahead in the original text.
+        let end = NSMaxRange(range)
+        guard end >= 0, end < nsText.length else { return reading }
+        let lookaheadLen = min(6, nsText.length - end)
+        guard lookaheadLen > 0 else { return reading }
+        let remainder = nsText.substring(with: NSRange(location: end, length: lookaheadLen))
+
+        // Common "なん" contexts: 何で / 何でも / 何だ / 何て / 何と / 何の / 何なら.
+        if remainder.hasPrefix("で") ||
+            remainder.hasPrefix("だ") ||
+            remainder.hasPrefix("て") ||
+            remainder.hasPrefix("と") ||
+            remainder.hasPrefix("の") ||
+            remainder.hasPrefix("なら")
+        {
+            return "なん"
+        }
+
+        return reading
+    }
+
     func attachmentForSpan(_ span: TextSpan, annotations: [MeCabAnnotation], tokenizer: Tokenizer) -> SpanAttachmentResult {
         guard span.range.length > 0 else { return SpanAttachmentResult(reading: nil, lemmas: [], partOfSpeech: nil) }
 
@@ -195,6 +235,7 @@ extension SpanReadingAttacher {
         let spanEnd = span.range.location + span.range.length
         var coveringToken: MeCabAnnotation?
         var retokenizedCache: RetokenizedResult?
+        var preferredKanaLemma: String? = nil
 
         for annotation in annotations {
             if annotation.range.location >= spanEnd { break }
@@ -202,6 +243,20 @@ extension SpanReadingAttacher {
             guard intersection.length > 0 else { continue }
             Self.appendLemmaCandidate(annotation.dictionaryForm, to: &lemmaCandidates)
             Self.appendPartOfSpeechCandidate(annotation.partOfSpeech, to: &posCandidates)
+
+            // Some nouns have a kana-only dictionary form even when the surface includes kanji
+            // (e.g. 一人 -> ひとり). If present, this is often the best default ruby reading.
+            if preferredKanaLemma == nil {
+                let raw = annotation.dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines)
+                if raw.isEmpty == false {
+                    let isKanaOnly = raw.unicodeScalars.allSatisfy { scalar in
+                        CharacterSet.hiragana.contains(scalar) || CharacterSet.katakana.contains(scalar)
+                    }
+                    if isKanaOnly {
+                        preferredKanaLemma = raw
+                    }
+                }
+            }
 
             guard requiresReading else { continue }
             if intersection.length == annotation.range.length {
@@ -273,6 +328,42 @@ extension SpanReadingAttacher {
         if lemmaCandidates.isEmpty,
            let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
             lemmaCandidates = retokenized.lemmas
+        }
+
+        // Irregular counters (人): prefer the common kun readings for ruby.
+        // MeCab frequently chooses the Sino counter readings (いちにん/ににん), but for
+        // standalone surfaces the default users expect is typically ひとり/ふたり.
+        if requiresReading {
+            switch span.surface {
+            case "一人":
+                if readingResult == nil || readingResult == "いちにん" {
+                    readingResult = "ひとり"
+                }
+            case "二人":
+                if readingResult == nil || readingResult == "ににん" {
+                    readingResult = "ふたり"
+                }
+            default:
+                break
+            }
+        }
+
+        // Prefer kana-only dictionary form as the default ruby for noun-like kanji surfaces.
+        // This avoids always surfacing counter-style readings when MeCab provides a more
+        // idiomatic kana lemma (e.g. 一人: ひとり vs いちにん).
+        if requiresReading,
+           let kanaLemma = preferredKanaLemma,
+           kanaLemma.isEmpty == false {
+            let isNounLike = posCandidates.contains { $0.contains("名詞") }
+            if isNounLike {
+                let normalizedLemma = Self.toHiragana(kanaLemma).trimmingCharacters(in: .whitespacesAndNewlines)
+                if normalizedLemma.isEmpty == false {
+                    let current = readingResult?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if current.isEmpty == false, current != normalizedLemma {
+                        readingResult = normalizedLemma
+                    }
+                }
+            }
         }
 
         let posSummary: String? = posCandidates.isEmpty ? nil : posCandidates.joined(separator: " / ")
