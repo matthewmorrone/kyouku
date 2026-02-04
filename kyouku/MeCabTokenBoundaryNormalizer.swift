@@ -33,6 +33,19 @@ enum MeCabTokenBoundaryNormalizer {
             return Result(spans: [], forcedCuts: [])
         }
 
+        func isKatakanaLikeScalar(_ scalar: UnicodeScalar) -> Bool {
+            // Fullwidth katakana block.
+            if (0x30A0...0x30FF).contains(scalar.value) { return true }
+            // Halfwidth katakana block.
+            if (0xFF66...0xFF9F).contains(scalar.value) { return true }
+            return false
+        }
+
+        func isKatakanaLikeString(_ s: String) -> Bool {
+            guard s.isEmpty == false else { return false }
+            return s.unicodeScalars.allSatisfy(isKatakanaLikeScalar)
+        }
+
         func isBoundaryScalar(_ scalar: UnicodeScalar) -> Bool {
             CharacterSet.whitespacesAndNewlines.contains(scalar)
                 || CharacterSet.punctuationCharacters.contains(scalar)
@@ -90,6 +103,26 @@ enum MeCabTokenBoundaryNormalizer {
             guard let best = candidatesByStart[start]?.first else { continue }
             tokens.append(best)
             cursor = NSMaxRange(best.range)
+        }
+
+        // Map each chosen MeCab token to the contiguous range of Stage-1 spans it covers.
+        // This lets Stage 1.5 selectively avoid collapsing katakana boundaries in cases
+        // that are known to be harmful (while leaving non-katakana behavior unchanged).
+        var tokenSpanRanges: [Range<Int>] = []
+        tokenSpanRanges.reserveCapacity(tokens.count)
+        var spanCursor = 0
+        for token in tokens {
+            let tokenStart = token.range.location
+            let tokenEnd = NSMaxRange(token.range)
+            while spanCursor < spans.count, NSMaxRange(spans[spanCursor].range) <= tokenStart {
+                spanCursor += 1
+            }
+            let startIdx = spanCursor
+            var endIdx = startIdx
+            while endIdx < spans.count, spans[endIdx].range.location < tokenEnd {
+                endIdx += 1
+            }
+            tokenSpanRanges.append(startIdx..<endIdx)
         }
 
         let allowedBoundaries: Set<Int> = {
@@ -184,6 +217,53 @@ enum MeCabTokenBoundaryNormalizer {
             let start = t.range.location
             let end = NSMaxRange(t.range)
             guard start < b, b < end else { return b }
+
+            // Katakana-merge regression guard:
+            // If the chosen MeCab token is a long katakana run, snapping boundaries inside it
+            // can collapse multiple Stage-1 katakana spans into one (and later stages cannot
+            // reliably undo that). For katakana-only tokens, preserve existing Stage-1 cuts
+            // when they look like a lexicon-driven decomposition.
+            if let tokenIdx = mecabTokenIndex(at: b), tokenIdx < tokenSpanRanges.count {
+                let tokenRange = tokenSpanRanges[tokenIdx]
+                if tokenRange.count >= 2, isKatakanaLikeString(t.surface) {
+                    let tokenUtf16Len = end - start
+                    let maxKatakanaMergedUtf16Len = 24
+
+                    var hasRepeatedIdenticalSurface = false
+                    var hasAnyAttestedSubspan = false
+                    var mergedSurfaceAttested = false
+
+                    if tokenRange.isEmpty == false {
+                        for idx in tokenRange {
+                            if idx >= 0, idx < spans.count {
+                                if spans[idx].isLexiconMatch { hasAnyAttestedSubspan = true }
+                                if spans[idx].isLexiconMatch, spans[idx].range.location == start, NSMaxRange(spans[idx].range) == end {
+                                    mergedSurfaceAttested = true
+                                }
+                            }
+                        }
+
+                        // Detect repeated identical katakana surfaces within the covered run.
+                        var prevSurface: String?
+                        for idx in tokenRange {
+                            guard idx >= 0, idx < spans.count else { continue }
+                            let s = spans[idx].surface
+                            if let prevSurface, prevSurface == s, isKatakanaLikeString(s) {
+                                hasRepeatedIdenticalSurface = true
+                                break
+                            }
+                            prevSurface = s
+                        }
+                    }
+
+                    let mergedTooLong = tokenUtf16Len > maxKatakanaMergedUtf16Len
+                    let mergedUnattestedWhileSubspansAttested = hasAnyAttestedSubspan && mergedSurfaceAttested == false
+
+                    if hasRepeatedIdenticalSurface || mergedTooLong || mergedUnattestedWhileSubspansAttested {
+                        return b
+                    }
+                }
+            }
 
             let leftLen = b - start
             let rightLen = end - b

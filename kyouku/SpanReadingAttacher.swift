@@ -613,16 +613,6 @@ struct SpanReadingAttacher {
                                     guard end > start else { return nil }
                                     return nsText.substring(with: NSRange(location: start, length: end - start))
                                 }()
-                                KatakanaMergeInstrumentation.log(
-                                    decision: "skip",
-                                    reason: "mecabBlanketMerge_preserveStage1Decomposition",
-                                    tokenSurface: tokenSurface,
-                                    pieces: pieces,
-                                    utf16Start: token.range.location,
-                                    utf16EndExclusive: NSMaxRange(token.range),
-                                    mergedSurfaceAttested: mergedAttested,
-                                    contextSnippet: contextSnippet
-                                )
                                 continue
                             }
                             if merge(&segments, from: i, to: endExclusive) {
@@ -646,16 +636,6 @@ struct SpanReadingAttacher {
                                         guard end > start else { return nil }
                                         return nsText.substring(with: NSRange(location: start, length: end - start))
                                     }()
-                                    KatakanaMergeInstrumentation.log(
-                                        decision: "merge",
-                                        reason: "mecabBlanketMerge",
-                                        tokenSurface: tokenSurface,
-                                        pieces: pieces,
-                                        utf16Start: token.range.location,
-                                        utf16EndExclusive: NSMaxRange(token.range),
-                                        mergedSurfaceAttested: mergedAttested,
-                                        contextSnippet: contextSnippet
-                                    )
                                 }
                                 mergedThisIndex = true
                                 break
