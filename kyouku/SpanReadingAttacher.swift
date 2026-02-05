@@ -595,48 +595,11 @@ struct SpanReadingAttacher {
                             let allKatakanaLike = candidateSlice.allSatisfy { isKatakanaLikeString(surface(of: $0)) }
                             let hasAnyNonSingleton = candidateSlice.contains { $0.range.length > 1 }
                             if allKatakanaLike && hasAnyNonSingleton {
-                                // Best-effort offline instrumentation (DEBUG-only by default).
-                                let tokenSurface = token.surface
-                                let pieces = candidateSlice.map { surface(of: $0) }
-                                let mergedAttested: Bool? = {
-                                    guard let trie else { return nil }
-                                    return trie.containsWord(
-                                        in: nsText,
-                                        from: token.range.location,
-                                        through: NSMaxRange(token.range),
-                                        requireKanji: false
-                                    )
-                                }()
-                                let contextSnippet: String? = {
-                                    let start = max(0, token.range.location - 12)
-                                    let end = min(nsText.length, NSMaxRange(token.range) + 12)
-                                    guard end > start else { return nil }
-                                    return nsText.substring(with: NSRange(location: start, length: end - start))
-                                }()
                                 continue
                             }
                             if merge(&segments, from: i, to: endExclusive) {
                                 didMerge = true
                                 counters.mecabBlanketMerges += 1
-                                if allKatakanaLike {
-                                    let tokenSurface = token.surface
-                                    let pieces = candidateSlice.map { surface(of: $0) }
-                                    let mergedAttested: Bool? = {
-                                        guard let trie else { return nil }
-                                        return trie.containsWord(
-                                            in: nsText,
-                                            from: token.range.location,
-                                            through: NSMaxRange(token.range),
-                                            requireKanji: false
-                                        )
-                                    }()
-                                    let contextSnippet: String? = {
-                                        let start = max(0, token.range.location - 12)
-                                        let end = min(nsText.length, NSMaxRange(token.range) + 12)
-                                        guard end > start else { return nil }
-                                        return nsText.substring(with: NSRange(location: start, length: end - start))
-                                    }()
-                                }
                                 mergedThisIndex = true
                                 break
                             }

@@ -67,6 +67,9 @@ final class ClozeStudyViewModel: ObservableObject {
 
     private let numberOfChoices: Int
 
+    private var pendingAutoAdvanceTask: Task<Void, Never>? = nil
+    private let autoAdvanceDelayNanoseconds: UInt64 = 3_000_000_000
+
     init(
         note: Note,
         numberOfChoices: Int = 5,
@@ -88,6 +91,7 @@ final class ClozeStudyViewModel: ObservableObject {
     }
 
     func nextQuestion() async {
+        cancelAutoAdvance()
         guard sentences.isEmpty == false else {
             currentQuestion = nil
             return
@@ -137,6 +141,8 @@ final class ClozeStudyViewModel: ObservableObject {
                 correctCount += 1
             }
         }
+
+        scheduleAutoAdvanceIfComplete(question: q)
     }
 
     func revealAnswer() {
@@ -148,10 +154,13 @@ final class ClozeStudyViewModel: ObservableObject {
             totalCount += 1
             // Reveal counts as incorrect if they didn't answer.
         }
+
+        scheduleAutoAdvanceIfComplete(question: q)
     }
 
     func rebuildCurrentQuestion() {
         guard let q = currentQuestion else { return }
+        cancelAutoAdvance()
         Task {
             if let rebuilt = await buildQuestion(sentenceIndex: q.sentenceIndex, sentenceText: q.sentenceText) {
                 setNewQuestion(rebuilt)
@@ -160,9 +169,29 @@ final class ClozeStudyViewModel: ObservableObject {
     }
 
     private func setNewQuestion(_ question: Question) {
+        cancelAutoAdvance()
         currentQuestion = question
         selectedOptionByBlankID = [:]
         checkedBlankIDs = []
+    }
+
+    private func cancelAutoAdvance() {
+        pendingAutoAdvanceTask?.cancel()
+        pendingAutoAdvanceTask = nil
+    }
+
+    private func scheduleAutoAdvanceIfComplete(question: Question) {
+        guard checkedBlankIDs.count >= question.blanks.count else { return }
+
+        let questionID = question.id
+        pendingAutoAdvanceTask?.cancel()
+        pendingAutoAdvanceTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: autoAdvanceDelayNanoseconds)
+            guard Task.isCancelled == false else { return }
+            guard self.currentQuestion?.id == questionID else { return }
+            await self.nextQuestion()
+        }
     }
 
     private func resetRandomBag() {

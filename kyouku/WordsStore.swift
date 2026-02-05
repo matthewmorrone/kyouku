@@ -287,6 +287,25 @@ final class WordsStore: ObservableObject {
         }
     }
 
+    func addWords(ids: Set<UUID>, toList listID: UUID) {
+        guard ids.isEmpty == false else { return }
+        guard words.isEmpty == false else { return }
+
+        var changed = false
+        for i in words.indices {
+            if ids.contains(words[i].id) {
+                if words[i].listIDs.contains(listID) == false {
+                    words[i].listIDs.append(listID)
+                    changed = true
+                }
+            }
+        }
+
+        if changed {
+            save()
+        }
+    }
+
     func removeWord(id: UUID, fromList listID: UUID) {
         guard let idx = words.firstIndex(where: { $0.id == id }) else { return }
         let before = words[idx].listIDs

@@ -390,6 +390,11 @@ struct WordDefinitionsView: View {
             showAllConjugations = false
             await updateHeaderLemmaAndFormLines()
             await load()
+
+            let historyID = "\(titleText.trimmingCharacters(in: .whitespacesAndNewlines))|\(((kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)))"
+            let primaryMeaning = definitionRows.first?.pages.first?.gloss
+            ViewedDictionaryHistoryStore.shared.updateMeaning(id: historyID, meaning: primaryMeaning)
+
             refreshContextInsights()
         }
         .sheet(item: $listAssignmentTarget) { target in

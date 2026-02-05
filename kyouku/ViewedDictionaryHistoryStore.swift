@@ -9,15 +9,18 @@ final class ViewedDictionaryHistoryStore: ObservableObject {
         let id: String
         var surface: String
         var kana: String?
+        var meaning: String?
         var lastViewedAt: Date
 
-        init(surface: String, kana: String?, lastViewedAt: Date = Date()) {
+        init(surface: String, kana: String?, meaning: String? = nil, lastViewedAt: Date = Date()) {
             let normalizedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedKana = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedMeaning = meaning?.trimmingCharacters(in: .whitespacesAndNewlines)
             let key = ViewedDictionaryHistoryStore.key(surface: normalizedSurface, kana: normalizedKana)
             self.id = key
             self.surface = normalizedSurface
             self.kana = (normalizedKana?.isEmpty == false) ? normalizedKana : nil
+            self.meaning = (normalizedMeaning?.isEmpty == false) ? normalizedMeaning : nil
             self.lastViewedAt = lastViewedAt
         }
     }
@@ -32,8 +35,13 @@ final class ViewedDictionaryHistoryStore: ObservableObject {
     }
 
     func record(surface: String, kana: String?) {
+        record(surface: surface, kana: kana, meaning: nil)
+    }
+
+    func record(surface: String, kana: String?, meaning: String?) {
         let normalizedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKana = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedMeaning = meaning?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if normalizedSurface.isEmpty && (normalizedKana?.isEmpty ?? true) {
             return
@@ -46,16 +54,34 @@ final class ViewedDictionaryHistoryStore: ObservableObject {
             var updated = items[idx]
             updated.surface = normalizedSurface.isEmpty ? (updated.surface) : normalizedSurface
             updated.kana = (normalizedKana?.isEmpty == false) ? normalizedKana : nil
+            if let normalizedMeaning, normalizedMeaning.isEmpty == false {
+                updated.meaning = normalizedMeaning
+            }
             updated.lastViewedAt = now
             items.remove(at: idx)
             items.insert(updated, at: 0)
         } else {
-            items.insert(Item(surface: normalizedSurface, kana: normalizedKana, lastViewedAt: now), at: 0)
+            items.insert(Item(surface: normalizedSurface, kana: normalizedKana, meaning: normalizedMeaning, lastViewedAt: now), at: 0)
             if items.count > Self.maxItems {
                 items = Array(items.prefix(Self.maxItems))
             }
         }
 
+        persist()
+    }
+
+    func updateMeaning(id: String, meaning: String?) {
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        let normalizedMeaning = meaning?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let normalizedMeaning, normalizedMeaning.isEmpty == false else { return }
+
+        var updated = items[idx]
+        if updated.meaning == normalizedMeaning {
+            return
+        }
+
+        updated.meaning = normalizedMeaning
+        items[idx] = updated
         persist()
     }
 

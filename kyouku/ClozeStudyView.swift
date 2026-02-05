@@ -5,6 +5,12 @@ struct ClozeStudyView: View {
 
     @StateObject private var model: ClozeStudyViewModel
 
+    @State private var showingSettings: Bool = false
+
+    @ScaledMetric(relativeTo: .title3) private var blankControlMinWidth: CGFloat = 96
+    @ScaledMetric(relativeTo: .title3) private var blankControlHeight: CGFloat = 32
+    @ScaledMetric(relativeTo: .title3) private var blankControlHPadding: CGFloat = 10
+
     init(
         note: Note,
         initialMode: ClozeStudyViewModel.Mode = .random,
@@ -50,43 +56,67 @@ struct ClozeStudyView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Done") { dismiss() }
                 }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Study settings")
+                }
             }
             .onAppear { model.start() }
         }
         .appThemedRoot()
+        .sheet(isPresented: $showingSettings) {
+            NavigationStack {
+                Form {
+                    Section("Mode") {
+                        Picker("Order", selection: $model.mode) {
+                            ForEach(ClozeStudyViewModel.Mode.allCases) { m in
+                                Text(m.displayName).tag(m)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    Section("Question") {
+                        let maxBlanks = max(1, (model.currentQuestion?.wordCount ?? 2) - 1)
+                        Stepper(
+                            "Dropdowns per sentence: \(min(model.blanksPerSentence, maxBlanks))",
+                            value: Binding(
+                                get: { min(model.blanksPerSentence, maxBlanks) },
+                                set: { model.blanksPerSentence = $0 }
+                            ),
+                            in: 1...maxBlanks,
+                            step: 1
+                        )
+                        .onChange(of: model.blanksPerSentence) { _, _ in
+                            model.rebuildCurrentQuestion()
+                        }
+                    }
+
+                    Section {
+                        Text("Settings apply immediately.")
+                            .font(.footnote)
+                            .foregroundStyle(Color.appTextSecondary)
+                    }
+                }
+                .navigationTitle("Settings")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { showingSettings = false }
+                    }
+                }
+            }
+            .appThemedRoot()
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Study")
-                    .font(.headline)
-                Spacer()
-                Picker("Mode", selection: $model.mode) {
-                    ForEach(ClozeStudyViewModel.Mode.allCases) { m in
-                        Text(m.displayName).tag(m)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 220)
-            }
-
-            if let q = model.currentQuestion {
-                let maxBlanks = max(1, q.wordCount - 1)
-                Stepper(
-                    "Dropdowns: \(min(model.blanksPerSentence, maxBlanks))",
-                    value: Binding(
-                        get: { min(model.blanksPerSentence, maxBlanks) },
-                        set: { model.blanksPerSentence = $0 }
-                    ),
-                    in: 1...maxBlanks,
-                    step: 1
-                )
-                .onChange(of: model.blanksPerSentence) { _, _ in
-                    model.rebuildCurrentQuestion()
-                }
-            }
-
             HStack {
                 Text("Score")
                     .foregroundStyle(Color.appTextSecondary)
@@ -95,6 +125,12 @@ struct ClozeStudyView: View {
                     .foregroundStyle(Color.appTextSecondary)
             }
             .font(.subheadline)
+
+            if let q = model.currentQuestion {
+                Text("Mode: \(model.mode.displayName) • \(q.blanks.count) blank(s)")
+                    .font(.caption)
+                    .foregroundStyle(Color.appTextSecondary)
+            }
 
             if model.sentenceCount > 0 {
                 Text("\(model.sentenceCount) sentence(s) in note")
@@ -136,10 +172,11 @@ struct ClozeStudyView: View {
                             .font(.title3)
                             .foregroundStyle(Color.appTextPrimary)
                     }
-
+                    /*
                     Text("Pick the best word(s) for the blank(s).")
                         .font(.subheadline)
                         .foregroundStyle(Color.appTextSecondary)
+                    */
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -166,6 +203,7 @@ struct ClozeStudyView: View {
         let selection = model.selectedOptionByBlankID[b.id] ?? "▾"
         let checked = model.checkedBlankIDs.contains(b.id)
         let isCorrect = checked && selection == b.correct
+        let correctColor: Color = .green
         return Menu {
             ForEach(b.options, id: \.self) { option in
                 Button {
@@ -177,14 +215,14 @@ struct ClozeStudyView: View {
         } label: {
             Text(selection)
                 .font(.title3)
-                .foregroundStyle(checked ? (isCorrect ? Color.appHighlight : Color.appDestructive) : Color.appAccent)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .frame(minWidth: 110, alignment: .center)
+                .lineLimit(1)
+                .foregroundStyle(checked ? (isCorrect ? correctColor : Color.appDestructive) : Color.appAccent)
+                .padding(.horizontal, blankControlHPadding)
+                .frame(minWidth: blankControlMinWidth, minHeight: blankControlHeight, alignment: .center)
                 .background(Color.appSoftFill, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(checked ? (isCorrect ? Color.appHighlight : Color.appDestructive) : Color.appBorder, lineWidth: 1)
+                        .stroke(checked ? (isCorrect ? correctColor : Color.appDestructive) : Color.appBorder, lineWidth: 1)
                 )
         }
         .buttonStyle(.plain)

@@ -9,56 +9,102 @@ struct InlineWrapLayout: Layout {
     var spacing: CGFloat = 0
     var lineSpacing: CGFloat = 6
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? 320
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var lineHeight: CGFloat = 0
-        var usedWidth: CGFloat = 0
+    private struct LineItem {
+        let subviewIndex: Int
+        let size: CGSize
+        let firstBaseline: CGFloat
+    }
 
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x > 0, x + size.width > maxWidth {
-                // wrap
-                y += lineHeight + lineSpacing
-                x = 0
-                lineHeight = 0
+    private struct Line {
+        var items: [LineItem] = []
+        var width: CGFloat = 0
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+
+        var height: CGFloat { ascent + descent }
+    }
+
+    private func firstBaseline(for subview: LayoutSubview, size: CGSize) -> CGFloat {
+        let dims = subview.dimensions(in: ProposedViewSize.unspecified)
+        let baseline = dims[VerticalAlignment.firstTextBaseline]
+        if baseline.isFinite, baseline > 0, baseline <= size.height {
+            return baseline
+        }
+        // For non-text views, SwiftUI often reports the baseline at the bottom.
+        // If we get something unusable, fall back to bottom alignment.
+        return size.height
+    }
+
+    private func computeLines(maxWidth: CGFloat, subviews: Subviews) -> [Line] {
+        var lines: [Line] = []
+        lines.reserveCapacity(8)
+
+        var current = Line()
+
+        for (index, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(ProposedViewSize.unspecified)
+            let baseline = firstBaseline(for: subview, size: size)
+
+            let itemWidth = (current.items.isEmpty ? 0 : spacing) + size.width
+            if current.items.isEmpty == false, current.width + itemWidth > maxWidth {
+                lines.append(current)
+                current = Line()
             }
 
-            x += (x == 0 ? 0 : spacing) + size.width
-            lineHeight = max(lineHeight, size.height)
-            usedWidth = max(usedWidth, x)
+            if current.items.isEmpty == false {
+                current.width += spacing
+            }
+            current.items.append(LineItem(subviewIndex: index, size: size, firstBaseline: baseline))
+            current.width += size.width
+            current.ascent = max(current.ascent, baseline)
+            current.descent = max(current.descent, size.height - baseline)
         }
 
-        return CGSize(width: min(usedWidth, maxWidth), height: y + lineHeight)
+        if current.items.isEmpty == false {
+            lines.append(current)
+        }
+
+        return lines
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? 320
+
+        let lines = computeLines(maxWidth: maxWidth, subviews: subviews)
+        let usedWidth = lines.map(\.width).max() ?? 0
+        let totalHeight = lines.enumerated().reduce(CGFloat(0)) { acc, element in
+            let (idx, line) = element
+            return acc + line.height + (idx == 0 ? 0 : lineSpacing)
+        }
+
+        return CGSize(width: min(usedWidth, maxWidth), height: totalHeight)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let maxWidth = bounds.width
-        var x: CGFloat = bounds.minX
-        var y: CGFloat = bounds.minY
-        var lineHeight: CGFloat = 0
+        let lines = computeLines(maxWidth: maxWidth, subviews: subviews)
 
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x > bounds.minX, x + size.width > bounds.minX + maxWidth {
-                y += lineHeight + lineSpacing
-                x = bounds.minX
-                lineHeight = 0
+        var y = bounds.minY
+        for (lineIndex, line) in lines.enumerated() {
+            var x = bounds.minX
+            for item in line.items {
+                let dy = line.ascent - item.firstBaseline
+                subviews[item.subviewIndex].place(
+                    at: CGPoint(x: x, y: y + dy),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: item.size.width, height: item.size.height)
+                )
+
+                x += item.size.width
+                if item.subviewIndex != line.items.last?.subviewIndex {
+                    x += spacing
+                }
             }
 
-            if x > bounds.minX {
-                x += spacing
+            y += line.height
+            if lineIndex != lines.count - 1 {
+                y += lineSpacing
             }
-
-            view.place(
-                at: CGPoint(x: x, y: y),
-                anchor: .topLeading,
-                proposal: ProposedViewSize(width: size.width, height: size.height)
-            )
-
-            x += size.width
-            lineHeight = max(lineHeight, size.height)
         }
     }
 }
