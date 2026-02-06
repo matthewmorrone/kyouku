@@ -42,6 +42,10 @@ struct WordDefinitionsView: View {
     @State private var isLoadingExampleSentences: Bool = false
     @State private var showAllExampleSentences: Bool = false
 
+    @State private var hasPitchAccentsTable: Bool? = nil
+    @State private var pitchAccentsForTerm: [PitchAccent] = []
+    @State private var isLoadingPitchAccents: Bool = false
+
     @State private var detectedGrammar: [DetectedGrammarPattern] = []
     @State private var similarWords: [String] = []
 
@@ -208,6 +212,36 @@ struct WordDefinitionsView: View {
                         Spacer(minLength: 0)
                     }
                     .textSelection(.enabled)
+                }
+            }
+
+            Section("Pitch Accent") {
+                if hasPitchAccentsTable == false {
+                    Text("Pitch accent data isn’t available in the bundled dictionary (missing pitch_accents table).")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if isLoadingPitchAccents {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading pitch accents…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                } else if pitchAccentsForTerm.isEmpty {
+                    Text("No pitch accents found for this term.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    let readingForDisplay = (kana ?? entryDetails.first?.kanaForms.first?.text)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    PitchAccentSection(
+                        headword: titleText,
+                        reading: readingForDisplay,
+                        accents: pitchAccentsForTerm,
+                        showsTitle: false,
+                        visualScale: 3
+                    )
                 }
             }
 
@@ -1182,6 +1216,9 @@ struct WordDefinitionsView: View {
         isLoading = true
         errorMessage = nil
         entryDetails = []
+        hasPitchAccentsTable = nil
+        pitchAccentsForTerm = []
+        isLoadingPitchAccents = true
         exampleSentences = []
         showAllExampleSentences = false
         isLoadingExampleSentences = true
@@ -1266,6 +1303,87 @@ struct WordDefinitionsView: View {
             // Final display requirement: common entries should all appear before non-common ones.
             entryDetails = baseOrderedDetails.filter { $0.isCommon } + baseOrderedDetails.filter { $0.isCommon == false }
 
+            // Pitch accents are an optional table. Load these after details so the page can render.
+            let supportsPitchAccents = await DictionarySQLiteStore.shared.supportsPitchAccents()
+            hasPitchAccentsTable = supportsPitchAccents
+
+            if supportsPitchAccents {
+                // Precompute lookup keys on the main actor to avoid Swift 6 isolation violations.
+                let pitchPairs: [(surface: String, reading: String)] = {
+                    let trimmedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedKana = (kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    var pairs: [(String, String)] = []
+                    func add(_ s: String, _ r: String) {
+                        let s2 = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let r2 = r.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard s2.isEmpty == false, r2.isEmpty == false else { return }
+                        pairs.append((s2, r2))
+                    }
+
+                    if trimmedSurface.isEmpty == false, trimmedKana.isEmpty == false {
+                        add(trimmedSurface, trimmedKana)
+                    }
+                    if trimmedSurface.isEmpty == false {
+                        add(trimmedSurface, trimmedSurface)
+                    }
+                    if trimmedKana.isEmpty == false {
+                        add(trimmedKana, trimmedKana)
+                    }
+
+                    for detail in entryDetails {
+                        let headword = primaryHeadword(for: detail)
+                        let reading = (detail.kanaForms.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if headword.isEmpty == false, reading.isEmpty == false {
+                            add(headword, reading)
+                        }
+                        if reading.isEmpty == false {
+                            add(reading, reading)
+                        }
+                    }
+
+                    // De-dupe while preserving order.
+                    var seen = Set<String>()
+                    var out: [(surface: String, reading: String)] = []
+                    for (s, r) in pairs {
+                        let key = "\(s)|\(r)"
+                        if seen.insert(key).inserted {
+                            out.append((s, r))
+                        }
+                    }
+                    return out
+                }()
+
+                let pitchRows: [PitchAccent] = await Task.detached(priority: .userInitiated) {
+                    var seen = Set<String>()
+                    var out: [PitchAccent] = []
+                    out.reserveCapacity(8)
+
+                    for pair in pitchPairs {
+                        let rows = (try? await DictionarySQLiteStore.shared.fetchPitchAccents(surface: pair.surface, reading: pair.reading)) ?? []
+                        for row in rows {
+                            let key = "\(row.surface)|\(row.reading)|\(row.accent)|\(row.morae)|\(row.kind ?? "")|\(row.readingMarked ?? "")"
+                            if seen.insert(key).inserted {
+                                out.append(row)
+                            }
+                        }
+                    }
+
+                    out.sort {
+                        if $0.accent != $1.accent { return $0.accent < $1.accent }
+                        if $0.morae != $1.morae { return $0.morae < $1.morae }
+                        return ($0.kind ?? "") < ($1.kind ?? "")
+                    }
+                    return out
+                }.value
+
+                guard activeLoadRequestID == requestID else { return }
+                pitchAccentsForTerm = pitchRows
+            } else {
+                pitchAccentsForTerm = []
+            }
+            isLoadingPitchAccents = false
+
             // If we weren't invoked with component parts from Paste, infer a reasonable component
             // breakdown for compounds.
             await inferTokenPartsIfNeeded()
@@ -1314,12 +1432,16 @@ struct WordDefinitionsView: View {
             guard activeLoadRequestID == requestID else { return }
             entries = []
             entryDetails = []
+            hasPitchAccentsTable = nil
+            pitchAccentsForTerm = []
+            isLoadingPitchAccents = false
             exampleSentences = []
             isLoadingExampleSentences = false
             isLoading = false
             errorMessage = String(describing: error)
         }
     }
+
 
     private func refreshContextInsights() {
         let sentence = contextSentence?.trimmingCharacters(in: .whitespacesAndNewlines)

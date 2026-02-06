@@ -37,7 +37,7 @@
 - [ ] Spaced repetition for flashcards
 - [ ] Auto clipboard paste/search
 - [ ] Check if OCR is built in to iOS
-- [ ] Pitch accent data
+- [x] Pitch accent data
 - [ ] Kanji data
 - [ ] Handwriting input and kanji stroke order 
 - [ ] kanji of the day feature with pretty images

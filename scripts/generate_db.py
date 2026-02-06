@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import sqlite3
+import csv
 import struct
 import sys
 import time
@@ -150,6 +151,23 @@ CREATE TABLE surface_index (
     PRIMARY KEY (token_hash, entry_id, source)
 );
 
+-- Pitch accent lookup table (optional ingestion).
+--
+-- Key design:
+-- - surface: written form (kanji/kana/katakana)
+-- - reading: normalized kana reading for lookup (does not include boundary marker like '◦')
+-- - reading_marked: original reading from source if it contains boundary markers
+--
+-- Multiple rows per (surface, reading) are allowed.
+CREATE TABLE pitch_accents (
+    surface TEXT NOT NULL,
+    reading TEXT NOT NULL,
+    accent INTEGER NOT NULL,
+    morae INTEGER NOT NULL,
+    kind TEXT,
+    reading_marked TEXT
+);
+
 -- Example sentence pairs (optional ingestion).
 CREATE TABLE sentence_pairs (
     jp_id INTEGER NOT NULL,
@@ -164,6 +182,7 @@ CREATE INDEX idx_kana_forms_text ON kana_forms(text);
 CREATE INDEX idx_glosses_text ON glosses(text);
 CREATE INDEX idx_english_index_token ON english_index(token);
 CREATE INDEX idx_surface_index_hash ON surface_index(token_hash);
+CREATE INDEX idx_pitch_accents_surface_reading ON pitch_accents(surface, reading);
 CREATE INDEX idx_sentence_pairs_jp_id ON sentence_pairs(jp_id);
 CREATE INDEX idx_sentence_pairs_en_id ON sentence_pairs(en_id);
 
@@ -264,6 +283,82 @@ def import_sentence_pairs(cur: sqlite3.Cursor, tsv_path: Path):
     return inserted, skipped, bad
 
 
+def import_pitch_accents(cur: sqlite3.Cursor, tsv_path: Path, batch_size: int = 5000):
+    if not tsv_path.exists():
+        raise FileNotFoundError(f"Pitch TSV not found: {tsv_path}")
+
+    inserted = 0
+    bad = 0
+    skipped_header = 0
+
+    batch = []
+    batch_reserve = max(1, batch_size)
+
+    # utf-8-sig handles optional BOM.
+    with tsv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        for row in reader:
+            if not row:
+                continue
+
+            # Allow stray blank lines.
+            if len(row) == 1 and not row[0].strip():
+                continue
+
+            # Header row.
+            if row[0].strip().lower() == "id":
+                skipped_header += 1
+                continue
+
+            if len(row) < 6:
+                bad += 1
+                continue
+
+            surface = row[1].strip()
+            reading_marked = row[2].strip()
+            kind = row[3].strip() or None
+            accent_s = row[4].strip()
+            morae_s = row[5].strip()
+
+            if not surface or not reading_marked or not accent_s or not morae_s:
+                bad += 1
+                continue
+
+            reading = reading_marked.replace("◦", "")
+            reading_marked_store = reading_marked if reading_marked != reading else None
+
+            try:
+                accent = int(accent_s)
+                morae = int(morae_s)
+            except ValueError:
+                bad += 1
+                continue
+
+            # Allow 0 (heiban). For atamadaka/nakadaka/odaka, accent is 1..morae.
+            if morae <= 0 or accent < 0 or accent > morae:
+                bad += 1
+                continue
+
+            batch.append((surface, reading, accent, morae, kind, reading_marked_store))
+            if len(batch) >= batch_reserve:
+                cur.executemany(
+                    "INSERT INTO pitch_accents (surface, reading, accent, morae, kind, reading_marked) VALUES (?, ?, ?, ?, ?, ?)",
+                    batch,
+                )
+                inserted += len(batch)
+                batch.clear()
+
+        if batch:
+            cur.executemany(
+                "INSERT INTO pitch_accents (surface, reading, accent, morae, kind, reading_marked) VALUES (?, ?, ?, ?, ?, ?)",
+                batch,
+            )
+            inserted += len(batch)
+            batch.clear()
+
+    return inserted, bad, skipped_header
+
+
 def print_db_summary(conn: sqlite3.Connection):
     cur = conn.cursor()
     tables = [
@@ -274,6 +369,7 @@ def print_db_summary(conn: sqlite3.Connection):
         "glosses",
         "english_index",
         "surface_index",
+        "pitch_accents",
         "sentence_pairs",
         "embeddings",
     ]
@@ -292,8 +388,11 @@ def print_db_summary(conn: sqlite3.Connection):
 
 
 def resolve_default_paths(repo_root: Path, script_dir: Path):
-    # Prefer colocated inputs in scripts/ (common for this repo), then fall back.
+    # Prefer repo_root/data for large inputs, with scripts/ as a fallback.
+    data_dir = repo_root / "data"
     json_candidates = [
+        data_dir / "jmdict-eng-3.6.2.json",
+        data_dir / "jmdict-eng-3.6.1.json",
         script_dir / "jmdict-eng-3.6.2.json",
         script_dir / "jmdict-eng-3.6.1.json",
         repo_root / "jmdict-eng-3.6.2.json",
@@ -313,8 +412,16 @@ def main(argv: list[str]) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     script_dir = Path(__file__).resolve().parent
     default_json, default_db, json_candidates = resolve_default_paths(repo_root, script_dir)
-    default_sentences_tsv = (script_dir / "sentence-pairs.tsv").resolve()
-    default_embeddings_bin = (script_dir / "cc.ja.300.pruned.f32").resolve()
+    data_dir = (repo_root / "data").resolve()
+    default_sentences_tsv = (data_dir / "sentence-pairs.tsv").resolve()
+    if not default_sentences_tsv.exists():
+        default_sentences_tsv = (script_dir / "sentence-pairs.tsv").resolve()
+
+    default_embeddings_bin = (data_dir / "cc.ja.300.pruned.f32").resolve()
+    if not default_embeddings_bin.exists():
+        default_embeddings_bin = (script_dir / "cc.ja.300.pruned.f32").resolve()
+
+    default_pitch_tsv = (data_dir / "pitch_accent.tsv").resolve()
 
     parser = argparse.ArgumentParser(
         description="Build dictionary.sqlite3 from JMdict JSON",
@@ -357,6 +464,16 @@ def main(argv: list[str]) -> int:
         help="Disable importing embeddings",
     )
     parser.add_argument(
+        "--pitch-tsv",
+        default=str(default_pitch_tsv) if default_pitch_tsv.exists() else None,
+        help="Optional pitch accent TSV with columns: id<TAB>word<TAB>kana<TAB>kind<TAB>accent<TAB>morae",
+    )
+    parser.add_argument(
+        "--no-pitch",
+        action="store_true",
+        help="Disable importing pitch accent data",
+    )
+    parser.add_argument(
         "--surface-token-max-len",
         type=int,
         default=10,
@@ -374,6 +491,8 @@ def main(argv: list[str]) -> int:
         args.sentences_tsv = None
     if args.no_embeddings:
         args.embeddings_bin = None
+    if args.no_pitch:
+        args.pitch_tsv = None
 
     json_path = Path(args.jmdict_json)
     if not json_path.is_absolute():
@@ -533,6 +652,18 @@ def main(argv: list[str]) -> int:
                 print(f"Processed {i}/{total} entries ({pct:.1f}%) — {elapsed:.1f}s elapsed")
 
         conn.commit()
+
+        if args.pitch_tsv:
+            pitch_path = Path(args.pitch_tsv)
+            if not pitch_path.is_absolute():
+                pitch_path = (repo_root / pitch_path).resolve()
+            print(f"Importing pitch accents from: {pitch_path}")
+            conn.execute("BEGIN;")
+            inserted, bad, skipped_header = import_pitch_accents(cur, pitch_path)
+            conn.commit()
+            print(
+                f"Pitch accents imported: inserted={inserted} bad_lines={bad} header_rows_skipped={skipped_header}"
+            )
 
         if args.sentences_tsv:
             sentences_path = Path(args.sentences_tsv)

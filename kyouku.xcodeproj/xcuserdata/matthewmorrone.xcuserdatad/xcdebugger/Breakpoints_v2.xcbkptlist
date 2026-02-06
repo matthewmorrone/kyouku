@@ -32,7 +32,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2415"
             endingLineNumber = "2415"
-            landmarkName = "englishPhraseRegex(for:)"
+            landmarkName = "englishGlossPhraseCandidates()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>

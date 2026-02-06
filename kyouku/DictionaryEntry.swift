@@ -77,6 +77,21 @@ struct ExampleSentence: Identifiable, Hashable {
     var id: String { "\(jpID)#\(enID)" }
 }
 
+struct PitchAccent: Identifiable, Hashable, Sendable {
+    let surface: String
+    let reading: String
+    let accent: Int
+    let morae: Int
+    let kind: String?
+    let readingMarked: String?
+
+    var id: String {
+        let k = kind ?? ""
+        let rm = readingMarked ?? ""
+        return "\(surface)#\(reading)#\(accent)#\(morae)#\(k)#\(rm)"
+    }
+}
+
 private struct RawDictionaryRow {
     // Removed: lookup now returns one row per JMdict entry and no longer expands
     // kana variants into separate DictionaryEntry results.
@@ -111,6 +126,7 @@ actor DictionarySQLiteStore {
     private var hasSurfaceIndex = false
     private var surfaceIndexUsesHash = false
     private var hasSentencePairs = false
+    private var hasPitchAccents = false
     private var lastQueryDescription: String = ""
 
     private init() {
@@ -299,6 +315,24 @@ actor DictionarySQLiteStore {
     /// - If the bundled DB lacks the optional `sentence_pairs` table, this returns [].
     func fetchExampleSentences(containing terms: [String], limit: Int = 8) async throws -> [ExampleSentence] {
         try fetchExampleSentencesSync(containing: terms, limit: limit)
+    }
+
+    /// Returns pitch accent rows keyed by (surface, reading) if the bundled DB includes
+    /// the optional `pitch_accents` table.
+    func fetchPitchAccents(surface: String, reading: String) async throws -> [PitchAccent] {
+        try fetchPitchAccentsSync(surface: surface, reading: reading)
+    }
+
+    /// Returns whether the bundled DB includes the optional `pitch_accents` table.
+    ///
+    /// Non-throwing: returns false if the DB cannot be opened.
+    func supportsPitchAccents() async -> Bool {
+        do {
+            try ensureOpen()
+            return hasPitchAccents
+        } catch {
+            return false
+        }
     }
 
     private func queryExactMatches(for term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -1300,16 +1334,77 @@ actor DictionarySQLiteStore {
             hasGlossesFTS = false
             hasSurfaceIndex = false
             hasSentencePairs = false
+            hasPitchAccents = false
             return
         }
         hasGlossesFTS = tableExists("glosses_fts", in: db)
         hasSurfaceIndex = tableExists("surface_index", in: db)
         hasSentencePairs = tableExists("sentence_pairs", in: db)
+        hasPitchAccents = tableExists("pitch_accents", in: db)
         if hasSurfaceIndex {
             surfaceIndexUsesHash = tableHasColumn("surface_index", column: "token_hash", in: db)
         } else {
             surfaceIndexUsesHash = false
         }
+    }
+
+    private func fetchPitchAccentsSync(surface: String, reading: String) throws -> [PitchAccent] {
+        try ensureOpen()
+        guard let db else { return [] }
+        guard hasPitchAccents else { return [] }
+
+        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
+        let r = reading.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
+        guard s.isEmpty == false, r.isEmpty == false else { return [] }
+
+        let sql = """
+        SELECT surface, reading, accent, morae, kind, reading_marked
+        FROM pitch_accents
+        WHERE surface = ?1 AND reading = ?2
+        ORDER BY accent ASC, morae ASC;
+        """
+
+        lastQueryDescription = "fetchPitchAccents surface='\(s)' reading='\(r)'\n" + sql
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
+            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_text(stmt, 1, s, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, r, -1, SQLITE_TRANSIENT)
+
+        var out: [PitchAccent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let surfacePtr = sqlite3_column_text(stmt, 0), let readingPtr = sqlite3_column_text(stmt, 1) else { continue }
+            let surfaceText = String(cString: surfacePtr)
+            let readingText = String(cString: readingPtr)
+            let accent = Int(sqlite3_column_int(stmt, 2))
+            let morae = Int(sqlite3_column_int(stmt, 3))
+            let kind: String? = {
+                guard let ptr = sqlite3_column_text(stmt, 4) else { return nil }
+                let v = String(cString: ptr).trimmingCharacters(in: .whitespacesAndNewlines)
+                return v.isEmpty ? nil : v
+            }()
+            let readingMarked: String? = {
+                guard let ptr = sqlite3_column_text(stmt, 5) else { return nil }
+                let v = String(cString: ptr).trimmingCharacters(in: .whitespacesAndNewlines)
+                return v.isEmpty ? nil : v
+            }()
+
+            out.append(
+                PitchAccent(
+                    surface: surfaceText,
+                    reading: readingText,
+                    accent: accent,
+                    morae: morae,
+                    kind: kind,
+                    readingMarked: readingMarked
+                )
+            )
+        }
+        return out
     }
 
     private func fetchExampleSentencesSync(containing terms: [String], limit: Int) throws -> [ExampleSentence] {
