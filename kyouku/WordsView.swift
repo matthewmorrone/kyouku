@@ -51,6 +51,8 @@ struct WordsView: View {
     @State private var cachedListCounts: [UUID: Int] = [:]
     @State private var listNamesByID: [UUID: String] = [:]
     @State private var noteTitlesByID: [UUID: String] = [:]
+    @State private var savedSurfaceKeys: Set<String> = []
+    @State private var savedSurfaceKanaKeys: Set<String> = []
 
     @State private var isPromptingForBulkAddListName: Bool = false
     @State private var pendingBulkAddListName: String = ""
@@ -77,6 +79,7 @@ struct WordsView: View {
             .onAppear {
                 refreshListCaches()
                 refreshSortedWords()
+                refreshSavedWordCaches()
             }
             .onChange(of: selectedFilter) { _, _ in
                 refreshSortedWords()
@@ -85,6 +88,7 @@ struct WordsView: View {
                 refreshSortedWords()
                 refreshNoteListItems()
                 refreshListCounts()
+                refreshSavedWordCaches()
             }
             .onReceive(store.$lists) { _ in
                 refreshListNameCache()
@@ -889,6 +893,21 @@ struct WordsView: View {
         refreshNoteListItems()
     }
 
+    private func refreshSavedWordCaches() {
+        var surfaceKeys: Set<String> = []
+        var surfaceKanaKeys: Set<String> = []
+        surfaceKeys.reserveCapacity(store.words.count)
+        surfaceKanaKeys.reserveCapacity(store.words.count)
+        for word in store.words {
+            let surfaceKey = kanaFoldToHiragana(word.surface)
+            surfaceKeys.insert(surfaceKey)
+            let kanaKey = kanaFoldToHiragana(word.kana ?? "")
+            surfaceKanaKeys.insert("\(surfaceKey)|\(kanaKey)")
+        }
+        savedSurfaceKeys = surfaceKeys
+        savedSurfaceKanaKeys = surfaceKanaKeys
+    }
+
 
 private struct WordListsBrowserView: View {
     @EnvironmentObject private var store: WordsStore
@@ -1198,14 +1217,11 @@ private struct WordListsBrowserView: View {
 
     private func hasSavedWord(surface: String, reading: String?) -> Bool {
         let targetSurface = kanaFoldToHiragana(surface)
-        let targetKana = kanaFoldToHiragana(reading ?? "")
-        return store.words.contains { word in
-            guard kanaFoldToHiragana(word.surface) == targetSurface else { return false }
-            if reading != nil {
-                return kanaFoldToHiragana(word.kana ?? "") == targetKana
-            }
-            return true
+        if let reading {
+            let targetKana = kanaFoldToHiragana(reading)
+            return savedSurfaceKanaKeys.contains("\(targetSurface)|\(targetKana)")
         }
+        return savedSurfaceKeys.contains(targetSurface)
     }
 
     private var trimmedSearchText: String {
