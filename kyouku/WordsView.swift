@@ -46,12 +46,24 @@ struct WordsView: View {
     @AppStorage("wordsShowEntrySourceLabels") private var showEntrySourceLabels: Bool = false
     @AppStorage("dictionaryHomeShelf") private var dictionaryHomeShelfRaw: String = DictionaryHomeShelf.favorites.rawValue
     @State private var suppressedSearchTaskID: String? = nil
+    @State private var cachedSortedWords: [Word] = []
+    @State private var cachedNoteListItems: [NoteListItem] = []
+    @State private var cachedListCounts: [UUID: Int] = [:]
+    @State private var listNamesByID: [UUID: String] = [:]
+    @State private var noteTitlesByID: [UUID: String] = [:]
+    @State private var savedSurfaceKeys: Set<String> = []
+    @State private var savedSurfaceKanaKeys: Set<SurfaceKanaKey> = []
 
     @State private var isPromptingForBulkAddListName: Bool = false
     @State private var pendingBulkAddListName: String = ""
 
     private struct EditingWord: Identifiable {
         let id: Word.ID
+    }
+
+    private struct SurfaceKanaKey: Hashable {
+        let surface: String
+        let kana: String
     }
 
     @State private var editingWord: EditingWord? = nil
@@ -69,6 +81,28 @@ struct WordsView: View {
             .environment(\.editMode, $editModeState)
             .listStyle(.plain)
             .navigationTitle("Words")
+            .onAppear {
+                refreshListCaches()
+                refreshSortedWords()
+                refreshSavedWordCaches()
+            }
+            .onChange(of: selectedFilter) { _, _ in
+                refreshSortedWords()
+            }
+            .onReceive(store.$words) { _ in
+                refreshSortedWords()
+                refreshNoteListItems()
+                refreshListCounts()
+                refreshSavedWordCaches()
+            }
+            .onReceive(store.$lists) { _ in
+                refreshListNameCache()
+                refreshListCounts()
+            }
+            .onReceive(notesStore.$notes) { _ in
+                refreshNoteTitleCache()
+                refreshNoteListItems()
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
@@ -111,14 +145,13 @@ struct WordsView: View {
                                     if store.lists.isEmpty == false {
                                         Divider()
                                         ForEach(store.lists) { list in
-                                            let count = store.wordCount(inList: list.id)
                                             Button {
                                                 selectedFilter = .list(list.id)
                                             } label: {
                                                 HStack {
                                                     Text(list.name)
                                                     Spacer()
-                                                    Text("\(count)")
+                                                    Text("\(cachedListCounts[list.id] ?? 0)")
                                                         .foregroundStyle(.secondary)
                                                     if selectedFilter == .list(list.id) {
                                                         Image(systemName: "checkmark")
@@ -129,10 +162,9 @@ struct WordsView: View {
                                     }
                                 }
                                 Section("Notes") {
-                                    let noteLists = noteListItems
-                                    if noteLists.isEmpty == false {
+                                    if cachedNoteListItems.isEmpty == false {
                                         Divider()
-                                        ForEach(noteLists) { item in
+                                        ForEach(cachedNoteListItems) { item in
                                             Button {
                                                 selectedFilter = .note(item.id)
                                             } label: {
@@ -497,7 +529,8 @@ struct WordsView: View {
             Text("Saved entries appear here. Save a dictionary result to get started.")
                 .foregroundStyle(Color.appTextSecondary)
         } else {
-            ForEach(sortedWords) { word in
+            let wordsToRender = cachedSortedWords.isEmpty ? store.words : cachedSortedWords
+            ForEach(wordsToRender) { word in
                 if isEditing {
                     savedRow(word)
                         .tag(word.id)
@@ -739,7 +772,7 @@ struct WordsView: View {
         .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
     }
 
-    private var sortedWords: [Word] {
+    private func refreshSortedWords() {
         let base = store.words
         let filtered: [Word]
         switch selectedFilter {
@@ -750,7 +783,7 @@ struct WordsView: View {
         case .note(let noteID):
             filtered = base.filter { $0.sourceNoteID == noteID }
         }
-        return filtered.sorted { $0.createdAt > $1.createdAt }
+        cachedSortedWords = filtered.sorted { $0.createdAt > $1.createdAt }
     }
 
     private func entrySourceLabel(for word: Word) -> String? {
@@ -783,15 +816,11 @@ struct WordsView: View {
     }
 
     private func name(forListID id: UUID) -> String? {
-        store.lists.first(where: { $0.id == id })?.name
+        listNamesByID[id]
     }
 
     private func title(forNoteID id: UUID) -> String {
-        if let note = notesStore.notes.first(where: { $0.id == id }) {
-            let trimmed = (note.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "Untitled Note" : trimmed
-        }
-        return "Deleted Note"
+        noteTitlesByID[id] ?? "Deleted Note"
     }
 
     private struct NoteListItem: Identifiable, Hashable {
@@ -800,38 +829,56 @@ struct WordsView: View {
         let count: Int
     }
 
-    private var noteListItems: [NoteListItem] {
+    private func refreshNoteListItems() {
+        let entries = buildSortedNoteCountEntries(from: store.words, titleFor: title(forNoteID:))
+        cachedNoteListItems = entries.map { entry in
+            NoteListItem(id: entry.noteID, title: entry.title, count: entry.count)
+        }
+    }
+
+    private func refreshListNameCache() {
+        var names: [UUID: String] = [:]
+        names.reserveCapacity(store.lists.count)
+        for list in store.lists {
+            names[list.id] = list.name
+        }
+        listNamesByID = names
+    }
+
+    private func refreshListCounts() {
         var counts: [UUID: Int] = [:]
         for word in store.words {
-            guard let noteID = word.sourceNoteID else { continue }
-            counts[noteID, default: 0] += 1
+            for listID in word.listIDs {
+                counts[listID, default: 0] += 1
+            }
         }
-        guard counts.isEmpty == false else { return [] }
+        cachedListCounts = counts
+    }
 
-        func title(for noteID: UUID) -> String {
-            guard let note = notesStore.notes.first(where: { $0.id == noteID }) else {
-                return "Deleted Note"
-            }
-            if let title = note.title?.trimmingCharacters(in: .whitespacesAndNewlines), title.isEmpty == false {
-                return title
-            }
-            let firstLine = note.text
-                .split(whereSeparator: { $0.isNewline })
-                .map(String.init)
-                .first(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
-                ?? "Untitled Note"
-            let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.count <= 42 { return trimmed }
-            let prefix = trimmed.prefix(42)
-            return "\(prefix)…"
+    private func refreshNoteTitleCache() {
+        noteTitlesByID = buildNoteTitlesByID(from: notesStore.notes, maxDerivedTitleLength: 42)
+    }
+
+    private func refreshListCaches() {
+        refreshListNameCache()
+        refreshListCounts()
+        refreshNoteTitleCache()
+        refreshNoteListItems()
+    }
+
+    private func refreshSavedWordCaches() {
+        var surfaceKeys: Set<String> = []
+        var surfaceKanaKeys: Set<SurfaceKanaKey> = []
+        surfaceKeys.reserveCapacity(store.words.count)
+        surfaceKanaKeys.reserveCapacity(store.words.count)
+        for word in store.words {
+            let surfaceKey = kanaFoldToHiragana(word.surface)
+            surfaceKeys.insert(surfaceKey)
+            let kanaKey = kanaFoldToHiragana(word.kana ?? "")
+            surfaceKanaKeys.insert(SurfaceKanaKey(surface: surfaceKey, kana: kanaKey))
         }
-
-        return counts
-            .map { (noteID, count) in NoteListItem(id: noteID, title: title(for: noteID), count: count) }
-            .sorted { lhs, rhs in
-                if lhs.count != rhs.count { return lhs.count > rhs.count }
-                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
-            }
+        savedSurfaceKeys = surfaceKeys
+        savedSurfaceKanaKeys = surfaceKanaKeys
     }
 
 
@@ -841,6 +888,9 @@ private struct WordListsBrowserView: View {
     @Environment(\.dismiss) private var dismiss
 
     @Binding var selectedFilter: WordsListFilter
+    @State private var cachedNoteListItems: [NoteListItem] = []
+    @State private var cachedListCounts: [UUID: Int] = [:]
+    @State private var noteTitlesByID: [UUID: String] = [:]
 
     private struct NoteListItem: Identifiable, Hashable {
         let id: UUID
@@ -848,38 +898,29 @@ private struct WordListsBrowserView: View {
         let count: Int
     }
 
-    private var noteListItems: [NoteListItem] {
+    private func refreshNoteListItems() {
+        let entries = buildSortedNoteCountEntries(from: store.words, titleFor: title(forNoteID:))
+        cachedNoteListItems = entries.map { entry in
+            NoteListItem(id: entry.noteID, title: entry.title, count: entry.count)
+        }
+    }
+
+    private func refreshNoteTitleCache() {
+        noteTitlesByID = buildNoteTitlesByID(from: notesStore.notes, maxDerivedTitleLength: 42)
+    }
+
+    private func refreshListCounts() {
         var counts: [UUID: Int] = [:]
         for word in store.words {
-            guard let noteID = word.sourceNoteID else { continue }
-            counts[noteID, default: 0] += 1
+            for listID in word.listIDs {
+                counts[listID, default: 0] += 1
+            }
         }
-        guard counts.isEmpty == false else { return [] }
+        cachedListCounts = counts
+    }
 
-        func title(for noteID: UUID) -> String {
-            guard let note = notesStore.notes.first(where: { $0.id == noteID }) else {
-                return "Deleted Note"
-            }
-            if let title = note.title?.trimmingCharacters(in: .whitespacesAndNewlines), title.isEmpty == false {
-                return title
-            }
-            let firstLine = note.text
-                .split(whereSeparator: { $0.isNewline })
-                .map(String.init)
-                .first(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
-                ?? "Untitled Note"
-            let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.count <= 42 { return trimmed }
-            let prefix = trimmed.prefix(42)
-            return "\(prefix)…"
-        }
-
-        return counts
-            .map { (noteID, count) in NoteListItem(id: noteID, title: title(for: noteID), count: count) }
-            .sorted { lhs, rhs in
-                if lhs.count != rhs.count { return lhs.count > rhs.count }
-                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
-            }
+    private func title(forNoteID id: UUID) -> String {
+        noteTitlesByID[id] ?? "Deleted Note"
     }
 
     var body: some View {
@@ -904,7 +945,6 @@ private struct WordListsBrowserView: View {
             if store.lists.isEmpty == false {
                 Section("Saved Lists") {
                     ForEach(store.lists) { list in
-                        let count = store.wordCount(inList: list.id)
                         Button {
                             selectedFilter = .list(list.id)
                             dismiss()
@@ -912,7 +952,7 @@ private struct WordListsBrowserView: View {
                             HStack {
                                 Text(list.name)
                                 Spacer()
-                                Text("\(count)")
+                                Text("\(cachedListCounts[list.id] ?? 0)")
                                     .foregroundStyle(.secondary)
                                 if selectedFilter == .list(list.id) {
                                     Image(systemName: "checkmark")
@@ -923,10 +963,9 @@ private struct WordListsBrowserView: View {
                 }
             }
 
-            let noteLists = noteListItems
-            if noteLists.isEmpty == false {
+            if cachedNoteListItems.isEmpty == false {
                 Section("Notes") {
-                    ForEach(noteLists) { item in
+                    ForEach(cachedNoteListItems) { item in
                         Button {
                             selectedFilter = .note(item.id)
                             dismiss()
@@ -955,6 +994,19 @@ private struct WordListsBrowserView: View {
         }
         .navigationTitle("Lists")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            refreshNoteTitleCache()
+            refreshNoteListItems()
+            refreshListCounts()
+        }
+        .onReceive(store.$words) { _ in
+            refreshNoteListItems()
+            refreshListCounts()
+        }
+        .onReceive(notesStore.$notes) { _ in
+            refreshNoteTitleCache()
+            refreshNoteListItems()
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Done") {
@@ -1105,14 +1157,11 @@ private struct WordListsBrowserView: View {
 
     private func hasSavedWord(surface: String, reading: String?) -> Bool {
         let targetSurface = kanaFoldToHiragana(surface)
-        let targetKana = kanaFoldToHiragana(reading ?? "")
-        return store.words.contains { word in
-            guard kanaFoldToHiragana(word.surface) == targetSurface else { return false }
-            if reading != nil {
-                return kanaFoldToHiragana(word.kana ?? "") == targetKana
-            }
-            return true
+        if let reading {
+            let targetKana = kanaFoldToHiragana(reading)
+            return savedSurfaceKanaKeys.contains(SurfaceKanaKey(surface: targetSurface, kana: targetKana))
         }
+        return savedSurfaceKeys.contains(targetSurface)
     }
 
     private var trimmedSearchText: String {
@@ -1184,7 +1233,7 @@ private struct WordListsBrowserView: View {
 
     private func selectAllSavedWords() {
         guard canEditSavedWords else { return }
-        let allIDs = Set(sortedWords.map { $0.id })
+        let allIDs = Set(cachedSortedWords.map { $0.id })
         if selectedWordIDs == allIDs {
             selectedWordIDs.removeAll()
         } else {
@@ -2180,4 +2229,3 @@ private enum WordsCSVImport {
         return out
     }
 }
-

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UIKit
 import Foundation
 
 struct TokenActionPanel: View {
@@ -449,6 +450,175 @@ struct TokenActionPanel: View {
     }
 }
 
+// MARK: - Custom reading alert (UIKit-backed)
+
+private final class PreferredLanguageUITextField: UITextField {
+    var preferredLanguagePrefixes: [String] = []
+
+    override var textInputMode: UITextInputMode? {
+        guard preferredLanguagePrefixes.isEmpty == false else {
+            return super.textInputMode
+        }
+
+        for mode in UITextInputMode.activeInputModes {
+            guard let primary = mode.primaryLanguage else { continue }
+            if preferredLanguagePrefixes.contains(where: { primary.hasPrefix($0) }) {
+                return mode
+            }
+        }
+
+        return super.textInputMode
+    }
+}
+
+private final class CustomReadingEntryViewController: UIViewController, UITextFieldDelegate {
+    private let surfaceLabel = UILabel()
+    private let textField = PreferredLanguageUITextField(frame: .zero)
+    private var onTextChanged: ((String) -> Void)? = nil
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        view.preservesSuperviewLayoutMargins = true
+        view.layoutMargins = UIEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
+
+        surfaceLabel.font = UIFont.systemFont(ofSize: 13)
+        surfaceLabel.textColor = .secondaryLabel
+        surfaceLabel.numberOfLines = 2
+
+        textField.delegate = self
+        textField.borderStyle = .roundedRect
+        textField.clearButtonMode = .always
+        textField.autocorrectionType = .no
+        textField.spellCheckingType = .no
+        textField.smartDashesType = .no
+        textField.smartQuotesType = .no
+        textField.smartInsertDeleteType = .no
+        textField.autocapitalizationType = .none
+        textField.returnKeyType = .done
+        textField.enablesReturnKeyAutomatically = false
+        textField.addTarget(self, action: #selector(textDidChange(_:)), for: .editingChanged)
+
+        let stack = UIStackView(arrangedSubviews: [surfaceLabel, textField])
+        stack.axis = .vertical
+        stack.alignment = .fill
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: view.layoutMarginsGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: view.layoutMarginsGuide.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -6)
+        ])
+    }
+
+    func apply(surface: String, text: String, preferredLanguagePrefixes: [String], onTextChanged: @escaping (String) -> Void) {
+        surfaceLabel.text = surface
+        if textField.text != text {
+            textField.text = text
+        }
+        textField.preferredLanguagePrefixes = preferredLanguagePrefixes
+        self.onTextChanged = onTextChanged
+    }
+
+    func focusAndSelectAll() {
+        textField.becomeFirstResponder()
+        guard let current = textField.text, current.isEmpty == false else { return }
+        let beginning = textField.beginningOfDocument
+        let end = textField.endOfDocument
+        if let range = textField.textRange(from: beginning, to: end) {
+            textField.selectedTextRange = range
+        }
+    }
+
+    @objc private func textDidChange(_ sender: UITextField) {
+        onTextChanged?(sender.text ?? "")
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        textField.resignFirstResponder()
+        return false
+    }
+}
+
+private struct CustomReadingAlertPresenter: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
+    let title: String
+    let surface: String
+    @Binding var text: String
+    let preferredLanguagePrefixes: [String]
+    let onCancel: () -> Void
+    let onApply: () -> Void
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        UIViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        guard isPresented else {
+            if let alert = context.coordinator.alert, alert.presentingViewController != nil {
+                alert.dismiss(animated: true)
+            }
+            context.coordinator.alert = nil
+            context.coordinator.entryController = nil
+            return
+        }
+
+        if let alert = context.coordinator.alert {
+            context.coordinator.entryController?.apply(
+                surface: surface,
+                text: text,
+                preferredLanguagePrefixes: preferredLanguagePrefixes,
+                onTextChanged: { newValue in
+                    text = newValue
+                }
+            )
+            _ = alert
+            return
+        }
+
+        let alert = UIAlertController(title: title, message: nil, preferredStyle: .alert)
+        let entry = CustomReadingEntryViewController()
+        entry.apply(
+            surface: surface,
+            text: text,
+            preferredLanguagePrefixes: preferredLanguagePrefixes,
+            onTextChanged: { newValue in
+                text = newValue
+            }
+        )
+        alert.setValue(entry, forKey: "contentViewController")
+
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+            onCancel()
+            isPresented = false
+        })
+        alert.addAction(UIAlertAction(title: "Apply", style: .default) { _ in
+            onApply()
+            isPresented = false
+        })
+
+        context.coordinator.alert = alert
+        context.coordinator.entryController = entry
+        uiViewController.present(alert, animated: true) {
+            DispatchQueue.main.async {
+                entry.focusAndSelectAll()
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        var alert: UIAlertController? = nil
+        var entryController: CustomReadingEntryViewController? = nil
+    }
+}
+
 private struct SplitMenuView: View {
     let selectionCharacters: [Character]
     @Binding var leftBucketCount: Int
@@ -781,20 +951,24 @@ private struct LookupResultsView: View {
             resetReadingIndexIfNeeded()
         }
 
-        .alert("Custom reading", isPresented: $isCustomReadingPromptPresented) {
-            TextField("", text: $customReadingText)
-            Button("Cancel", role: .cancel) {
-                customReadingText = ""
-            }
-            Button("Apply") {
-                let trimmed = customReadingText.trimmingCharacters(in: .whitespacesAndNewlines)
-                customReadingText = ""
-                guard trimmed.isEmpty == false else { return }
-                onApplyCustomReading?(trimmed)
-            }
-        } message: {
-            Text(effectiveSelection.surface)
-        }
+        .background(
+            CustomReadingAlertPresenter(
+                isPresented: $isCustomReadingPromptPresented,
+                title: "Custom reading",
+                surface: effectiveSelection.surface,
+                text: $customReadingText,
+                preferredLanguagePrefixes: ["ja"],
+                onCancel: {
+                    customReadingText = ""
+                },
+                onApply: {
+                    let trimmed = customReadingText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    customReadingText = ""
+                    guard trimmed.isEmpty == false else { return }
+                    onApplyCustomReading?(trimmed)
+                }
+            )
+        )
     }
 
     private func statusCard(@ViewBuilder content: () -> some View) -> some View {
@@ -1118,7 +1292,14 @@ private struct LookupResultsView: View {
                             tint: isActiveCustomReading ? .accentColor : .secondary,
                             accessibilityLabel: isActiveCustomReading ? "Active custom reading" : "Apply custom reading"
                         ) {
-                            customReadingText = ""
+                            // Prefill with the current active reading and fully select it.
+                            // This makes it easy to type a correction immediately.
+                            let currentReading: String = {
+                                if activeReading.isEmpty == false { return activeReading }
+                                if surfaceReading.isEmpty == false { return surfaceReading }
+                                return tokenReading
+                            }()
+                            customReadingText = currentReading
                             isCustomReadingPromptPresented = true
                         }
                     }

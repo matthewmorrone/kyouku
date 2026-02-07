@@ -4,6 +4,25 @@ import CoreText
 enum RubyTextProcessing {
     private static let coreTextRubyAttribute = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
 
+    private static func containsHanIdeograph(_ s: String) -> Bool {
+        for scalar in s.unicodeScalars {
+            let v = scalar.value
+            // CJK Unified Ideographs + extensions + compatibility ideographs.
+            // Ranges chosen to cover modern Japanese kanji used in typical text.
+            if (0x4E00...0x9FFF).contains(v) { return true } // Unified Ideographs
+            if (0x3400...0x4DBF).contains(v) { return true } // Extension A
+            if (0xF900...0xFAFF).contains(v) { return true } // Compatibility Ideographs
+            if (0x2F800...0x2FA1F).contains(v) { return true } // Compatibility Supplement
+            if (0x20000...0x2A6DF).contains(v) { return true } // Extension B
+            if (0x2A700...0x2B73F).contains(v) { return true } // Extension C
+            if (0x2B740...0x2B81F).contains(v) { return true } // Extension D
+            if (0x2B820...0x2CEAF).contains(v) { return true } // Extension E
+            if (0x2CEB0...0x2EBEF).contains(v) { return true } // Extension F
+            if (0x30000...0x3134F).contains(v) { return true } // Extension G
+        }
+        return false
+    }
+
     static func applyAnnotationVisibility(
         _ visibility: RubyAnnotationVisibility,
         to attributedString: NSMutableAttributedString
@@ -386,22 +405,127 @@ enum RubyTextProcessing {
                 let extra = max(0, rubyWidth) - baseWidth
                 guard extra > 0.01 else { continue }
 
-                let half = extra * 0.5
-                if half > 0.01 {
-                    insertions.append(
-                        .init(
-                            insertAtSourceIndex: inkStart,
-                            width: half,
-                            kind: .rubyPadding(reading: reading, rubyFontSize: rubyFontSize)
+                func isParagraphBoundaryBefore(_ index: Int) -> Bool {
+                    if index <= 0 { return true }
+                    let prev = backing.character(at: index - 1)
+                    return prev == 10 || prev == 13 // \n or \r
+                }
+
+                func isParagraphBoundaryAfter(_ index: Int) -> Bool {
+                    if index >= length { return true }
+                    let next = backing.character(at: index)
+                    return next == 10 || next == 13 // \n or \r
+                }
+
+                func appendEdgeRubyPadding(totalExtraWidth: CGFloat) {
+                    guard totalExtraWidth > 0.01 else { return }
+
+                    let atParagraphStart = isParagraphBoundaryBefore(inkStart)
+                    let atParagraphEnd = isParagraphBoundaryAfter(inkEndExclusive)
+
+                    let leading: CGFloat
+                    let trailing: CGFloat
+                    if atParagraphStart && atParagraphEnd == false {
+                        // Don’t insert a large leading spacer at paragraph start.
+                        leading = 0
+                        trailing = totalExtraWidth
+                    } else if atParagraphEnd && atParagraphStart == false {
+                        // Don’t insert a large trailing spacer at paragraph end.
+                        leading = totalExtraWidth
+                        trailing = 0
+                    } else {
+                        // Default: keep ruby centered over ink by padding symmetrically.
+                        leading = totalExtraWidth * 0.5
+                        trailing = totalExtraWidth * 0.5
+                    }
+
+                    if leading > 0.01 {
+                        insertions.append(
+                            .init(
+                                insertAtSourceIndex: inkStart,
+                                width: leading,
+                                kind: .rubyPadding(reading: reading, rubyFontSize: rubyFontSize)
+                            )
                         )
-                    )
-                    insertions.append(
-                        .init(
-                            insertAtSourceIndex: inkEndExclusive,
-                            width: half,
-                            kind: .rubyPadding(reading: reading, rubyFontSize: rubyFontSize)
+                    }
+                    if trailing > 0.01 {
+                        insertions.append(
+                            .init(
+                                insertAtSourceIndex: inkEndExclusive,
+                                width: trailing,
+                                kind: .rubyPadding(reading: reading, rubyFontSize: rubyFontSize)
+                            )
                         )
-                    )
+                    }
+                }
+
+                // If the headword includes multiple kanji, distribute the required extra width
+                // between kanji glyphs (tracking) rather than placing all padding at the ends.
+                // IMPORTANT: only kern between adjacent kanji-to-kanji graphemes (avoid spacing
+                // between kanji and kana like "夢 の" which looks like missing text).
+                var graphemeRanges: [NSRange] = []
+                graphemeRanges.reserveCapacity(8)
+                var isKanji: [Bool] = []
+                isKanji.reserveCapacity(8)
+
+                var kanjiCount = 0
+                var idx = inkStart
+                while idx < inkEndExclusive {
+                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
+                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= inkEndExclusive else { break }
+                    graphemeRanges.append(r)
+                    let s = backing.substring(with: r)
+                    let k = containsHanIdeograph(s)
+                    isKanji.append(k)
+                    if k { kanjiCount += 1 }
+                    idx = NSMaxRange(r)
+                }
+
+                var kanjiGapIndices: [Int] = []
+                kanjiGapIndices.reserveCapacity(8)
+                if graphemeRanges.count >= 2 {
+                    for i in 0..<(graphemeRanges.count - 1) {
+                        if isKanji[i] && isKanji[i + 1] {
+                            kanjiGapIndices.append(i)
+                        }
+                    }
+                }
+
+                let gapCount = kanjiGapIndices.count
+                let shouldDistributeInside = kanjiCount >= 2 && gapCount >= 1
+
+                if shouldDistributeInside {
+                    let idealPerGap = extra / CGFloat(gapCount)
+                    // Avoid excessively large inter-kanji gaps; spill remainder to edge padding.
+                    let maxPerGap = max(1.0, baseFont.pointSize * 0.6)
+                    let perGap = min(maxPerGap, max(0, idealPerGap))
+
+                    if perGap > 0.01 {
+                        for i in kanjiGapIndices {
+                            let r = graphemeRanges[i]
+                            // Add to any existing kern rather than overwriting.
+                            let existing: CGFloat = {
+                                if let num = mutable.attribute(.kern, at: r.location, effectiveRange: nil) as? NSNumber {
+                                    return CGFloat(num.doubleValue)
+                                }
+                                if let cg = mutable.attribute(.kern, at: r.location, effectiveRange: nil) as? CGFloat {
+                                    return cg
+                                }
+                                if let dbl = mutable.attribute(.kern, at: r.location, effectiveRange: nil) as? Double {
+                                    return CGFloat(dbl)
+                                }
+                                return 0
+                            }()
+                            let newValue = existing + perGap
+                            mutable.addAttribute(.kern, value: newValue, range: r)
+                        }
+                    }
+
+                    let internalApplied = perGap * CGFloat(gapCount)
+                    let remaining = extra - internalApplied
+                    appendEdgeRubyPadding(totalExtraWidth: remaining)
+                } else {
+                    appendEdgeRubyPadding(totalExtraWidth: extra)
                 }
             }
         }

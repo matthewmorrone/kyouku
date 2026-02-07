@@ -2801,6 +2801,19 @@ struct PasteView: View {
 
         let splitUTF16Index = selection.range.location + offset
 
+        // Persist an explicit hard cut at the split boundary.
+        // Rationale: even when Stage-1 spans are split, downstream semantic regrouping / tail-merge
+        // passes may legally merge adjacent semantic spans back together unless a hard boundary
+        // blocks it. This was surfacing as “split requires two attempts” because the second split
+        // happens to fall on an existing Stage-1 boundary and records a hard cut.
+        if propagateTokenEdits {
+            var cuts: [Int] = [splitUTF16Index]
+            cuts.append(contentsOf: splitHardCutCandidatesEverywhere(surface: selection.surface, offset: offset))
+            tokenBoundaries.addHardCuts(noteID: activeNoteID, utf16Indices: cuts, text: inputText)
+        } else {
+            tokenBoundaries.addHardCut(noteID: activeNoteID, utf16Index: splitUTF16Index, text: inputText)
+        }
+
         // Keep the dictionary panel updated after the split by restoring selection to one of the
         // resulting token ranges (smallest side; tie-break to the right).
         let baseRange = selection.range
@@ -2889,6 +2902,34 @@ struct PasteView: View {
         } else {
             applySpanSplit(spanIndex: spanIndex, range: spanRange, offset: localOffset, actionName: "Split Token")
         }
+    }
+
+    private func splitHardCutCandidatesEverywhere(surface: String, offset: Int) -> [Int] {
+        let nsText = inputText as NSString
+        guard nsText.length > 0 else { return [] }
+        let normalizedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedSurface.isEmpty == false else { return [] }
+        guard offset > 0 else { return [] }
+
+        var out: [Int] = []
+        out.reserveCapacity(32)
+
+        var search = NSRange(location: 0, length: nsText.length)
+        while search.length > 0 {
+            let found = nsText.range(of: normalizedSurface, options: [], range: search)
+            if found.location == NSNotFound { break }
+
+            let cut = found.location + offset
+            if cut > found.location, cut < NSMaxRange(found), cut > 0, cut < nsText.length {
+                out.append(cut)
+            }
+
+            let next = found.location + max(1, found.length)
+            guard next < nsText.length else { break }
+            search = NSRange(location: next, length: nsText.length - next)
+        }
+
+        return out
     }
 
     private func applySpanMergeEverywhere(mergeRange: Range<Int>, actionName: String) -> NSRange? {
