@@ -265,7 +265,6 @@ struct TokenListPanel: View {
                         ForEach(items) { item in
                             TokenListRow(
                                 item: item,
-                                noteID: noteID,
                                 noteOverrides: noteOverrides,
                                 isSelected: isItemSelected(item),
                                 onSelect: { onSelect(item.spanIndex) },
@@ -303,7 +302,6 @@ struct TokenListPanel: View {
 
     private struct TokenListRow: View {
         let item: TokenListItem
-        let noteID: UUID
         let noteOverrides: [ReadingOverride]
         let isSelected: Bool
         let onSelect: () -> Void
