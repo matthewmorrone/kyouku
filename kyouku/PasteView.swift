@@ -178,6 +178,67 @@ struct PasteView: View {
 
     
     static let coordinateSpaceName = "PasteViewRootSpace"
+    @State private var pinchZoomInProgress: Bool = false
+    @State private var pinchZoomBaselineTextSize: Double? = nil
+    @State private var pinchZoomBaselineFuriganaSize: Double? = nil
+    @State private var pendingFuriganaSizeRefreshTask: Task<Void, Never>? = nil
+
+    private static let readingSizeRange: ClosedRange<Double> = 1...30
+    private static let pinchRefreshDebounceNanoseconds: UInt64 = 140_000_000
+
+    private func clampReadingSize(_ value: Double) -> Double {
+        min(max(value, Self.readingSizeRange.lowerBound), Self.readingSizeRange.upperBound)
+    }
+
+    private func snapReadingSize(_ value: Double, step: Double = 0.5) -> Double {
+        guard step > 0 else { return value }
+        return (value / step).rounded() * step
+    }
+
+    private func scheduleFuriganaSizeRefresh(reason: String) {
+        pendingFuriganaSizeRefreshTask?.cancel()
+        pendingFuriganaSizeRefreshTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: Self.pinchRefreshDebounceNanoseconds)
+            } catch {
+                return
+            }
+            guard Task.isCancelled == false else { return }
+            triggerFuriganaRefreshIfNeeded(reason: reason, recomputeSpans: false)
+        }
+    }
+
+    private var pinchToZoomGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { scale in
+                if pinchZoomInProgress == false {
+                    pinchZoomInProgress = true
+                    pinchZoomBaselineTextSize = readingTextSize
+                    pinchZoomBaselineFuriganaSize = readingFuriganaSize
+                }
+                guard let baseText = pinchZoomBaselineTextSize,
+                      let baseFurigana = pinchZoomBaselineFuriganaSize else { return }
+
+                let factor = Double(scale)
+                let nextText = snapReadingSize(clampReadingSize(baseText * factor))
+                let nextFurigana = snapReadingSize(clampReadingSize(baseFurigana * factor))
+
+                if abs(nextText - readingTextSize) > .ulpOfOne {
+                    readingTextSize = nextText
+                }
+                if abs(nextFurigana - readingFuriganaSize) > .ulpOfOne {
+                    readingFuriganaSize = nextFurigana
+                }
+            }
+            .onEnded { _ in
+                pinchZoomInProgress = false
+                pinchZoomBaselineTextSize = nil
+                pinchZoomBaselineFuriganaSize = nil
+                pendingFuriganaSizeRefreshTask?.cancel()
+                pendingFuriganaSizeRefreshTask = nil
+                triggerFuriganaRefreshIfNeeded(reason: "pinch zoom ended", recomputeSpans: false)
+            }
+    }
     private static let inlineDictionaryPanelEnabledFlag = true
     private static let dictionaryPopupEnabledFlag = true // Tap in paste area shows popup + highlight.
     private static let dictionaryPopupLoggingEnabledFlag = false
@@ -536,7 +597,12 @@ struct PasteView: View {
                 showToast(enabled ? "Highlight unknown words enabled" : "Highlight unknown words disabled")
             }
             .onChange(of: readingFuriganaSize) {
-                triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
+                guard showFurigana else { return }
+                if pinchZoomInProgress {
+                    scheduleFuriganaSizeRefresh(reason: "furigana font size changed (pinch)")
+                } else {
+                    triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
+                }
             }
             .onChange(of: readingHeadwordSpacingPadding) { _, enabled in
                 triggerFuriganaRefreshIfNeeded(
@@ -915,6 +981,7 @@ struct PasteView: View {
                 }
             }
         )
+        .simultaneousGesture(pinchToZoomGesture)
     }
 
     private func showToast(_ message: String) {
