@@ -259,12 +259,14 @@ struct TokenListPanel: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
+                let noteOverrides = readingOverrides.overrides(for: noteID)
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         ForEach(items) { item in
                             TokenListRow(
                                 item: item,
                                 noteID: noteID,
+                                noteOverrides: noteOverrides,
                                 isSelected: isItemSelected(item),
                                 onSelect: { onSelect(item.spanIndex) },
                                 onGoTo: { onGoTo(item.spanIndex) },
@@ -302,6 +304,7 @@ struct TokenListPanel: View {
     private struct TokenListRow: View {
         let item: TokenListItem
         let noteID: UUID
+        let noteOverrides: [ReadingOverride]
         let isSelected: Bool
         let onSelect: () -> Void
         let onGoTo: () -> Void
@@ -311,8 +314,6 @@ struct TokenListPanel: View {
         let onSplit: () -> Void
         let mergeLeftEnabled: Bool
         let mergeRightEnabled: Bool
-
-        @EnvironmentObject private var readingOverrides: ReadingOverridesStore
 
         var body: some View {
             HStack(spacing: 12) {
@@ -394,7 +395,7 @@ struct TokenListPanel: View {
         }
 
         private func preferredReading(for range: NSRange, fallback: String?) -> String? {
-            let overrides = readingOverrides.overrides(for: noteID, overlapping: range)
+            let overrides = noteOverrides.filter { $0.overlaps(range) }
             if let exact = overrides.first(where: {
                 $0.rangeStart == range.location &&
                 $0.rangeLength == range.length &&
@@ -464,4 +465,3 @@ struct TokenListPanel: View {
         }
     }
 }
-
