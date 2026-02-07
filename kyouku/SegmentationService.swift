@@ -446,7 +446,13 @@ actor SegmentationService {
         // Hard linguistic constraint:
         // A normal lexical segment must not end on small っ/ッ (sokuon).
         // Bind sokuon to the right by removing boundaries immediately after it.
-        ranges = enforceSokuonBinding(ranges: ranges, text: text, allowedTerminalForms: sokuonTerminalAllowedForms)
+        ranges = await enforceSokuonBinding(
+            ranges: ranges,
+            text: text,
+            swiftText: swiftText,
+            trie: trie,
+            allowedTerminalForms: sokuonTerminalAllowedForms
+        )
 
         let totalDuration = CFAbsoluteTimeGetCurrent() - profilingStart
         await MainActor.run {
@@ -464,8 +470,10 @@ actor SegmentationService {
     private func enforceSokuonBinding(
         ranges: [SegmentedRange],
         text: NSString,
+        swiftText: String,
+        trie: LexiconTrie,
         allowedTerminalForms: Set<String>
-    ) -> [SegmentedRange] {
+    ) async -> [SegmentedRange] {
         guard ranges.count >= 2 else { return ranges }
         let length = text.length
 
@@ -507,6 +515,58 @@ actor SegmentationService {
             }
             // Otherwise, bind to the right.
             return true
+        }
+
+        func maybeSplitTrailingSingleHiraganaIfItRevealsLexiconWord(
+            merged: SegmentedRange,
+            nextUnmerged: SegmentedRange?
+        ) async -> [SegmentedRange] {
+            // Extremely conservative repair step.
+            // Only used for spans created by sokuon boundary binding, where we can end up with
+            // an unnatural lexicon-less surface like "ぼっちよ".
+            // If splitting the final single hiragana produces a trie-longest lexicon match for
+            // the base (e.g. "ぼっち"), do so and leave the suffix as non-lex.
+            let r = merged.range
+            guard r.location != NSNotFound, r.length >= 2, NSMaxRange(r) <= length else { return [merged] }
+
+            // Avoid violating the “maximal same-script run” contract: if the next segment is a
+            // contiguous non-lex hiragana run, splitting would create an extendable singleton.
+            if let nextUnmerged {
+                let nextR = nextUnmerged.range
+                if nextUnmerged.isLexiconMatch == false,
+                   nextR.location == NSMaxRange(r),
+                   nextR.length > 0,
+                   nextR.location < length {
+                    let nextUnit = text.character(at: nextR.location)
+                    if Self.isHiragana(nextUnit) { return [merged] }
+                }
+            }
+
+            let endIndex = NSMaxRange(r) - 1
+            guard endIndex >= r.location else { return [merged] }
+            let lastUnit = text.character(at: endIndex)
+            guard Self.isHiragana(lastUnit) else { return [merged] }
+
+            let lastCharRange = text.rangeOfComposedCharacterSequence(at: endIndex)
+            guard lastCharRange.length == 1 else { return [merged] }
+            let baseEnd = lastCharRange.location
+            guard baseEnd > r.location else { return [merged] }
+            let baseRange = NSRange(location: r.location, length: baseEnd - r.location)
+            let suffixRange = NSRange(location: baseEnd, length: NSMaxRange(r) - baseEnd)
+            guard suffixRange.length == 1 else { return [merged] }
+
+            let firstUnit = text.character(at: baseRange.location)
+            let requireKanjiMatch = (Self.isHiragana(firstUnit) == false && Self.isKatakana(firstUnit) == false)
+            let computedEnd: Int? = await MainActor.run { [swiftText, trie, requireKanjiMatch] in
+                let ns = swiftText as NSString
+                return trie.longestMatchEnd(in: ns, from: baseRange.location, requireKanji: requireKanjiMatch)
+            }
+            guard computedEnd == NSMaxRange(baseRange) else { return [merged] }
+
+            return [
+                SegmentedRange(range: baseRange, isLexiconMatch: true),
+                SegmentedRange(range: suffixRange, isLexiconMatch: false),
+            ]
         }
 
         // Pass 1: bind leading sokuon to the left when it would otherwise start a token.
@@ -573,6 +633,8 @@ actor SegmentationService {
             var current = leftBound[i]
             i += 1
 
+            var mergedDueToSokuonBinding = false
+
             while i < leftBound.count, shouldMerge(left: current, right: leftBound[i]) {
                 let next = leftBound[i]
                 i += 1
@@ -581,9 +643,19 @@ actor SegmentationService {
                     isLexiconMatch: false
                 )
                 current = merged
+                mergedDueToSokuonBinding = true
             }
 
-            out.append(current)
+            if mergedDueToSokuonBinding {
+                let nextUnmerged = (i < leftBound.count) ? leftBound[i] : nil
+                let repaired = await maybeSplitTrailingSingleHiraganaIfItRevealsLexiconWord(
+                    merged: current,
+                    nextUnmerged: nextUnmerged
+                )
+                out.append(contentsOf: repaired)
+            } else {
+                out.append(current)
+            }
         }
 
         return out

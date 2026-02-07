@@ -52,13 +52,18 @@ struct WordsView: View {
     @State private var listNamesByID: [UUID: String] = [:]
     @State private var noteTitlesByID: [UUID: String] = [:]
     @State private var savedSurfaceKeys: Set<String> = []
-    @State private var savedSurfaceKanaKeys: Set<String> = []
+    @State private var savedSurfaceKanaKeys: Set<SurfaceKanaKey> = []
 
     @State private var isPromptingForBulkAddListName: Bool = false
     @State private var pendingBulkAddListName: String = ""
 
     private struct EditingWord: Identifiable {
         let id: Word.ID
+    }
+
+    private struct SurfaceKanaKey: Hashable {
+        let surface: String
+        let kana: String
     }
 
     @State private var editingWord: EditingWord? = nil
@@ -824,22 +829,10 @@ struct WordsView: View {
     }
 
     private func refreshNoteListItems() {
-        var counts: [UUID: Int] = [:]
-        for word in store.words {
-            guard let noteID = word.sourceNoteID else { continue }
-            counts[noteID, default: 0] += 1
+        let entries = buildSortedNoteCountEntries(from: store.words, titleFor: title(forNoteID:))
+        cachedNoteListItems = entries.map { entry in
+            NoteListItem(id: entry.noteID, title: entry.title, count: entry.count)
         }
-        guard counts.isEmpty == false else {
-            cachedNoteListItems = []
-            return
-        }
-
-        cachedNoteListItems = counts
-            .map { (noteID, count) in NoteListItem(id: noteID, title: title(forNoteID: noteID), count: count) }
-            .sorted { lhs, rhs in
-                if lhs.count != rhs.count { return lhs.count > rhs.count }
-                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
-            }
     }
 
     private func refreshListNameCache() {
@@ -862,28 +855,7 @@ struct WordsView: View {
     }
 
     private func refreshNoteTitleCache() {
-        var titles: [UUID: String] = [:]
-        titles.reserveCapacity(notesStore.notes.count)
-        for note in notesStore.notes {
-            let trimmedTitle = (note.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedTitle.isEmpty == false {
-                titles[note.id] = trimmedTitle
-                continue
-            }
-            let firstLine = note.text
-                .split(whereSeparator: { $0.isNewline })
-                .map(String.init)
-                .first(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
-                ?? "Untitled Note"
-            let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.count <= 42 {
-                titles[note.id] = trimmed
-            } else {
-                let prefix = trimmed.prefix(42)
-                titles[note.id] = "\(prefix)…"
-            }
-        }
-        noteTitlesByID = titles
+        noteTitlesByID = buildNoteTitlesByID(from: notesStore.notes, maxDerivedTitleLength: 42)
     }
 
     private func refreshListCaches() {
@@ -895,14 +867,14 @@ struct WordsView: View {
 
     private func refreshSavedWordCaches() {
         var surfaceKeys: Set<String> = []
-        var surfaceKanaKeys: Set<String> = []
+        var surfaceKanaKeys: Set<SurfaceKanaKey> = []
         surfaceKeys.reserveCapacity(store.words.count)
         surfaceKanaKeys.reserveCapacity(store.words.count)
         for word in store.words {
             let surfaceKey = kanaFoldToHiragana(word.surface)
             surfaceKeys.insert(surfaceKey)
             let kanaKey = kanaFoldToHiragana(word.kana ?? "")
-            surfaceKanaKeys.insert("\(surfaceKey)|\(kanaKey)")
+            surfaceKanaKeys.insert(SurfaceKanaKey(surface: surfaceKey, kana: kanaKey))
         }
         savedSurfaceKeys = surfaceKeys
         savedSurfaceKanaKeys = surfaceKanaKeys
@@ -926,47 +898,14 @@ private struct WordListsBrowserView: View {
     }
 
     private func refreshNoteListItems() {
-        var counts: [UUID: Int] = [:]
-        for word in store.words {
-            guard let noteID = word.sourceNoteID else { continue }
-            counts[noteID, default: 0] += 1
+        let entries = buildSortedNoteCountEntries(from: store.words, titleFor: title(forNoteID:))
+        cachedNoteListItems = entries.map { entry in
+            NoteListItem(id: entry.noteID, title: entry.title, count: entry.count)
         }
-        guard counts.isEmpty == false else {
-            cachedNoteListItems = []
-            return
-        }
-
-        cachedNoteListItems = counts
-            .map { (noteID, count) in NoteListItem(id: noteID, title: title(forNoteID: noteID), count: count) }
-            .sorted { lhs, rhs in
-                if lhs.count != rhs.count { return lhs.count > rhs.count }
-                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
-            }
     }
 
     private func refreshNoteTitleCache() {
-        var titles: [UUID: String] = [:]
-        titles.reserveCapacity(notesStore.notes.count)
-        for note in notesStore.notes {
-            let trimmedTitle = (note.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedTitle.isEmpty == false {
-                titles[note.id] = trimmedTitle
-                continue
-            }
-            let firstLine = note.text
-                .split(whereSeparator: { $0.isNewline })
-                .map(String.init)
-                .first(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
-                ?? "Untitled Note"
-            let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.count <= 42 {
-                titles[note.id] = trimmed
-            } else {
-                let prefix = trimmed.prefix(42)
-                titles[note.id] = "\(prefix)…"
-            }
-        }
-        noteTitlesByID = titles
+        noteTitlesByID = buildNoteTitlesByID(from: notesStore.notes, maxDerivedTitleLength: 42)
     }
 
     private func refreshListCounts() {
@@ -1219,7 +1158,7 @@ private struct WordListsBrowserView: View {
         let targetSurface = kanaFoldToHiragana(surface)
         if let reading {
             let targetKana = kanaFoldToHiragana(reading)
-            return savedSurfaceKanaKeys.contains("\(targetSurface)|\(targetKana)")
+            return savedSurfaceKanaKeys.contains(SurfaceKanaKey(surface: targetSurface, kana: targetKana))
         }
         return savedSurfaceKeys.contains(targetSurface)
     }
