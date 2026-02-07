@@ -529,7 +529,8 @@ struct WordsView: View {
             Text("Saved entries appear here. Save a dictionary result to get started.")
                 .foregroundStyle(Color.appTextSecondary)
         } else {
-            ForEach(cachedSortedWords) { word in
+            let wordsToRender = cachedSortedWords.isEmpty ? store.words : cachedSortedWords
+            ForEach(wordsToRender) { word in
                 if isEditing {
                     savedRow(word)
                         .tag(word.id)
