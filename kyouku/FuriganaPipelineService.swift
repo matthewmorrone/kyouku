@@ -519,6 +519,17 @@ struct FuriganaPipelineService {
                 let next = spans[j]
                 guard next.range.location != NSNotFound, next.range.length > 0 else { break }
 
+                // Topic particle guard:
+                // Do not merge a standalone 「は」 into the previous semantic span.
+                // This is important for token selection + dictionary lookup, since PasteView
+                // uses semantic spans as token spans when available.
+                if next.surface == "は" {
+                    let leftSurface = spans[j - 1].surface
+                    if leftSurface != "で" && leftSurface != "て" {
+                        break
+                    }
+                }
+
                 // Must be contiguous.
                 if currentEnd != next.range.location { break }
 

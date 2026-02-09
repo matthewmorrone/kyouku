@@ -52,6 +52,10 @@ struct WordDefinitionsView: View {
     @State private var headerLemmaLine: String? = nil
     @State private var headerFormLine: String? = nil
 
+    // Resolved lemma information (computed when we have to deinflect during lookup).
+    @State private var resolvedLemmaForLookup: String? = nil
+    @State private var resolvedDeinflectionTrace: [Deinflector.AppliedRule] = []
+
     @State private var showAllConjugations: Bool = false
 
     @State private var componentPreviewPart: TokenPart? = nil
@@ -215,6 +219,59 @@ struct WordDefinitionsView: View {
                 }
             }
 
+            if let morph = verbMorphologyAnalysis {
+                Section("Morphology") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(morph.surface)
+                            .font(.body.weight(.semibold))
+                            .textSelection(.enabled)
+
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text("Lemma")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 120, alignment: .leading)
+                            Text(morph.lemmaDisplay)
+                                .font(.body)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .textSelection(.enabled)
+
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text("Verb class")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 120, alignment: .leading)
+                            Text(verbClassDisplayName(morph.verbClass))
+                                .font(.body)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text("Form")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 120, alignment: .leading)
+                            Text(morph.formDisplay)
+                                .font(.body)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text("Function")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 120, alignment: .leading)
+                            Text(morph.functionDisplay)
+                                .font(.body)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        Text(morph.pitchNote)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
             Section("Pitch Accent") {
                 if hasPitchAccentsTable == false {
                     Text("Pitch accent data isn’t available in the bundled dictionary (missing pitch_accents table).")
@@ -234,9 +291,24 @@ struct WordDefinitionsView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } else {
-                    let readingForDisplay = (kana ?? entryDetails.first?.kanaForms.first?.text)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let morph = verbMorphologyAnalysis
+                    let lemmaHeadword = (entryDetails.first.map { primaryHeadword(for: $0) } ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let lemmaReading = (entryDetails.first?.kanaForms.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    if let morph, lemmaHeadword.isEmpty == false {
+                        Text("Shown for lemma: \(morph.lemmaDisplay). Surface-form pitch may differ; it isn’t computed here.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    let headwordForDisplay = (morph == nil ? titleText : (lemmaHeadword.isEmpty ? titleText : lemmaHeadword))
+                    let readingForDisplay = (morph == nil
+                        ? (kana ?? entryDetails.first?.kanaForms.first?.text)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        : (lemmaReading.isEmpty ? ((kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) : lemmaReading)
+                    )
                     PitchAccentSection(
-                        headword: titleText,
+                        headword: headwordForDisplay,
                         reading: readingForDisplay,
                         accents: pitchAccentsForTerm,
                         showsTitle: false,
@@ -486,16 +558,122 @@ struct WordDefinitionsView: View {
             .first(where: { $0.isEmpty == false })
     }
 
+    private var resolvedLemmaText: String? {
+        let a = (resolvedLemmaForLookup ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if a.isEmpty == false { return a }
+        return primaryLemmaText
+    }
+
+    private var resolvedSurfaceText: String {
+        titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isVerbLemma: Bool {
+        // Verbs only: gate morphology + lemma-pitch behaviors.
+        verbConjugationVerbClass != nil
+    }
+
+    private struct VerbMorphologyAnalysis: Hashable {
+        let surface: String
+        let lemmaSurface: String
+        let lemmaDisplay: String
+        let verbClass: JapaneseVerbConjugator.VerbClass
+        let formDisplay: String
+        let functionDisplay: String
+        let pitchNote: String
+        let isUncertain: Bool
+    }
+
+    private var verbMorphologyAnalysis: VerbMorphologyAnalysis? {
+        guard isVerbLemma else { return nil }
+
+        let surface = resolvedSurfaceText
+        guard surface.isEmpty == false else { return nil }
+
+        let lemmaSurface = (resolvedLemmaText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard lemmaSurface.isEmpty == false else { return nil }
+
+        // Only show for inflected forms.
+        guard lemmaSurface != surface else { return nil }
+
+        guard let verbClass = verbConjugationVerbClass else { return nil }
+
+        // Prefer the primary lemma's (kanji,kana) display from the fetched entry details.
+        let lemmaHeadword: String = {
+            guard let first = entryDetails.first else { return lemmaSurface }
+            let h = primaryHeadword(for: first).trimmingCharacters(in: .whitespacesAndNewlines)
+            return h.isEmpty ? lemmaSurface : h
+        }()
+        let lemmaReading: String = (entryDetails.first?.kanaForms.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let lemmaDisplay: String = {
+            let h = lemmaHeadword
+            let r = lemmaReading
+            if h.isEmpty { return lemmaSurface }
+            if r.isEmpty { return h }
+            if containsKanji(h) {
+                return "\(h)（\(r)）"
+            }
+            // Kana-only lemma.
+            return h
+        }()
+
+        let allConjs = JapaneseVerbConjugator.conjugations(for: lemmaSurface, verbClass: verbClass, set: .all)
+        let matchingLabels: [String] = {
+            var seen = Set<String>()
+            var out: [String] = []
+            for label in allConjs.filter({ $0.surface == surface }).map({ $0.label }) {
+                let t = label.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard t.isEmpty == false else { continue }
+                if seen.insert(t).inserted { out.append(t) }
+            }
+            return out
+        }()
+
+        let (formDisplay, functionDisplay, uncertain): (String, String, Bool) = {
+            if matchingLabels.isEmpty == false {
+                // If multiple labels map to the same surface (e.g. 来られる: potential/passive), do not guess.
+                let baseLabel = matchingLabels.count == 1 ? matchingLabels[0] : matchingLabels.joined(separator: " / ")
+                let structural = structuralBreakdown(for: matchingLabels, verbClass: verbClass, surface: surface)
+                let funcText = functionSummary(for: matchingLabels)
+                let display = structural.isEmpty ? baseLabel : "\(baseLabel)（\(structural)）"
+                return (display, funcText, matchingLabels.count > 1)
+            }
+
+            // Fallback: use the deinflection trace if we have it, but mark uncertain.
+            if resolvedDeinflectionTrace.isEmpty == false {
+                let traceLabel = describeVerbishDeinflectionTrace(resolvedDeinflectionTrace)
+                let display = traceLabel.isEmpty ? "(uncertain)" : "\(traceLabel)（uncertain）"
+                return (display, "(uncertain)", true)
+            }
+
+            return ("(uncertain)", "(uncertain)", true)
+        }()
+
+        let pitchNote = "Pitch accent is shown for the lemma. The surface form may inherit it or be modified by attached auxiliaries; this view does not compute surface pitch from morae."
+
+        return VerbMorphologyAnalysis(
+            surface: surface,
+            lemmaSurface: lemmaSurface,
+            lemmaDisplay: lemmaDisplay,
+            verbClass: verbClass,
+            formDisplay: formDisplay,
+            functionDisplay: functionDisplay,
+            pitchNote: pitchNote,
+            isUncertain: uncertain
+        )
+    }
+
     @MainActor
     private func updateHeaderLemmaAndFormLines() async {
-        let surfaceText = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let surfaceText = resolvedSurfaceText
         guard surfaceText.isEmpty == false else {
             headerLemmaLine = nil
             headerFormLine = nil
             return
         }
 
-        guard let lemmaTextRaw = primaryLemmaText else {
+        guard let lemmaTextRaw = resolvedLemmaText else {
             headerLemmaLine = nil
             headerFormLine = nil
             return
@@ -545,7 +723,12 @@ struct WordDefinitionsView: View {
             return ordered.joined(separator: " → ")
         }
 
-        if let deinflector = try? Deinflector.loadBundled(named: "deinflect") {
+        if resolvedDeinflectionTrace.isEmpty == false {
+            if let form = describeTrace(resolvedDeinflectionTrace) {
+                headerFormLine = "Form: \(form) of \(lemmaText)"
+                return
+            }
+        } else if let deinflector = try? Deinflector.loadBundled(named: "deinflect") {
             let candidates = deinflector.deinflect(surfaceText, maxDepth: 8, maxResults: 64)
             if let match = candidates.first(where: { $0.surface == lemmaText }) {
                 if let form = describeTrace(match.trace) {
@@ -1223,6 +1406,9 @@ struct WordDefinitionsView: View {
         showAllExampleSentences = false
         isLoadingExampleSentences = true
 
+        resolvedLemmaForLookup = nil
+        resolvedDeinflectionTrace = []
+
         var merged: [DictionaryEntry] = []
         var seen: Set<String> = []
         var selectedLemmaUsedForLookup: String? = nil
@@ -1276,6 +1462,43 @@ struct WordDefinitionsView: View {
                 }
             }
 
+            // If we're still empty, attempt deinflection-based lemma lookup.
+            // This is especially important for Words/History items saved as inflected surfaces.
+            if merged.isEmpty {
+                if let deinflector = try? Deinflector.loadBundled(named: "deinflect") {
+                    // Prefer the explicit surface term; then try kana (if supplied).
+                    for term in primaryTerms {
+                        try Task.checkCancellation()
+                        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard trimmed.isEmpty == false else { continue }
+
+                        let candidates = deinflector.deinflect(trimmed, maxDepth: 8, maxResults: 64)
+                        for cand in candidates {
+                            if cand.trace.isEmpty { continue }
+                            let keys = DictionaryKeyPolicy.keys(forDisplayKey: cand.baseForm)
+                            guard keys.lookupKey.isEmpty == false else { continue }
+
+                            let rows = try await DictionarySQLiteStore.shared.lookupExact(term: keys.lookupKey, limit: 100)
+                            if rows.isEmpty == false {
+                                for row in rows {
+                                    if seen.insert(row.id).inserted {
+                                        merged.append(row)
+                                    }
+                                }
+                                resolvedLemmaForLookup = cand.baseForm
+                                resolvedDeinflectionTrace = cand.trace
+                                selectedLemmaUsedForLookup = cand.baseForm
+                                break
+                            }
+                        }
+
+                        if merged.isEmpty == false {
+                            break
+                        }
+                    }
+                }
+            }
+
             guard activeLoadRequestID == requestID else { return }
             try Task.checkCancellation()
 
@@ -1303,6 +1526,15 @@ struct WordDefinitionsView: View {
             // Final display requirement: common entries should all appear before non-common ones.
             entryDetails = baseOrderedDetails.filter { $0.isCommon } + baseOrderedDetails.filter { $0.isCommon == false }
 
+            // If we did not resolve a lemma explicitly, treat the displayed term as the lemma.
+            // (Used for morphology/pitch logic to avoid mixing surface/lemma in verb pages.)
+            if resolvedLemmaForLookup == nil {
+                let t = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                if t.isEmpty == false {
+                    resolvedLemmaForLookup = t
+                }
+            }
+
             // Pitch accents are an optional table. Load these after details so the page can render.
             let supportsPitchAccents = await DictionarySQLiteStore.shared.supportsPitchAccents()
             hasPitchAccentsTable = supportsPitchAccents
@@ -1313,6 +1545,16 @@ struct WordDefinitionsView: View {
                     let trimmedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
                     let trimmedKana = (kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
+                    // If this is an inflected verb lookup, pitch accent must be associated with the lemma.
+                    // Do not attempt to derive pitch from the surface form.
+                    let lemmaForPitch = (resolvedLemmaForLookup ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let isInflectedVerbForPitch: Bool = {
+                        guard isVerbLemma else { return false }
+                        guard lemmaForPitch.isEmpty == false else { return false }
+                        guard trimmedSurface.isEmpty == false else { return false }
+                        return lemmaForPitch != trimmedSurface
+                    }()
+
                     var pairs: [(String, String)] = []
                     func add(_ s: String, _ r: String) {
                         let s2 = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1321,16 +1563,19 @@ struct WordDefinitionsView: View {
                         pairs.append((s2, r2))
                     }
 
-                    if trimmedSurface.isEmpty == false, trimmedKana.isEmpty == false {
-                        add(trimmedSurface, trimmedKana)
-                    }
-                    if trimmedSurface.isEmpty == false {
-                        add(trimmedSurface, trimmedSurface)
-                    }
-                    if trimmedKana.isEmpty == false {
-                        add(trimmedKana, trimmedKana)
+                    if isInflectedVerbForPitch == false {
+                        if trimmedSurface.isEmpty == false, trimmedKana.isEmpty == false {
+                            add(trimmedSurface, trimmedKana)
+                        }
+                        if trimmedSurface.isEmpty == false {
+                            add(trimmedSurface, trimmedSurface)
+                        }
+                        if trimmedKana.isEmpty == false {
+                            add(trimmedKana, trimmedKana)
+                        }
                     }
 
+                    // Always prefer lemma entry spellings/readings from JMdict details.
                     for detail in entryDetails {
                         let headword = primaryHeadword(for: detail)
                         let reading = (detail.kanaForms.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1439,6 +1684,163 @@ struct WordDefinitionsView: View {
             isLoadingExampleSentences = false
             isLoading = false
             errorMessage = String(describing: error)
+        }
+    }
+
+    // MARK: Morphology helpers (verbs only)
+    private func describeVerbishDeinflectionTrace(_ trace: [Deinflector.AppliedRule]) -> String {
+        guard trace.isEmpty == false else { return "" }
+        var ordered: [String] = []
+        var seen = Set<String>()
+
+        func add(_ label: String) {
+            let t = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard t.isEmpty == false else { return }
+            if seen.insert(t).inserted { ordered.append(t) }
+        }
+
+        for step in trace {
+            switch step.reason.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "-te": add("て-form")
+            case "-ta", "past": add("past")
+            case "negative": add("negative")
+            case "polite": add("polite")
+            case "potential": add("potential")
+            case "passive": add("passive")
+            case "causative": add("causative")
+            case "volitional": add("volitional")
+            case "imperative": add("imperative")
+            case "conditional": add("conditional")
+            default:
+                break
+            }
+        }
+        return ordered.joined(separator: " → ")
+    }
+
+    private func structuralBreakdown(
+        for labels: [String],
+        verbClass: JapaneseVerbConjugator.VerbClass,
+        surface: String
+    ) -> String {
+        // Do not guess if multiple labels conflict.
+        if labels.count != 1 {
+            return ""
+        }
+
+        let label = labels[0]
+        let endsWithTeDe = surface.hasSuffix("で") ? "で" : (surface.hasSuffix("て") ? "て" : nil)
+        let endsWithTaDa = surface.hasSuffix("だ") ? "だ" : (surface.hasSuffix("た") ? "た" : nil)
+
+        switch label {
+        case "て-form":
+            if let td = endsWithTeDe { return "連用形 + \(td)" }
+            return "連用形 + て"
+        case "Past (た)":
+            if let td = endsWithTaDa { return "連用形 + \(td)" }
+            return "連用形 + た"
+        case "Negative (ない)":
+            return "未然形 + ない"
+        case "Polite (ます)":
+            return "連用形 + ます"
+        case "Progressive (ている)":
+            return "て-form + いる"
+        case "Potential":
+            switch verbClass {
+            case .godan:
+                return "可能形（え段 + る）"
+            case .ichidan:
+                return "未然形 + られる"
+            case .suru:
+                return "できる"
+            case .kuru:
+                return "こられる"
+            }
+        case "Passive":
+            switch verbClass {
+            case .godan:
+                return "未然形 + れる"
+            case .ichidan:
+                return "未然形 + られる"
+            case .suru:
+                return "される"
+            case .kuru:
+                // Passive for 来る is not typically used; avoid guessing.
+                return ""
+            }
+        case "Causative":
+            switch verbClass {
+            case .godan:
+                return "未然形 + せる"
+            case .ichidan:
+                return "未然形 + させる"
+            case .suru:
+                return "させる"
+            case .kuru:
+                return "こさせる"
+            }
+        case "Volitional":
+            switch verbClass {
+            case .godan:
+                return "意向形（お段 + う）"
+            case .ichidan:
+                return "意向形（よう）"
+            case .suru:
+                return "しよう"
+            case .kuru:
+                return "こよう"
+            }
+        case "Imperative", "Imperative (alt)":
+            return "命令形"
+        case "Conditional (ば)":
+            return "仮定形 + ば"
+        case "Conditional (たら)":
+            return "過去形 + ら"
+        case "Prohibitive":
+            return "終止形 + な"
+        case "Desire (たい)":
+            return "連用形 + たい"
+        default:
+            return ""
+        }
+    }
+
+    private func functionSummary(for labels: [String]) -> String {
+        // If multiple labels match, we can only state that the function is ambiguous.
+        guard labels.count == 1 else {
+            return "(uncertain: multiple analyses match this surface)"
+        }
+
+        switch labels[0] {
+        case "て-form": return "Clause chaining / auxiliary attachment"
+        case "Past (た)": return "Past / perfective"
+        case "Negative (ない)": return "Negation"
+        case "Polite (ます)": return "Politeness"
+        case "Progressive (ている)": return "Progressive / resulting state"
+        case "Potential": return "Ability / possibility"
+        case "Passive": return "Passive"
+        case "Causative": return "Causation"
+        case "Volitional": return "Volition / invitation"
+        case "Imperative", "Imperative (alt)": return "Command"
+        case "Conditional (ば)": return "Conditional"
+        case "Conditional (たら)": return "Conditional / temporal sequence"
+        case "Prohibitive": return "Prohibition"
+        case "Desire (たい)": return "Desire"
+        default:
+            return "(uncertain)"
+        }
+    }
+
+    private func verbClassDisplayName(_ cls: JapaneseVerbConjugator.VerbClass) -> String {
+        switch cls {
+        case .godan:
+            return "Godan"
+        case .ichidan:
+            return "Ichidan"
+        case .suru:
+            return "Irregular (する)"
+        case .kuru:
+            return "Irregular (来る)"
         }
     }
 
@@ -2053,7 +2455,7 @@ struct WordDefinitionsView: View {
     }
 
     private var verbConjugationBaseForm: String {
-        let lemma = (primaryLemmaText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let lemma = (resolvedLemmaText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if lemma.isEmpty == false { return lemma }
         return titleText.trimmingCharacters(in: .whitespacesAndNewlines)
     }

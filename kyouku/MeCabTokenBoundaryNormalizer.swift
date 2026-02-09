@@ -303,6 +303,45 @@ enum MeCabTokenBoundaryNormalizer {
             .map(clampIndex)
             .sorted()
 
+        func isSokuonUnit(_ unit: unichar) -> Bool {
+            unit == smallTsuHiragana || unit == smallTsuKatakana
+        }
+
+        // Hard linguistic constraint (matches Stage 1):
+        // Never allow a token boundary immediately after small っ/ッ unless it's end-of-text
+        // or followed by a boundary character (whitespace/punctuation).
+        //
+        // Important: we must enforce this on the full cut set, not just MeCab token boundaries,
+        // because upstream stages (e.g. embedding refinement) can introduce cuts that would
+        // otherwise leak through and create spans like “ぼっ” + “ちよ”.
+        let cutsFilteredForSokuon: [Int] = {
+            guard cuts.count >= 3 else { return cuts }
+            var out: [Int] = []
+            out.reserveCapacity(cuts.count)
+            for b in cuts {
+                if b <= 0 || b >= text.length {
+                    out.append(b)
+                    continue
+                }
+                let prevUnit = text.character(at: b - 1)
+                guard isSokuonUnit(prevUnit) else {
+                    out.append(b)
+                    continue
+                }
+                let nextUnit = text.character(at: b)
+                if let nextScalar = UnicodeScalar(nextUnit), isBoundaryScalar(nextScalar) {
+                    out.append(b)
+                    continue
+                }
+                // Drop the cut to bind sokuon to the right.
+            }
+            // Ensure strict monotonic coverage and start/end are present.
+            var dedup = Array(Set(out)).map(clampIndex).sorted()
+            if dedup.first != 0 { dedup.insert(0, at: 0) }
+            if dedup.last != text.length { dedup.append(text.length) }
+            return dedup
+        }()
+
         // Precompute all legal MeCab boundaries once.
         //
         // Hard linguistic constraint:
@@ -343,9 +382,9 @@ enum MeCabTokenBoundaryNormalizer {
             return b.sorted()
         }()
 
-        for i in 0..<(cuts.count - 1) {
-            let start = cuts[i]
-            let end = cuts[i + 1]
+        for i in 0..<(cutsFilteredForSokuon.count - 1) {
+            let start = cutsFilteredForSokuon[i]
+            let end = cutsFilteredForSokuon[i + 1]
             guard end > start else { continue }
 
             // If we cannot guarantee token-boundary alignment (e.g. missing MeCab coverage), keep range as-is.

@@ -123,6 +123,11 @@ struct TokenActionPanel: View {
         // panel because `offset` doesn't move layout.
         .offset(y: max(0, dragOffset))
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: dragOffset)
+        // IMPORTANT: ensure the entire panel surface is hit-testable so taps on "empty" areas
+        // (padding / background) do not fall through to the underlying paste view, which can
+        // clear the selection and dismiss the popup.
+        .contentShape(Rectangle())
+        .onTapGesture { }
     }
 
     private var panelSurface: some View {
@@ -1068,9 +1073,27 @@ private struct LookupResultsView: View {
         }
 
         let preferred = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if preferred.isEmpty == false, let idx = variants.firstIndex(of: preferred) {
-            highlightedReadingIndex = idx
-            return
+        if preferred.isEmpty == false {
+            if let idx = variants.firstIndex(of: preferred) {
+                highlightedReadingIndex = idx
+                return
+            }
+
+            // Reading overrides for mixed kanji+kana tokens are persisted as the *kanji portion*
+            // of the surface reading (e.g. 抱かれ -> store "いだ" so ruby can render 抱(いだ)かれ).
+            // When reopening the popup, map that persisted stem back onto the lemma-level
+            // dictionary variants so the same variant is highlighted.
+            let tokenSurface = effectiveSelection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lemmaSurface = (entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
+            if tokenSurface.isEmpty == false, lemmaSurface.isEmpty == false {
+                for (idx, variant) in variants.enumerated() {
+                    let projected = projectedOverrideKana(tokenSurface: tokenSurface, lemmaSurface: lemmaSurface, lemmaReading: variant)
+                    if projected == preferred {
+                        highlightedReadingIndex = idx
+                        return
+                    }
+                }
+            }
         }
 
         let tokenReading = (effectiveSelection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1161,8 +1184,11 @@ private struct LookupResultsView: View {
         let isSaved = isWordSaved?(entry) ?? false
         let activeReading = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let entryReading = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
-        let isActiveDictionaryReading = activeReading.isEmpty == false && entryReading.isEmpty == false && activeReading == entryReading
-        let isActiveCustomReading = activeReading.isEmpty == false && (activeReading != entryReading)
+        let tokenSurfaceForMatch = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lemmaSurfaceForMatch = (entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
+        let projectedActive = projectedOverrideKana(tokenSurface: tokenSurfaceForMatch, lemmaSurface: lemmaSurfaceForMatch, lemmaReading: (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+        let isActiveDictionaryReading = activeReading.isEmpty == false && entryReading.isEmpty == false && (activeReading == entryReading || (projectedActive.isEmpty == false && activeReading == projectedActive))
+        let isActiveCustomReading = activeReading.isEmpty == false && isActiveDictionaryReading == false
 
         let tokenSurface = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokenReading = (selection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1568,6 +1594,57 @@ private struct LookupResultsView: View {
         components.append(contentsOf: sense.dialects)
         guard components.isEmpty == false else { return nil }
         return components.joined(separator: " · ")
+    }
+
+    private func isKanaOnlySurface(_ surface: String) -> Bool {
+        guard surface.isEmpty == false else { return false }
+        return surface.unicodeScalars.allSatisfy { scalar in
+            (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
+        }
+    }
+
+    /// Project a lemma-level reading (dictionary kana variant) into the persisted override form.
+    /// This mirrors the storage logic in PasteView.applyDictionaryReading(_:).
+    private func projectedOverrideKana(tokenSurface: String, lemmaSurface: String, lemmaReading: String) -> String {
+        let baseReading = lemmaReading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard baseReading.isEmpty == false else { return "" }
+
+        func trailingKanaRun(in surface: String) -> String {
+            guard surface.isEmpty == false else { return "" }
+            let allScalars = Array(surface.unicodeScalars)
+            guard allScalars.isEmpty == false else { return "" }
+            var trailing: [UnicodeScalar] = []
+            for scalar in allScalars.reversed() {
+                let isKana = (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
+                if isKana {
+                    trailing.append(scalar)
+                } else {
+                    break
+                }
+            }
+            guard trailing.isEmpty == false, trailing.count < allScalars.count else { return "" }
+            return String(String.UnicodeScalarView(trailing.reversed()))
+        }
+
+        let tokenSuffix = trailingKanaRun(in: tokenSurface)
+        let lemmaSuffix = trailingKanaRun(in: lemmaSurface)
+
+        let surfaceReading: String = {
+            guard tokenSuffix.isEmpty == false else { return baseReading }
+            guard lemmaSuffix.isEmpty == false else { return baseReading }
+            guard baseReading.hasSuffix(lemmaSuffix) else { return baseReading }
+            let stem = String(baseReading.dropLast(lemmaSuffix.count))
+            return stem + tokenSuffix
+        }()
+
+        if tokenSuffix.isEmpty == false,
+           surfaceReading.hasSuffix(tokenSuffix),
+           isKanaOnlySurface(tokenSurface) == false,
+           tokenSurface.utf16.count > tokenSuffix.utf16.count {
+            return String(surfaceReading.dropLast(tokenSuffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return surfaceReading.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

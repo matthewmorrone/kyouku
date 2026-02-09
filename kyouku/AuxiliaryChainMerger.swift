@@ -54,6 +54,12 @@ struct AuxiliaryChainMerger {
             isParticle && fields.contains("接続助詞")
         }
 
+        /// Boundary-sensitive particles should remain separable from the preceding token.
+        /// Example: 気づいて + は should not be merged into 気づいては.
+        var isBoundarySensitiveParticle: Bool {
+            isParticle && (fields.contains("係助詞") || fields.contains("格助詞"))
+        }
+
         /// True when IPADic marks this as bound / non-independent.
         var isNonIndependent: Bool {
             partOfSpeech.contains("非自立") || partOfSpeech.contains("接尾")
@@ -163,7 +169,8 @@ struct AuxiliaryChainMerger {
 
         // MERGE AUTHORITY B (NEW, REQUIRED):
         // If a single MeCab token range fully covers multiple adjacent spans, merge those spans.
-        // This overrides particle concerns: we trust MeCab's token coverage, but still respect hardCuts.
+        // This mostly overrides particle concerns: we trust MeCab's token coverage, but still respect hardCuts.
+        // Exception: do not merge into boundary-sensitive particles (係助詞/格助詞) like は/を.
         func mergeByAuthoritativeMecabCoverage(_ spans: [TextSpan]) -> (spans: [TextSpan], merges: Int) {
             guard spans.count >= 2 else { return (spans, 0) }
 
@@ -178,6 +185,31 @@ struct AuxiliaryChainMerger {
                     out.append(spans[i])
                     i += 1
                     continue
+                }
+
+                func isBoundarySensitiveParticleSpanStart(_ start: Int) -> Bool {
+                    guard let candidates = candidatesByStart[start], candidates.isEmpty == false else { return false }
+                    // Consider any candidate starting here. If MeCab can interpret it as a binding particle,
+                    // do not allow authoritative merges to swallow it.
+                    return candidates.contains { a in
+                        let tok = MorphToken(range: a.range, surface: a.surface, partOfSpeech: a.partOfSpeech)
+                        return tok.isBoundarySensitiveParticle
+                    }
+                }
+
+                func mergedRangeEndsWithBoundarySensitiveParticle(_ range: NSRange) -> Bool {
+                    // If MeCab yields a boundary-sensitive particle token whose end aligns with the end
+                    // of the proposed merged range, keep it separable (e.g. ...ては, ...では).
+                    let end = NSMaxRange(range)
+                    for a in mecab {
+                        guard a.range.location != NSNotFound, a.range.length > 0 else { continue }
+                        guard NSMaxRange(a.range) == end else { continue }
+                        let tok = MorphToken(range: a.range, surface: a.surface, partOfSpeech: a.partOfSpeech)
+                        if tok.isBoundarySensitiveParticle {
+                            return true
+                        }
+                    }
+                    return false
                 }
 
                 // Grow a contiguous union forward and see if it matches exactly this token range.
@@ -196,12 +228,22 @@ struct AuxiliaryChainMerger {
                     guard boundaryAllowed(boundary) else { break }
                     guard isContiguous(spans[j].range, spans[j + 1].range) else { break }
 
+                    // Do not merge into boundary-sensitive particles (係助詞/格助詞).
+                    // This preserves spans like "気づいて" + "は".
+                    let nextStart = spans[j + 1].range.location
+                    if isBoundarySensitiveParticleSpanStart(nextStart) { break }
+
                     j += 1
                     unionEnd = NSMaxRange(spans[j].range)
                 }
 
                 if let bestJ {
                     let mergedRange = NSRange(location: start, length: tokenEnd - start)
+                    if mergedRangeEndsWithBoundarySensitiveParticle(mergedRange) {
+                        out.append(spans[i])
+                        i += 1
+                        continue
+                    }
                     let surface = text.substring(with: mergedRange)
                     out.append(TextSpan(range: mergedRange, surface: surface, isLexiconMatch: false))
                     merges += 1

@@ -427,6 +427,16 @@ enum FuriganaAttributedTextBuilder {
                 trie = await LexiconProvider.shared.cachedTrieIfAvailable()
             }
 
+            // Stage 1.6: Lexicon suffix split (split-only).
+            // Peels off certain trailing one-character particles (e.g. よ) when it reveals a
+            // lexicon word, so Stage 1.75 can later merge dictionary-valid spans.
+            if let trie {
+                spansForAttachment = LexiconSuffixSplitter.apply(text: nsText, spans: spansForAttachment, trie: trie)
+                if shouldDumpStages {
+                    log("S1.6", "after apply: \(describe(spans: spansForAttachment))")
+                }
+            }
+
             if let trie, let deinflector = try? await DeinflectorCache.shared.get() {
                 let merged = DeinflectionHardStopMerger.apply(
                     text: nsText,

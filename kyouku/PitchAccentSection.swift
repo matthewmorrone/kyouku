@@ -24,7 +24,10 @@ struct PitchAccentSection: View {
             }
 
             SwiftUI.ForEach(accents, id: \PitchAccent.id) { (accent: PitchAccent) in
-                let displayReading = accent.readingMarked?.replacingOccurrences(of: "◦", with: "") ?? reading
+                // Prefer the DB row's reading so the dot count (morae) matches the text.
+                // The `reading` parameter is a fallback (e.g. if the DB omits reading fields).
+                let displayReading = accent.readingMarked?.replacingOccurrences(of: "◦", with: "")
+                    ?? (accent.reading.isEmpty ? reading : accent.reading)
                 let pattern = PitchPattern.levels(morae: max(1, accent.morae), accent: accent.accent)
 
                 HStack(alignment: .top, spacing: 4 * scale) {
