@@ -1,7 +1,8 @@
 # Backlog
 
 ## Known bugs
-- [ ] Spacing on the left 
+- [ ] Spacing on the left edge for ruby persistent overhang
+- [ ] Distribute spacing better for multikanji ruby headwords 
 
 ## Dictionary issues
 - [ ] wouldn't it make more sense if example sentences were grouped by meaning/sense used?

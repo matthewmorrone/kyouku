@@ -201,11 +201,15 @@ extension SpanReadingAttacher {
 
         let normalized = Self.toHiragana(trimmed)
 
-        func composedCharacterString(at utf16Index: Int) -> String? {
+        func composedCharacter(at utf16Index: Int) -> (surface: String, range: NSRange)? {
             guard utf16Index >= 0, utf16Index < nsText.length else { return nil }
             let r = nsText.rangeOfComposedCharacterSequence(at: utf16Index)
             guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= nsText.length else { return nil }
-            return nsText.substring(with: r)
+            return (nsText.substring(with: r), r)
+        }
+
+        func composedCharacterString(at utf16Index: Int) -> String? {
+            composedCharacter(at: utf16Index)?.surface
         }
 
         func isNumericKanji(_ s: String) -> Bool {
@@ -213,6 +217,11 @@ extension SpanReadingAttacher {
             // Keep this intentionally narrow and best-effort.
             guard s.count == 1 else { return false }
             return "一二三四五六七八九十百千".contains(s)
+        }
+
+        func isDigitLike(_ s: String) -> Bool {
+            guard s.count == 1, let scalar = s.unicodeScalars.first else { return false }
+            return (0x30...0x39).contains(scalar.value) || (0xFF10...0xFF19).contains(scalar.value)
         }
 
         func containsKanjiGlyph(_ s: String) -> Bool {
@@ -247,6 +256,34 @@ extension SpanReadingAttacher {
                 return "ふたり"
             }
             return reading
+
+        case "中":
+            // In counter-like compounds (中 + <number> + 人), MeCab frequently prefers the
+            // on-yomi reading (ちゅう), but the common reading is なか (e.g. 中二人 → なかふたり).
+            // Keep this narrowly scoped to avoid changing standalone "中" defaults.
+            guard normalized == "ちゅう" else { return reading }
+            let end = NSMaxRange(range)
+            guard end >= 0, end < nsText.length else { return reading }
+
+            var cursor = end
+            var consumed = 0
+            var sawNumber = false
+            while cursor < nsText.length, consumed < 4 {
+                guard let next = composedCharacter(at: cursor) else { break }
+                if isNumericKanji(next.surface) || isDigitLike(next.surface) {
+                    sawNumber = true
+                    cursor = NSMaxRange(next.range)
+                    consumed += 1
+                    continue
+                }
+                break
+            }
+
+            guard sawNumber, cursor < nsText.length, let afterNumber = composedCharacterString(at: cursor), afterNumber == "人" else {
+                return reading
+            }
+
+            return "なか"
 
         case "何":
             // Only rewrite the common dictionary-like "なに".
@@ -284,6 +321,7 @@ extension SpanReadingAttacher {
         var posCandidates: [String] = []
         let requiresReading = containsKanji(span.surface)
         var builder = requiresReading ? "" : nil
+        var hasPartialTokenOverlap = false
         let spanEnd = span.range.location + span.range.length
         var coveringToken: MeCabAnnotation?
         var retokenizedCache: RetokenizedResult?
@@ -315,17 +353,20 @@ extension SpanReadingAttacher {
                 let chunk = annotation.reading.isEmpty ? annotation.surface : annotation.reading
                 builder?.append(chunk)
                 // Self.debug("[SpanReadingAttacher] Matched token surface=\(annotation.surface) reading=\(chunk) for span=\(span.surface).")
-            } else if coveringToken == nil,
+            } else {
+                hasPartialTokenOverlap = true
+                if coveringToken == nil,
                       NSLocationInRange(span.range.location, annotation.range),
                       NSMaxRange(span.range) <= NSMaxRange(annotation.range) {
-                coveringToken = annotation
+                    coveringToken = annotation
+                }
             }
         }
 
         var readingResult: String?
 
         if requiresReading {
-            if let built = builder, built.isEmpty == false {
+            if let built = builder, built.isEmpty == false, hasPartialTokenOverlap == false {
                 // Keep the full reading (including okurigana) and let the ruby projector
                 // split/trim against the surface text. Pre-trimming here can cause the
                 // projector to mis-detect kana boundaries (e.g. "私たち" -> "わ").

@@ -387,6 +387,37 @@ struct FuriganaPipelineService {
             if candidateUtf16Length > 24 { return false }
             if surface.rangeOfCharacter(from: .whitespacesAndNewlines) != nil { return false }
 
+            // Heuristic merges are intended for verb+auxiliary chains (e.g. 見て+いた→見ていた),
+            // not for collapsing multi-word phrases that merely *end* with an auxiliary suffix
+            // (e.g. 何気なく+話していた). Guard by rejecting surfaces that contain multiple
+            // kanji runs separated by kana.
+            func hasMultipleKanjiRunsSeparatedByKana(_ s: String) -> Bool {
+                var runCount = 0
+                var inKanjiRun = false
+                for scalar in s.unicodeScalars {
+                    let isKanji = (0x3400...0x4DBF).contains(scalar.value) || (0x4E00...0x9FFF).contains(scalar.value)
+                    if isKanji {
+                        if inKanjiRun == false {
+                            runCount += 1
+                            inKanjiRun = true
+                            if runCount >= 2 {
+                                return true
+                            }
+                        }
+                    } else if (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value) {
+                        // Kana breaks a kanji run.
+                        inKanjiRun = false
+                    } else {
+                        // Non-kana (ASCII/punct/etc) does not by itself reset; leave state unchanged.
+                    }
+                }
+                return false
+            }
+
+            if hasMultipleKanjiRunsSeparatedByKana(surface) {
+                return false
+            }
+
             // Avoid merging across punctuation/symbols with the heuristic.
             if surface.rangeOfCharacter(from: CharacterSet.punctuationCharacters.union(.symbols)) != nil {
                 return false
@@ -526,6 +557,16 @@ struct FuriganaPipelineService {
                 if next.surface == "は" {
                     let leftSurface = spans[j - 1].surface
                     if leftSurface != "で" && leftSurface != "て" {
+                        break
+                    }
+                }
+
+                // Case-particle guard for tail-merge heuristics:
+                // Avoid collapsing noun/counter + で + (aux) into one semantic span (e.g. 二人でいた).
+                // Allow verb te-form patterns like 読ん + で + いた / 泳い + で + いた.
+                if next.surface == "で" {
+                    let leftSurface = spans[j - 1].surface
+                    if leftSurface.hasSuffix("ん") == false && leftSurface.hasSuffix("い") == false {
                         break
                     }
                 }

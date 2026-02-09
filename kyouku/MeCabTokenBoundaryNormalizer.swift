@@ -213,6 +213,43 @@ enum MeCabTokenBoundaryNormalizer {
         func snapToTokenBoundaryIfInterior(_ boundary: Int) -> Int {
             let b = clampIndex(boundary)
             guard b > 0, b < text.length else { return b }
+
+            // Counter compound exception:
+            // Preserve a boundary after 「中」 when the next characters are <digit>「人」.
+            // This enables spans like 中 + 二人 even if MeCab tokenizes 中二 as a single token.
+            func isMiddleNakaCounterBoundary(_ b: Int) -> Bool {
+                // Need room for: ...「中」|<digit>「人」...
+                guard b - 1 >= 0, b + 1 < text.length else { return false }
+
+                let leftCharRange = text.rangeOfComposedCharacterSequence(at: b - 1)
+                guard leftCharRange.length > 0 else { return false }
+                let left = text.substring(with: leftCharRange)
+                guard left == "中" else { return false }
+
+                let digitRange = text.rangeOfComposedCharacterSequence(at: b)
+                guard digitRange.length > 0 else { return false }
+                let digit = text.substring(with: digitRange)
+                let isDigit = (
+                    digit == "一" || digit == "二" || digit == "三" || digit == "四" || digit == "五" ||
+                    digit == "六" || digit == "七" || digit == "八" || digit == "九" || digit == "十" ||
+                    digit == "0" || digit == "1" || digit == "2" || digit == "3" || digit == "4" ||
+                    digit == "5" || digit == "6" || digit == "7" || digit == "8" || digit == "9" ||
+                    digit == "０" || digit == "１" || digit == "２" || digit == "３" || digit == "４" ||
+                    digit == "５" || digit == "６" || digit == "７" || digit == "８" || digit == "９"
+                )
+                guard isDigit else { return false }
+
+                let personIndex = NSMaxRange(digitRange)
+                guard personIndex < text.length else { return false }
+                let personRange = text.rangeOfComposedCharacterSequence(at: personIndex)
+                guard personRange.length > 0 else { return false }
+                let person = text.substring(with: personRange)
+                return person == "人"
+            }
+
+            if isMiddleNakaCounterBoundary(b) {
+                return b
+            }
             guard let t = tokenCoveringLocation(b) else { return b }
             let start = t.range.location
             let end = NSMaxRange(t.range)
