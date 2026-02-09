@@ -166,9 +166,6 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                NavigationLink("SQL Playground") {
-                    SQLPlaygroundView()
-                }
                 appThemeSection
                 textAppearanceSection
                 furiganaBehaviorSection

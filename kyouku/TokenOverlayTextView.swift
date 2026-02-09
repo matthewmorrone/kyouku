@@ -2374,10 +2374,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         return TokenOverlayTextView.emphasizedDebugStrokeColor(from: tokenColorPalette[index])
     }
 
-    private func scheduleScrollRedraw() {
-        // No-op (legacy). Ruby rendering no longer depends on scroll-time redraws.
-    }
-
     private func applyStableTextContainerConfig() {
         // For SwiftUI measurement-driven wrapping we must control the container width
         // (set in `RubyText.sizeThatFits`). If UIKit swaps/rebuilds the container, these

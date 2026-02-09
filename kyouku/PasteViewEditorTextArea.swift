@@ -47,7 +47,6 @@ struct PasteEditorTextArea: View {
     let tokenSpacingValueProvider: ((Int) -> CGFloat)?
     let onTokenSpacingChanged: ((Int, CGFloat, Bool) -> Void)?
 
-    let liveSemanticFeedback: PasteView.LiveSemanticFeedback?
     let coordinateSpaceName: String
 
     var body: some View {
@@ -87,14 +86,6 @@ struct PasteEditorTextArea: View {
             viewMetricsContext: viewMetricsContext,
             onDebugTokenListTextChange: onDebugTokenListTextChange
         )
-        .overlay(alignment: .topTrailing) {
-            if isEditing, let liveSemanticFeedback {
-                LiveSemanticFeedbackBadge(feedback: liveSemanticFeedback)
-                    .padding(.top, 10)
-                    .padding(.trailing, 10)
-                    .allowsHitTesting(false)
-            }
-        }
         .background(
             GeometryReader { proxy in
                 Color.clear.preference(

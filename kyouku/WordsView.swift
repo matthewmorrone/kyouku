@@ -1063,16 +1063,6 @@ private struct WordListsBrowserView: View {
         }
     }
 
-    private func add(entry: DictionaryEntry) {
-        let surface = displaySurface(for: entry)
-        let gloss = firstGloss(for: entry)
-        store.add(surface: surface, kana: entry.kana, meaning: gloss)
-    }
-
-    private func addMergedRow(_ row: DictionaryResultRow) {
-        store.add(surface: row.surface, kana: row.kana, meaning: row.gloss)
-    }
-
     private func isMergedRowAlreadySaved(_ row: DictionaryResultRow) -> Bool {
         let surface = row.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let reading = row.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1215,14 +1205,6 @@ private struct WordListsBrowserView: View {
 
     private var canEditSavedWords: Bool {
         hasActiveSearch == false && dictionaryHomeShelf == .favorites && store.words.isEmpty == false
-    }
-
-    private func toggleSelection(for word: Word) {
-        if selectedWordIDs.contains(word.id) {
-            selectedWordIDs.remove(word.id)
-        } else {
-            selectedWordIDs.insert(word.id)
-        }
     }
 
     private func deleteSelection() {
@@ -2050,10 +2032,6 @@ private enum WordsCSVImport {
         guard let value else { return nil }
         let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
-    }
-
-    private static func firstGloss(_ gloss: String) -> String {
-        gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? gloss
     }
 
     private static func classifyRowCells(_ cols: [String]) -> (surface: String?, kana: String?, meaning: String?, note: String?) {

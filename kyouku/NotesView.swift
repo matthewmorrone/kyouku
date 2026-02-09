@@ -161,17 +161,6 @@ struct NotesView: View {
                             .font(.title2)
                     }
                 }
-                /*
-                ToolbarItem(placement: .topBarLeading) {
-                    NavigationLink {
-                        ThemesView()
-                    } label: {
-                        Image(systemName: "sparkles")
-                            .font(.title2)
-                    }
-                    .accessibilityLabel("Themes")
-                }
-                */
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         withAnimation {

@@ -5,7 +5,6 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
     @Binding var titleEditDraft: String
 
     let navigationTitleText: String
-    let adjustedSpansDebugText: String
 
     let onResetSpans: () -> Void
 
@@ -16,7 +15,6 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         isTitleEditPresented: Binding<Bool>,
         titleEditDraft: Binding<String>,
         navigationTitleText: String,
-        adjustedSpansDebugText: String,
         onResetSpans: @escaping () -> Void,
         showTokensSheet: Binding<Bool>,
         tokenListSheet: @escaping () -> TokenListSheet
@@ -24,7 +22,6 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         self._isTitleEditPresented = isTitleEditPresented
         self._titleEditDraft = titleEditDraft
         self.navigationTitleText = navigationTitleText
-        self.adjustedSpansDebugText = adjustedSpansDebugText
         self.onResetSpans = onResetSpans
         self._showTokensSheet = showTokensSheet
         self.tokenListSheet = tokenListSheet
@@ -47,10 +44,6 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
             .accessibilityHint("Shows an alert to set the note title")
         }
 
-        ToolbarItem(placement: .topBarLeading) {
-            PasteAdjustedSpansButton(debugText: adjustedSpansDebugText)
-        }
-
         ToolbarItem(placement: .topBarTrailing) {
             HStack(spacing: 12) {
                 Button {
@@ -71,30 +64,6 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                         .presentationDetents(Set([.large]))
                         .presentationDragIndicator(.visible)
                 }
-            }
-        }
-    }
-}
-
-private struct PasteAdjustedSpansButton: View {
-    let debugText: String
-
-    @State private var isPresented: Bool = false
-
-    var body: some View {
-        Button {
-            isPresented = true
-        } label: {
-            Image(systemName: "list.bullet")
-        }
-        .accessibilityLabel("Show Adjusted Spans")
-        .popover(isPresented: $isPresented) {
-            ScrollView {
-                Text(debugText)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
             }
         }
     }

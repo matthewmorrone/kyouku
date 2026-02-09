@@ -34,8 +34,6 @@ struct ExtractWordsView: View {
     let dictionaryPanel: (TokenSelectionContext) -> TokenActionPanel
     let onDone: () -> Void
 
-    @EnvironmentObject private var readingOverrides: ReadingOverridesStore
-
     @State private var dictionaryPanelHeight: CGFloat = 0
 
     init(

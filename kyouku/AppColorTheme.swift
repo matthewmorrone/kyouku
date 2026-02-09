@@ -46,14 +46,6 @@ struct AppColorTheme: Equatable {
 
     var displayName: String { id.displayName }
 
-    static func from(rawValue: String) -> AppColorTheme {
-        // Note: callers that need light/dark aware palettes should use
-        // `from(rawValue:colorScheme:)`.
-        let normalized = normalizeStorageRawValue(rawValue)
-        let id = AppColorThemeID(rawValue: normalized) ?? AppColorThemeID.defaultValue
-        return AppColorTheme.make(id)
-    }
-
     static func from(rawValue: String, colorScheme: ColorScheme) -> AppColorTheme {
         let normalized = normalizeStorageRawValue(rawValue)
         let id = AppColorThemeID(rawValue: normalized) ?? AppColorThemeID.defaultValue

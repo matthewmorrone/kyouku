@@ -47,19 +47,15 @@ struct PasteEditorColumnBody: View {
     let viewMetricsContext: RubyText.ViewMetricsContext
     let onDebugTokenListTextChange: (String) -> Void
 
-    let liveSemanticFeedback: PasteView.LiveSemanticFeedback?
     let coordinateSpaceName: String
 
     let interTokenSpacing: [Int: CGFloat]
     let tokenSpacingValueProvider: ((Int) -> CGFloat)?
     let onTokenSpacingChanged: ((Int, CGFloat, Bool) -> Void)?
 
-    let showConstellationButton: Bool
-
     let onHideKeyboard: () -> Void
     let onPaste: () -> Void
     let onSave: () -> Void
-    let onShowConstellation: () -> Void
     let onToggleFurigana: (Bool) -> Void
     let onShowToast: (String) -> Void
     let onHaptic: () -> Void
@@ -112,7 +108,6 @@ struct PasteEditorColumnBody: View {
                 interTokenSpacing: interTokenSpacing,
                 tokenSpacingValueProvider: tokenSpacingValueProvider,
                 onTokenSpacingChanged: onTokenSpacingChanged,
-                liveSemanticFeedback: liveSemanticFeedback,
                 coordinateSpaceName: coordinateSpaceName
             )
 
@@ -123,11 +118,9 @@ struct PasteEditorColumnBody: View {
                 alternateTokenColors: $alternateTokenColors,
                 highlightUnknownTokens: $highlightUnknownTokens,
                 padHeadwords: $padHeadwordSpacing,
-                showConstellationButton: showConstellationButton,
                 onHideKeyboard: onHideKeyboard,
                 onPaste: onPaste,
                 onSave: onSave,
-                onShowConstellation: onShowConstellation,
                 onToggleFurigana: onToggleFurigana,
                 onShowToast: onShowToast,
                 onHaptic: onHaptic

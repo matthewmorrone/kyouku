@@ -2,13 +2,8 @@ import SwiftUI
 import UIKit
 import Foundation
 import AVFoundation
-import UniformTypeIdentifiers
 
 struct PasteView: View {
-    // NOTE: The semantic heatmap/constellation is intentionally disabled for now.
-    // Leave the code in place so we can revisit it later.
-    static let sentenceHeatmapEnabledFlag: Bool = false
-
     @EnvironmentObject var notes: NotesStore
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var words: WordsStore
@@ -18,7 +13,6 @@ struct PasteView: View {
     @Environment(\.appColorTheme) private var appColorTheme
 
     @ObservedObject private var speech = SpeechManager.shared
-    @ObservedObject private var audioKaraoke = AudioKaraokeManager.shared
 
     @State var inputText: String = ""
     @State var currentNote: Note? = nil
@@ -50,8 +44,6 @@ struct PasteView: View {
     @State private var toastText: String? = nil
     @State private var toastDismissWorkItem: DispatchWorkItem? = nil
 
-    @State private var isAudioImporterPresented: Bool = false
-
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
     @State var incrementalPopupHits: [IncrementalLookupHit] = []
     @State var isIncrementalPopupVisible: Bool = false
@@ -60,20 +52,7 @@ struct PasteView: View {
     @State var incrementalSelectedCharacterRange: NSRange? = nil
     @State var incrementalSheetDetent: PresentationDetent = .height(420)
 
-    // Sentence-level semantic heatmap (visual-only)
-    @State var sentenceRanges: [NSRange] = []
-    @State var sentenceVectors: [[Float]?] = []
-    @State var sentenceHeatmapSelectedIndex: Int? = nil
-    @State var sentenceHeatmapTask: Task<Void, Never>? = nil
-
-    // Live semantic feedback while editing (read-only)
     @State var editorSelectedRange: NSRange? = nil
-    @State var liveSemanticFeedback: LiveSemanticFeedback? = nil
-    @State var liveSemanticFeedbackTask: Task<Void, Never>? = nil
-
-    // Semantic constellation (sentence graph)
-    @State private var isConstellationSheetPresented: Bool = false
-    @State private var constellationScrollToSelectedRangeToken: Int = 0
 
     private struct WordDefinitionsRequest: Identifiable, Hashable {
         let id = UUID()
@@ -366,8 +345,6 @@ struct PasteView: View {
                 coreToolbar
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        // Don't overlap TTS and audio playback.
-                        AudioKaraokeManager.shared.stop(sessionID: noteAudioSessionID)
                         SpeechManager.shared.togglePlayPause(
                             sessionID: noteSpeechSessionID,
                             text: inputText,
@@ -380,44 +357,6 @@ struct PasteView: View {
                     .accessibilityHint("Speaks the entire note")
                     .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .contextMenu {
-                        if let audioURL = noteAudioURL {
-                            Button {
-                                // Stop TTS if active.
-                                SpeechManager.shared.stop(sessionID: noteSpeechSessionID)
-                                Task {
-                                    await AudioKaraokeManager.shared.togglePlayPause(
-                                        sessionID: noteAudioSessionID,
-                                        audioURL: audioURL,
-                                        text: inputText,
-                                        languageCode: "ja-JP",
-                                        cacheURL: noteAudioAlignmentCacheURL
-                                    )
-                                    if AudioKaraokeManager.shared.isAligning {
-                                        showToast("Analyzing audio…")
-                                    } else if noteAudioIsPlaying {
-                                        showToast("Playing audio")
-                                    } else if noteAudioIsPaused {
-                                        showToast("Audio paused")
-                                    }
-                                }
-                            } label: {
-                                Label(noteAudioIsPlaying ? "Pause audio" : (noteAudioIsPaused ? "Resume audio" : "Play audio"), systemImage: "music.note")
-                            }
-
-                            Button(role: .destructive) {
-                                AudioKaraokeManager.shared.stop(sessionID: noteAudioSessionID)
-                                showToast("Audio stopped")
-                            } label: {
-                                Label("Stop audio", systemImage: "stop.circle")
-                            }
-                        }
-
-                        Button {
-                            isAudioImporterPresented = true
-                        } label: {
-                            Label(currentNote?.audioFilename == nil ? "Attach audio" : "Replace audio", systemImage: "paperclip")
-                        }
-
                         Menu {
                             Button {
                                 SpeechManager.shared.adjustRate(by: -0.05)
@@ -519,23 +458,9 @@ struct PasteView: View {
                 NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
                 furiganaTaskHandle?.cancel()
                 SpeechManager.shared.stop(sessionID: noteSpeechSessionID)
-                AudioKaraokeManager.shared.stop(sessionID: noteAudioSessionID)
             }
 
-        let audioImporter = base
-            .fileImporter(
-                isPresented: $isAudioImporterPresented,
-                allowedContentTypes: [UTType.audio]
-            ) { result in
-                switch result {
-                case .success(let url):
-                    attachAudioFromImportedURL(url)
-                case .failure:
-                    showToast("Audio import cancelled")
-                }
-            }
-
-        let inputHandling = audioImporter
+        let inputHandling = base
             .onChange(of: inputText) { _, newValue in
                 skipNextInitialFuriganaEnsure = false
                 clearSelection()
@@ -650,12 +575,6 @@ struct PasteView: View {
                         }
                     }
                 }
-                // Tapping a token for dictionary lookup should NOT trigger the sentence-level
-                // semantic heatmap (embedding background blocks), which reads as a faint highlight
-                // across other tokens.
-                if newID != nil {
-                    clearSentenceHeatmap()
-                }
                 handleSelectionLookup()
             }
             .onChange(of: selectionController.persistentSelectionRange) { _, newRange in
@@ -705,20 +624,6 @@ struct PasteView: View {
                     recomputeSavedWordOverlays()
                 }
                 processPendingRouterResetRequest()
-            }
-            .onChange(of: inputText) { _, _ in
-                scheduleLiveSemanticFeedbackIfNeeded()
-            }
-            .onChange(of: editorSelectedRange?.location) { _, _ in
-                scheduleLiveSemanticFeedbackIfNeeded()
-            }
-            .onChange(of: isEditing) { _, editing in
-                if editing {
-                    scheduleLiveSemanticFeedbackIfNeeded()
-                } else {
-                    liveSemanticFeedbackTask?.cancel()
-                    liveSemanticFeedback = nil
-                }
             }
             .onReceive(readingOverrides.$overrides) { _ in
                 handleOverridesExternalChange()
@@ -865,7 +770,7 @@ struct PasteView: View {
             tokenPalette: alternateTokenPalette,
             unknownTokenColor: unknownTokenColor,
             selectedRangeHighlight: incrementalLookupEnabled ? incrementalSelectedCharacterRange : persistentSelectionRange,
-            scrollToSelectedRangeToken: constellationScrollToSelectedRangeToken,
+            scrollToSelectedRangeToken: 0,
             customizedRanges: customizedRanges,
             extraTokenOverlays: extraOverlays,
             bottomObstructionHeight: tokenPanelOverlap,
@@ -918,12 +823,10 @@ struct PasteView: View {
                     lastLoggedTokenListText = text
                 }
             },
-            liveSemanticFeedback: liveSemanticFeedback,
             coordinateSpaceName: Self.coordinateSpaceName,
             interTokenSpacing: interTokenSpacing,
             tokenSpacingValueProvider: tokenSpacingValueProvider,
             onTokenSpacingChanged: onTokenSpacingChanged,
-            showConstellationButton: Self.sentenceHeatmapEnabledFlag,
             onHideKeyboard: {
                 hideKeyboard()
             },
@@ -932,9 +835,6 @@ struct PasteView: View {
             },
             onSave: {
                 saveNote()
-            },
-            onShowConstellation: {
-                isConstellationSheetPresented = true
             },
             onToggleFurigana: { enabled in
                 if enabled {
@@ -948,37 +848,6 @@ struct PasteView: View {
             },
             onHaptic: {
                 fireContextMenuHaptic()
-            }
-        )
-        .sheet(
-            isPresented: $isConstellationSheetPresented,
-            onDismiss: {
-                clearSentenceHeatmap()
-            },
-            content: {
-                if Self.sentenceHeatmapEnabledFlag {
-                    SemanticConstellationSheet(
-                        sentenceRanges: sentenceRanges,
-                        sentenceVectors: sentenceVectors,
-                        selectedSentenceIndex: sentenceHeatmapSelectedIndex,
-                        onSelectSentence: { range, idx in
-                            // Visual-only: select + scroll; do not trigger dictionary lookup.
-                            sentenceHeatmapSelectedIndex = idx
-                            if let base = furiganaAttributedTextBase {
-                                furiganaAttributedText = applySentenceHeatmap(to: base)
-                            }
-                            if incrementalLookupEnabled {
-                                incrementalSelectedCharacterRange = range
-                            } else {
-                                persistentSelectionRange = range
-                            }
-                            constellationScrollToSelectedRangeToken &+= 1
-                        }
-                    )
-                    .presentationDetents([.medium, .large])
-                } else {
-                    EmptyView()
-                }
             }
         )
         .simultaneousGesture(pinchToZoomGesture)
@@ -1014,83 +883,6 @@ struct PasteView: View {
         let generator = UIImpactFeedbackGenerator(style: .light)
         generator.prepare()
         generator.impactOccurred()
-    }
-
-    private var transformPasteTextButton: some View {
-        Button {
-            let transformed = PasteTextTransforms.transform(inputText)
-            if transformed != inputText {
-                inputText = transformed
-            }
-        } label: {
-            Image(systemName: "wand.and.stars")
-        }
-        .accessibilityLabel("Transform Paste Text")
-    }
-
-    private var adjustedSpansDebugText: String {
-        if debugTokenListText.isEmpty == false {
-            return debugTokenListText
-        }
-        guard let spans = furiganaSpans, spans.isEmpty == false else {
-            return "(No spans yet)"
-        }
-        return describeAdjustedSpansForDebug(spans.map(\.span))
-    }
-
-    private func describeAdjustedSpansForDebug(_ spans: [TextSpan]) -> String {
-        guard spans.isEmpty == false else { return "" }
-
-        struct DebugSpan {
-            let range: NSRange
-            let surface: String
-        }
-
-        var results: [DebugSpan] = []
-        var pendingPrefixSurface = ""
-        var pendingPrefixRange: NSRange?
-
-        for span in spans {
-            let surface = span.surface
-            if isHardBoundaryOnly(surface) {
-                if results.isEmpty {
-                    pendingPrefixSurface += surface
-                    if let existing = pendingPrefixRange {
-                        pendingPrefixRange = NSUnionRange(existing, span.range)
-                    } else {
-                        pendingPrefixRange = span.range
-                    }
-                } else {
-                    let last = results.removeLast()
-                    let mergedRange = NSUnionRange(last.range, span.range)
-                    results.append(DebugSpan(range: mergedRange, surface: last.surface + surface))
-                }
-                continue
-            }
-
-            if let prefixRange = pendingPrefixRange, pendingPrefixSurface.isEmpty == false {
-                let mergedRange = NSUnionRange(prefixRange, span.range)
-                results.append(DebugSpan(range: mergedRange, surface: pendingPrefixSurface + surface))
-                pendingPrefixSurface = ""
-                pendingPrefixRange = nil
-            } else {
-                results.append(DebugSpan(range: span.range, surface: surface))
-            }
-        }
-
-        if pendingPrefixSurface.isEmpty == false, let prefixRange = pendingPrefixRange {
-            if results.isEmpty {
-                results.append(DebugSpan(range: prefixRange, surface: pendingPrefixSurface))
-            } else {
-                let last = results.removeLast()
-                let mergedRange = NSUnionRange(last.range, prefixRange)
-                results.append(DebugSpan(range: mergedRange, surface: last.surface + pendingPrefixSurface))
-            }
-        }
-
-        return results
-            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
-            .joined(separator: ", ")
     }
 
     private var tokenListItems: [TokenListItem] {
@@ -1143,7 +935,6 @@ struct PasteView: View {
             isTitleEditPresented: $isTitleEditAlertPresented,
             titleEditDraft: $titleEditDraft,
             navigationTitleText: navigationTitleText,
-            adjustedSpansDebugText: adjustedSpansDebugText,
             onResetSpans: {
                 resetAllCustomSpans()
             },
@@ -1537,35 +1328,6 @@ struct PasteView: View {
         "paste-note:\(activeNoteID.uuidString)"
     }
 
-    private var noteAudioSessionID: String {
-        "paste-audio:\(activeNoteID.uuidString)"
-    }
-
-    private var isNoteAudioActive: Bool {
-        audioKaraoke.activeSessionID == noteAudioSessionID
-    }
-
-    private var noteAudioIsPlaying: Bool {
-        isNoteAudioActive && audioKaraoke.isPlaying
-    }
-
-    private var noteAudioIsPaused: Bool {
-        isNoteAudioActive && audioKaraoke.isPaused
-    }
-
-    private var noteAudioURL: URL? {
-        guard let filename = currentNote?.audioFilename, filename.isEmpty == false else { return nil }
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs.appendingPathComponent("note-audio", isDirectory: true).appendingPathComponent(filename)
-    }
-
-    private var noteAudioAlignmentCacheURL: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs
-            .appendingPathComponent("note-audio-alignments", isDirectory: true)
-            .appendingPathComponent("\(activeNoteID.uuidString).json")
-    }
-
     private var isNoteSpeechActive: Bool {
         speech.activeSessionID == noteSpeechSessionID
     }
@@ -1579,10 +1341,6 @@ struct PasteView: View {
     }
 
     private func noteSpeechOverlay(for text: String) -> RubyText.TokenOverlay? {
-        if isNoteAudioActive, let range = audioKaraoke.currentSpokenRange {
-            return tokenOverlay(for: text, range: range)
-        }
-
         guard isNoteSpeechActive else { return nil }
         guard let range = speech.currentSpokenRange else { return nil }
         return tokenOverlay(for: text, range: range)
@@ -1599,50 +1357,6 @@ struct PasteView: View {
         // so choose a high-contrast color that stays readable in dark mode.
         let color = UIColor.systemOrange
         return RubyText.TokenOverlay(range: range, color: color)
-    }
-
-    private func attachAudioFromImportedURL(_ url: URL) {
-        guard inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-            showToast("Add text first")
-            return
-        }
-
-        // Ensure we have a persisted note to attach the audio to.
-        if currentNote == nil {
-            saveNote()
-        }
-        guard var note = currentNote else {
-            showToast("Save note first")
-            return
-        }
-
-        let didAccess = url.startAccessingSecurityScopedResource()
-        defer {
-            if didAccess { url.stopAccessingSecurityScopedResource() }
-        }
-
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let dir = docs.appendingPathComponent("note-audio", isDirectory: true)
-
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let ext = url.pathExtension.isEmpty ? "m4a" : url.pathExtension
-            let filename = "\(note.id.uuidString).\(ext)"
-            let dest = dir.appendingPathComponent(filename)
-
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
-            }
-            try FileManager.default.copyItem(at: url, to: dest)
-
-            note.audioFilename = filename
-            notes.updateNote(note)
-            currentNote = note
-
-            showToast("Audio attached")
-        } catch {
-            showToast("Audio attach failed")
-        }
     }
 
     func clearSelection(resetPersistent: Bool = true) {
@@ -3446,14 +3160,13 @@ struct PasteView: View {
                 if showFurigana == currentShowFurigana {
                     let base = result.attributedString ?? NSAttributedString(string: currentText)
                     furiganaAttributedTextBase = base
-                    furiganaAttributedText = applySentenceHeatmap(to: base)
+                    furiganaAttributedText = base
                 } else if showFurigana == false {
                     let base = NSAttributedString(string: currentText)
                     furiganaAttributedTextBase = base
-                    furiganaAttributedText = applySentenceHeatmap(to: base)
+                    furiganaAttributedText = base
                 }
                 restoreSelectionIfNeeded()
-                startSentenceHeatmapPrecomputeIfPossible(text: currentText, spans: result.spans)
             }
         }
     }

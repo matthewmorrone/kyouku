@@ -27,14 +27,6 @@ struct TextSpan: Equatable, Hashable {
 
 extension TextSpan: @unchecked Sendable {}
 
-extension TextSpan {
-    static func describe(spans: [TextSpan]) -> String {
-        spans
-            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
-            .joined(separator: ", ")
-    }
-}
-
 /// Stage 2 reading attachment output. Each span now carries its optional kana
 /// reading (normalized to Hiragana). No other metadata survives into later
 /// stages, keeping reading attachment isolated.

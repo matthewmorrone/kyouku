@@ -111,10 +111,4 @@ final class EmbeddingAccess: @unchecked Sendable {
 
         return result
     }
-
-    #if DEBUG
-    func cacheHitRate() -> Float {
-        cache.stats.hitRate
-    }
-    #endif
 }

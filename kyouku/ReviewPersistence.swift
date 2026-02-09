@@ -117,11 +117,6 @@ enum ReviewPersistence {
         return st.accuracy
     }
 
-    static func clearAll() {
-        UserDefaults.standard.removeObject(forKey: wrongKey)
-        UserDefaults.standard.removeObject(forKey: perWordStatsKey)
-    }
-
     static func incrementCorrect() {
         let current = loadCount(forKey: lifetimeCorrectKey)
         saveCount(current + 1, forKey: lifetimeCorrectKey)
@@ -130,10 +125,6 @@ enum ReviewPersistence {
     static func incrementAgain() {
         let current = loadCount(forKey: lifetimeAgainKey)
         saveCount(current + 1, forKey: lifetimeAgainKey)
-    }
-
-    static func lifetimeCounts() -> (correct: Int, again: Int) {
-        return (loadCount(forKey: lifetimeCorrectKey), loadCount(forKey: lifetimeAgainKey))
     }
 
     static func lifetimeAccuracy() -> Double? {

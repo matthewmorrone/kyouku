@@ -350,11 +350,6 @@ struct RubyText: UIViewRepresentable {
             mutable.addAttribute(.foregroundColor, value: UIColor.label, range: fullRange)
             mutable.addAttribute(.font, value: baseFont, range: fullRange)
 
-            if distinctKanaKanjiFonts {
-                let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
-                ScriptFontStyler.applyDistinctKanaKanjiFonts(to: mutable, kanjiFont: kanjiFont)
-            }
-
             if abs(globalKerning) > 0.001 {
                 // Apply global kerning to every character without clobbering any existing
                 // per-run kerning (e.g. headword padding adjustments).

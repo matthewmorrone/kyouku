@@ -139,7 +139,6 @@ final class CoreTextRubyRenderView: UIView {
 private extension CoreTextRubyRenderView {
     func rebuildDisplayAttributed() {
         let baseFont = UIFont.systemFont(ofSize: max(1, fontSize))
-        let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
 
         // 1) Start from the raw text and enforce base font + paragraph spacing.
         let mutable = NSMutableAttributedString(attributedString: rawAttributed)
@@ -155,10 +154,6 @@ private extension CoreTextRubyRenderView {
             .foregroundColor: UIColor.label,
             .paragraphStyle: paragraph
         ], range: fullRange)
-
-        if distinctKanaKanjiFonts {
-            ScriptFontStyler.applyDistinctKanaKanjiFonts(to: mutable, kanjiFont: kanjiFont)
-        }
 
         // 2) Apply kerning/attachments to force base width to match ruby width.
         rubyEndAttachmentIndexByStart = [:]

@@ -428,37 +428,6 @@ final class ClozeStudyViewModel: ObservableObject {
         }
     }
 
-    private func containsKanji(_ string: String) -> Bool {
-        string.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
-    }
-
-    private func pickTargetSpanViaSegmentation(sentenceText: String) async -> TextSpan? {
-        do {
-            let spans = try await SegmentationService.shared.segment(text: sentenceText)
-            let candidates = spans
-                .filter { $0.surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
-                .filter { ($0.surface as NSString).length >= 1 }
-                .filter { isMostlyPunctuation($0.surface) == false }
-
-            let japanese = candidates.filter { containsJapaneseCharacters($0.surface) }
-            let kanji = japanese.filter { containsKanji($0.surface) && ($0.surface as NSString).length >= 2 }
-            let lexicon = kanji.filter { $0.isLexiconMatch }
-
-            if lexicon.isEmpty == false {
-                return lexicon.randomElement()
-            }
-            if kanji.isEmpty == false {
-                return kanji.randomElement()
-            }
-            if japanese.isEmpty == false {
-                return japanese.randomElement()
-            }
-            return candidates.randomElement()
-        } catch {
-            return nil
-        }
-    }
-
     private static func sentences(from text: String, excludeDuplicateLines: Bool) -> [String] {
         let ns = text as NSString
         let ranges = SentenceRangeResolver.sentenceRanges(in: ns)

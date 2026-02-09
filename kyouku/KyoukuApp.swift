@@ -16,7 +16,6 @@ struct KyoukuApp: App {
     @StateObject private var notes: NotesStore
     @StateObject private var store: WordsStore
     @StateObject private var router: AppRouter
-    @StateObject private var themes: ThemeDiscoveryStore
     @StateObject private var notificationDeepLinkHandler: NotificationDeepLinkHandlerHolder
 
     init() {
@@ -27,7 +26,6 @@ struct KyoukuApp: App {
         _store = StateObject(wrappedValue: WordsStore())
         let router = AppRouter()
         _router = StateObject(wrappedValue: router)
-        _themes = StateObject(wrappedValue: ThemeDiscoveryStore())
 
         // Retain a UNUserNotificationCenter delegate that can deep-link into the app.
         _notificationDeepLinkHandler = StateObject(wrappedValue: NotificationDeepLinkHandlerHolder(router: router))
@@ -41,7 +39,6 @@ struct KyoukuApp: App {
                 .environmentObject(router)
                 .environmentObject(readingOverrides)
                 .environmentObject(tokenBoundaries)
-                .environmentObject(themes)
                 .onOpenURL { url in
                     // Expect kyouku://inbox to route to Paste tab; PasteView will ingest on appear/activation
                     if url.scheme == "kyouku" && url.host == "inbox" {

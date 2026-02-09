@@ -2,6 +2,32 @@
 
 This is a best-effort static audit (not a Swift parser). Treat results as **candidates for manual review**, not safe deletions.
 
+## Status (2026-02-09)
+
+- Build: succeeds (`xcodebuild build` generic iOS, no signing)
+- Periphery warnings: 132 (see `periphery.txt` for the latest scan)
+- Cleanup batches already applied:
+	- Deleted unused files:
+		- kyouku/ThemesView.swift
+		- kyouku/PhysicsFlashcardsDemoView.swift
+		- kyouku/SpeechExamples.swift
+		- kyouku/FuriganaSpanResolver.swift
+		- kyouku/DictionarySurfaceMatcher.swift
+		- kyouku/TokenEmbeddingResolver.swift
+		- kyouku/SwipeableFlashcardsMinimalView.swift
+		- kyouku/EmbeddingsSQLiteStore.swift
+		- kyouku/EmbeddingDebugIntrospection.swift
+		- kyouku/EmbeddingNeighborhoodPrefetcher.swift
+		- kyouku/SemanticSpanDescribe.swift
+		- kyouku/ThemeDiscoveryStore.swift
+		- kyouku/ThemeDiscoveryTypes.swift
+		- kyouku/ThemeClustering.swift
+		- kyouku/ThemeLabeler.swift
+	- Removed unused wiring: ThemeDiscovery store removed from app root (`KyoukuApp`)
+	- Removed a handful of Periphery-verified unused helper methods (see git diff)
+
+Note: The heuristic lists below may include items that have since been deleted; treat them as historical output.
+
 ## Scope
 
 - App Swift files: 94
@@ -98,10 +124,6 @@ This is a best-effort static audit (not a Swift parser). Treat results as **cand
 - kyouku/WordEditView.swift: WordEditView (1)
 - kyouku/WordsView.swift: WordsView (1)
 
-## Bundled resources: referenced via string literals
-
-- kyouku/deinflect.min.json: filename literal in 0 file(s); resource-name literal "deinflect.min" in 1 file(s)
-- kyouku/dictionary.sqlite3: filename literal in 0 file(s); resource-name literal "dictionary" in 7 file(s)
 
 ## Next steps (recommended)
 

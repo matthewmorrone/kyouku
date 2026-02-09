@@ -3,6 +3,7 @@
 ## Known bugs
 - [ ] Spacing on the left edge for ruby persistent overhang
 - [ ] Distribute spacing better for multikanji ruby headwords 
+- [ ] when combining or splitting words, dictionary popup shows no result until refreshed
 
 ## Dictionary issues
 - [ ] wouldn't it make more sense if example sentences were grouped by meaning/sense used?

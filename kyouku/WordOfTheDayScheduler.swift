@@ -24,14 +24,6 @@ enum WordOfTheDayScheduler {
         }
     }
 
-    static func pendingRequestCount() async -> Int {
-        await withCheckedContinuation { continuation in
-            UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
-                continuation.resume(returning: requests.count)
-            }
-        }
-    }
-
     static func pendingWordOfTheDayRequestCount() async -> Int {
         let ids = await pendingWordOfTheDayIdentifiers()
         return ids.count

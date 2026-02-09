@@ -176,14 +176,6 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         }
     }
 
-    func resetRateAndPitch() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.preferredRate = AVSpeechUtteranceDefaultSpeechRate
-            self.preferredPitch = 1.0
-        }
-    }
-
     func setPreferredVoiceIdentifier(_ identifier: String?) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

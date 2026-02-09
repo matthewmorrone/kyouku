@@ -37,8 +37,4 @@ actor DeinflectionCache {
         cache[key] = results
         return results
     }
-
-    func clear() {
-        cache.removeAll(keepingCapacity: true)
-    }
 }

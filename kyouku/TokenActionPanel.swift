@@ -931,12 +931,6 @@ private struct LookupResultsView: View {
                                 .frame(width: slotWidth)
                             }
                         }
-
-                    // Purely additive, read-only semantic exploration.
-                    // This can be compute-heavy; keep it opt-in for responsiveness.
-                    if ProcessInfo.processInfo.environment["SEMANTIC_EXPLORER"] == "1" {
-                        SemanticNeighborhoodExplorerView(lookup: lookup, topN: 30)
-                    }
                 }
             }
         }

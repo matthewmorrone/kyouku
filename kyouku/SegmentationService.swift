@@ -27,12 +27,6 @@ actor SegmentationService {
     // Stage 1 must remain stable, boring, and lexicon-only.
     // ─────────────────────────────────────────────────────────────────────────────
 
-    nonisolated static func describe(spans: [TextSpan]) -> String {
-        spans
-            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
-            .joined(separator: ", ")
-    }
-
     private let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "kyouku", category: "SegmentationService")
     private var cache: [SegmentationCacheKey: [TextSpan]] = [:]
     private var lruKeys: [SegmentationCacheKey] = []

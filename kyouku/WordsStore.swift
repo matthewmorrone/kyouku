@@ -154,15 +154,6 @@ final class WordsStore: ObservableObject {
         words.append(contentsOf: newWords)
         save()
     }
-    
-    func delete(at offsets: IndexSet) {
-        words.remove(atOffsets: offsets)
-        save()
-    }
-    
-    func delete(_ offsets: IndexSet) {
-        delete(at: offsets)
-    }
 
     /// Robust deletion that works even when the UI list is sorted/filtered.
     func delete(ids: Set<UUID>) {
@@ -171,12 +162,6 @@ final class WordsStore: ObservableObject {
         save()
     }
 
-    /// Removes every saved word.
-    func deleteAll() {
-        guard words.isEmpty == false else { return }
-        words.removeAll()
-        save()
-    }
 
     /// Convenience for deleting a single word by id.
     func delete(id: UUID) {
@@ -279,14 +264,6 @@ final class WordsStore: ObservableObject {
         save()
     }
 
-    func addWord(id: UUID, toList listID: UUID) {
-        guard let idx = words.firstIndex(where: { $0.id == id }) else { return }
-        if words[idx].listIDs.contains(listID) == false {
-            words[idx].listIDs.append(listID)
-            save()
-        }
-    }
-
     func addWords(ids: Set<UUID>, toList listID: UUID) {
         guard ids.isEmpty == false else { return }
         guard words.isEmpty == false else { return }
@@ -306,24 +283,10 @@ final class WordsStore: ObservableObject {
         }
     }
 
-    func removeWord(id: UUID, fromList listID: UUID) {
-        guard let idx = words.firstIndex(where: { $0.id == id }) else { return }
-        let before = words[idx].listIDs
-        let after = before.filter { $0 != listID }
-        if after.count != before.count {
-            words[idx].listIDs = after
-            save()
-        }
-    }
-
     func wordCount(inList id: UUID) -> Int {
         words.reduce(0) { acc, w in
             acc + (w.listIDs.contains(id) ? 1 : 0)
         }
-    }
-    
-    func randomWord() -> Word? {
-        words.randomElement()
     }
     
     // MARK: - File I/O

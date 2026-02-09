@@ -10,12 +10,9 @@ struct PasteControlsBar: View {
     @Binding var highlightUnknownTokens: Bool
     @Binding var padHeadwords: Bool
 
-    let showConstellationButton: Bool
-
     let onHideKeyboard: () -> Void
     let onPaste: () -> Void
     let onSave: () -> Void
-    let onShowConstellation: () -> Void
 
     let onToggleFurigana: (_ enabled: Bool) -> Void
     let onShowToast: (_ message: String) -> Void
@@ -52,17 +49,7 @@ struct PasteControlsBar: View {
             }
 
             ControlCell {
-                if showConstellationButton {
-                    Button {
-                        onHideKeyboard()
-                        onShowConstellation()
-                    } label: {
-                        Image(systemName: "circle.dotted")
-                            .font(.title2)
-                    }
-                    .accessibilityLabel("Constellation")
-                    .accessibilityHint("View sentence constellation")
-                }
+                EmptyView()
             }
 
             ControlCell {

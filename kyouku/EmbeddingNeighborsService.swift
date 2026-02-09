@@ -180,13 +180,6 @@ actor EmbeddingNeighborsService {
         return out
     }
 
-    func clearSessionCache() {
-        cache.removeAll()
-        knownMissingEmbedding.removeAll()
-        inFlight.removeAll()
-        // Keep allWords cached; it is static and expensive to reload.
-    }
-
     // MARK: - Internals
 
     private func loadAllWordsIfNeeded() async -> [String] {

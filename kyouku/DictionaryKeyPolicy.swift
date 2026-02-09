@@ -15,11 +15,6 @@ enum DictionaryKeyPolicy {
         Keys(displayKey: displayKey, lookupKey: lookupKey(for: displayKey))
     }
 
-    nonisolated static func keys(forRange range: NSRange, inText nsText: NSString) -> Keys {
-        let display = nsText.substring(with: range)
-        return keys(forDisplayKey: display)
-    }
-
     /// The single, consistent normalization used for DB queries.
     ///
     /// Required by spec: trim + normalizeFullWidthASCII.

@@ -5,15 +5,6 @@ fileprivate enum CardsPage: Int, CaseIterable, Identifiable {
     case cloze
 
     var id: Int { rawValue }
-
-    var title: String {
-        switch self {
-        case .flashcards:
-            return "Flashcards"
-        case .cloze:
-            return "Cloze"
-        }
-    }
 }
 
 struct CardsTabView: View {

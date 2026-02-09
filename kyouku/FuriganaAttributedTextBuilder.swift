@@ -132,18 +132,6 @@ enum FuriganaAttributedTextBuilder {
         let nsText = text as NSString
         var adjustedSpans = normalizeCoverage(spans: segmented, text: nsText)
 
-        // Stage 1.65: Counter compound boundary fix (split/rewire-only).
-        // Run early so it applies even when `baseSpans` are provided.
-        let trieForCounterFix: LexiconTrie?
-        if let t = await SegmentationService.shared.cachedTrieIfAvailable() {
-            trieForCounterFix = t
-        } else {
-            trieForCounterFix = await LexiconProvider.shared.cachedTrieIfAvailable()
-        }
-        if let trieForCounterFix {
-            adjustedSpans = CounterCompoundBoundaryFixer.apply(text: nsText, spans: adjustedSpans, trie: trieForCounterFix)
-        }
-
         // Materialize MeCab annotations once per pipeline run and reuse them across
         // Stage 1.25 (merge-only), Stage 1.5 (split-only), and Stage 2 reading attachment.
         let tokenizer = SpanReadingAttacher.tokenizer()

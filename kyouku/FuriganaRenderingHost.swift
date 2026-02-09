@@ -553,10 +553,6 @@ private struct EditingTextView: UIViewRepresentable {
         colored.addAttribute(NSAttributedString.Key.paragraphStyle, value: paragraph, range: fullRange)
         colored.addAttribute(NSAttributedString.Key.foregroundColor, value: UIColor.label, range: fullRange)
         colored.addAttribute(NSAttributedString.Key.font, value: baseFont, range: fullRange)
-        if distinctKanaKanjiFonts {
-            let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
-            ScriptFontStyler.applyDistinctKanaKanjiFonts(to: colored, kanjiFont: kanjiFont)
-        }
         if abs(globalKerning) > 0.001 {
             colored.addAttribute(.kern, value: globalKerning, range: fullRange)
         }
@@ -578,10 +574,6 @@ private struct EditingTextView: UIViewRepresentable {
                 NSAttributedString.Key.foregroundColor: UIColor.label,
                 NSAttributedString.Key.font: baseFont
             ], range: NSRange(location: 0, length: initialLength))
-            if distinctKanaKanjiFonts {
-                let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
-                ScriptFontStyler.applyDistinctKanaKanjiFonts(to: view.textStorage, kanjiFont: kanjiFont)
-            }
             if abs(globalKerning) > 0.001 {
                 view.textStorage.addAttribute(.kern, value: globalKerning, range: NSRange(location: 0, length: initialLength))
             }
@@ -621,10 +613,6 @@ private struct EditingTextView: UIViewRepresentable {
             colored.addAttribute(NSAttributedString.Key.paragraphStyle, value: paragraph, range: fullRange)
             colored.addAttribute(NSAttributedString.Key.foregroundColor, value: UIColor.label, range: fullRange)
             colored.addAttribute(NSAttributedString.Key.font, value: baseFont, range: fullRange)
-            if distinctKanaKanjiFonts {
-                let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
-                ScriptFontStyler.applyDistinctKanaKanjiFonts(to: colored, kanjiFont: kanjiFont)
-            }
             if abs(globalKerning) > 0.001 {
                 colored.addAttribute(.kern, value: globalKerning, range: fullRange)
             }
@@ -693,10 +681,6 @@ private struct EditingTextView: UIViewRepresentable {
                 NSAttributedString.Key.foregroundColor: UIColor.label,
                 NSAttributedString.Key.font: baseFont
             ], range: NSRange(location: 0, length: fullLength))
-            if distinctKanaKanjiFonts {
-                let kanjiFont = ScriptFontStyler.resolveKanjiFont(baseFont: baseFont)
-                ScriptFontStyler.applyDistinctKanaKanjiFonts(to: uiView.textStorage, kanjiFont: kanjiFont)
-            }
             if abs(globalKerning) > 0.001 {
                 uiView.textStorage.addAttribute(.kern, value: globalKerning, range: NSRange(location: 0, length: fullLength))
             }

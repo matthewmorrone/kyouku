@@ -30,12 +30,6 @@ enum AppTheme {
             }
         )
     }
-
-    static func uiColor(_ role: @escaping (AppColorTheme.Palette) -> Color) -> UIColor {
-        AppTheme.dynamicUIColor { theme in
-            UIColor(role(theme.palette))
-        }
-    }
 }
 
 extension Color {
@@ -46,10 +40,6 @@ extension Color {
     static var appAccent: Color { AppTheme.color { $0.accent } }
     static var appHighlight: Color { AppTheme.color { $0.highlight } }
     static var appDestructive: Color { AppTheme.color { $0.destructive } }
-
-    static var appTokenAlternateA: Color { AppTheme.color { $0.tokenAlternateA } }
-    static var appTokenAlternateB: Color { AppTheme.color { $0.tokenAlternateB } }
-    static var appUnknownToken: Color { AppTheme.color { $0.unknownToken } }
 
     static var appBorder: Color {
         // Prefer system separators for System Default to avoid subtle deltas.
@@ -67,21 +57,4 @@ extension Color {
     }
 }
 
-extension UIColor {
-    static var appBackground: UIColor { AppTheme.uiColor { $0.background } }
-    static var appSurface: UIColor { AppTheme.uiColor { $0.surface } }
-    static var appTextPrimary: UIColor { AppTheme.uiColor { $0.textPrimary } }
-    static var appTextSecondary: UIColor { AppTheme.uiColor { $0.textSecondary } }
-    static var appAccent: UIColor { AppTheme.uiColor { $0.accent } }
-    static var appHighlight: UIColor { AppTheme.uiColor { $0.highlight } }
-    static var appDestructive: UIColor { AppTheme.uiColor { $0.destructive } }
 
-    static var appTokenAlternateA: UIColor { AppTheme.uiColor { $0.tokenAlternateA } }
-    static var appTokenAlternateB: UIColor { AppTheme.uiColor { $0.tokenAlternateB } }
-    static var appUnknownToken: UIColor { AppTheme.uiColor { $0.unknownToken } }
-
-    static var appBorder: UIColor {
-        if AppTheme.currentThemeID == .systemDefault { return .separator }
-        return UIColor(Color.appTextPrimary.opacity(0.14))
-    }
-}

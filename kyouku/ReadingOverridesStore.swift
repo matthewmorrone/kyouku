@@ -75,23 +75,6 @@ final class ReadingOverridesStore: ObservableObject {
         overrides.filter { $0.noteID == noteID && $0.overlaps(range) }
     }
 
-    func upsert(noteID: UUID, range: NSRange, userKana: String?) {
-        let override = ReadingOverride(
-            noteID: noteID,
-            rangeStart: range.location,
-            rangeLength: range.length,
-            userKana: userKana
-        )
-        apply(noteID: noteID, removing: range, adding: [override])
-    }
-
-    func apply(noteID: UUID, removing range: NSRange, adding newOverrides: [ReadingOverride]) {
-        overrides.removeAll { $0.noteID == noteID && $0.overlaps(range) }
-        overrides.append(contentsOf: newOverrides)
-        save()
-        notifyChange()
-    }
-
     func apply(noteID: UUID, removing ranges: [NSRange], adding newOverrides: [ReadingOverride]) {
         guard ranges.isEmpty == false else {
             overrides.append(contentsOf: newOverrides)
@@ -132,15 +115,6 @@ final class ReadingOverridesStore: ObservableObject {
         guard overrides.count != before else { return }
         save()
         notifyChange()
-    }
-
-    func deleteOverride(id: UUID) {
-        let before = overrides.count
-        overrides.removeAll { $0.id == id }
-        if overrides.count != before {
-            save()
-            notifyChange()
-        }
     }
 
     func replaceAll(with overrides: [ReadingOverride]) {

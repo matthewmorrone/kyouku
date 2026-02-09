@@ -92,13 +92,6 @@ struct PitchAccent: Identifiable, Hashable, Sendable {
     }
 }
 
-private struct RawDictionaryRow {
-    // Removed: lookup now returns one row per JMdict entry and no longer expands
-    // kana variants into separate DictionaryEntry results.
-}
-
-
-
 struct SurfaceReadingOverride: Hashable, Sendable {
     let surface: String
     let reading: String
@@ -461,55 +454,6 @@ actor DictionarySQLiteStore {
         }
 
         return overrides
-    }
-
-    /// Returns distinct kana readings for a given surface form.
-    ///
-    /// This is used to offer alternative readings in the token action UI for
-    /// surfaces that legitimately have multiple readings (e.g. "二人": ふたり / ににん).
-    func listKanaReadings(forSurface surface: String, limit: Int = 12) async throws -> [String] {
-        try ensureOpen()
-        guard let db else { return [] }
-
-        let trimmed = surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.isEmpty == false else { return [] }
-
-        let sql = """
-        WITH entry_ids AS (
-            SELECT entry_id FROM kanji WHERE text = ?1
-            UNION
-            SELECT entry_id FROM kana_forms WHERE text = ?1
-        )
-        SELECT DISTINCT r.text
-        FROM kana_forms r
-        JOIN entry_ids e ON e.entry_id = r.entry_id
-        WHERE r.text IS NOT NULL
-          AND r.text <> ''
-        ORDER BY r.is_common DESC, r.id ASC
-        LIMIT ?2;
-        """
-
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
-            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
-        }
-        defer { sqlite3_finalize(stmt) }
-
-        sqlite3_bind_text(stmt, 1, trimmed, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(limit))
-
-        var out: [String] = []
-        out.reserveCapacity(min(limit, 12))
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            guard let ptr = sqlite3_column_text(stmt, 0) else { continue }
-            let raw = String(cString: ptr).trimmingCharacters(in: .whitespacesAndNewlines)
-            let normalized = raw.precomposedStringWithCanonicalMapping
-            guard normalized.isEmpty == false else { continue }
-            if out.contains(normalized) == false {
-                out.append(normalized)
-            }
-        }
-        return out
     }
 
     private func ensureOpen() throws {
@@ -1788,11 +1732,5 @@ actor DictionarySQLiteStore {
         return String(String.UnicodeScalarView(scalars))
     }
 
-    func close() {
-        if let db {
-            sqlite3_close(db)
-            self.db = nil
-        }
-    }
 }
 

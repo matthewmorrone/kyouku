@@ -338,43 +338,8 @@ final class DictionaryLookupViewModel: ObservableObject {
         }
     }
 
-    // Backwards-compatible wrapper.
-    func load(term: String, fallbackTerms: [String] = [], mode: DictionarySearchMode = .japanese) async {
-        // NOTE: legacy `fallbackTerms` are intentionally ignored for UI determinism.
+    func load(term: String, mode: DictionarySearchMode = .japanese) async {
         await lookup(term: term, mode: mode)
-    }
-
-    /// Selection-driven lookup: enumerate token-aligned spans containing the selection and stop on first hit.
-    func lookup(
-        selectedRange: NSRange,
-        inText text: String,
-        tokenSpans: [TextSpan],
-        mode: DictionarySearchMode = .japanese
-    ) async {
-        // Legacy selection API remains, but is implemented via the transaction engine.
-        // Use a deterministic requestID that prevents redundant lookups.
-        let requestID = "sel:\(mode):\(selectedRange.location):\(selectedRange.length):\(text.hashValue)"
-        await lookupTransaction(
-            requestID: requestID,
-            selection: nil,
-            selectedRange: selectedRange,
-            inText: text,
-            tokenSpans: tokenSpans,
-            lemmaFallbacks: [],
-            mode: mode
-        )
-    }
-
-    // Backwards-compatible wrapper.
-    func load(
-        selectedRange: NSRange,
-        inText text: String,
-        tokenSpans: [TextSpan],
-        fallbackTerms: [String] = [],
-        mode: DictionarySearchMode = .japanese
-    ) async {
-        // NOTE: legacy `fallbackTerms` are intentionally ignored for UI determinism.
-        await lookup(selectedRange: selectedRange, inText: text, tokenSpans: tokenSpans, mode: mode)
     }
 }
 
@@ -469,8 +434,8 @@ private extension DictionaryLookupViewModel {
             if lhs.isCommon != rhs.isCommon {
                 return lhs.isCommon && rhs.isCommon == false
             }
-            return romajiScore(for: lhs, query: key, kanaCandidates: kanaCandidates, entryPriority: entryPriority)
-                < romajiScore(for: rhs, query: key, kanaCandidates: kanaCandidates, entryPriority: entryPriority)
+            return romajiScore(for: lhs, kanaCandidates: kanaCandidates, entryPriority: entryPriority)
+                < romajiScore(for: rhs, kanaCandidates: kanaCandidates, entryPriority: entryPriority)
         }
     }
 
@@ -571,7 +536,7 @@ private extension DictionaryLookupViewModel {
         )
     }
 
-    func romajiScore(for entry: DictionaryEntry, query: String, kanaCandidates: [String], entryPriority: [Int64: Int]) -> (Int, Int, Int, Int, Int, Int64) {
+    func romajiScore(for entry: DictionaryEntry, kanaCandidates: [String], entryPriority: [Int64: Int]) -> (Int, Int, Int, Int, Int, Int64) {
         let kana = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let commonPenalty = entry.isCommon ? 0 : 1
         let priorityScore = entryPriority[entry.entryID] ?? 999
