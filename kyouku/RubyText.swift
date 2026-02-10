@@ -67,9 +67,6 @@ struct RubyText: UIViewRepresentable {
     var onDebugTokenListTextChange: ((String) -> Void)? = nil
 
     static let defaultInsets = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
-    private static let verboseRubyLoggingEnabled: Bool = {
-        ProcessInfo.processInfo.environment["RUBY_TRACE"] == "1"
-    }()
 
     struct TokenOverlay: Equatable {
         let range: NSRange
@@ -470,89 +467,6 @@ struct RubyText: UIViewRepresentable {
         uiView.setContentHuggingPriority(.defaultHigh, for: .vertical)
     }
 
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView: TokenOverlayTextView, context: Context) -> CGSize {
-        let proposedWidth = proposal.width
-
-        // Prefer a conservative, narrow fallback width on first measure to avoid under-measuring
-        // (which can clip wrapped lines until SwiftUI re-measures). Avoid using screen width here.
-        let conservativeFallbackWidth: CGFloat = 320
-
-        let boundedFallbackWidth: CGFloat = {
-            // On first load, SwiftUI may ask for a size before a concrete proposal width exists.
-            // Prefer the actual window width (when available) so we measure with the same
-            // constraint we’ll render with, avoiding a “different wrap” until rotation.
-            if let w = uiView.window?.bounds.width, w.isFinite, w > 0 {
-                return w
-            }
-            if let w = uiView.superview?.bounds.width, w.isFinite, w > 0 {
-                return w
-            }
-            let w = uiView.bounds.width
-            if w.isFinite, w > 0 {
-                return w
-            }
-            return conservativeFallbackWidth
-        }()
-
-        let rawWidth = (proposedWidth ?? boundedFallbackWidth)
-        // Do not clamp to screen width; use a conservative width to ensure we never under-measure height.
-        let baseWidth = max(1, rawWidth)
-
-        // Snap widths to pixel boundaries to avoid sub-pixel wrapping differences.
-        let scale: CGFloat = {
-            if let s = uiView.window?.windowScene?.screen.scale, s > 0 { return s }
-            let traitScale = uiView.traitCollection.displayScale
-            return traitScale > 0 ? traitScale : 2.0
-        }()
-        func snap(_ v: CGFloat) -> CGFloat { (v * scale).rounded() / scale }
-
-        let snappedBaseWidth = snap(baseWidth)
-
-        // Ensure TextKit measures with the same constrained width we'll draw with.
-        // Do NOT mutate view geometry (e.g. `bounds`) here; only configure TextKit.
-        let inset = uiView.textContainerInset
-        var targetWidth = max(0, snap(baseWidth - inset.left - inset.right))
-        if wrapLines == false {
-            // No internal wrapping: give TextKit a large container width so content can scroll horizontally.
-            targetWidth = max(targetWidth, RubyTextConstants.noWrapContainerWidth)
-        }
-
-        uiView.lastMeasuredBoundsWidth = snappedBaseWidth
-        uiView.lastMeasuredTextContainerWidth = targetWidth
-        if abs(uiView.textContainer.size.width - targetWidth) > 0.5 {
-            uiView.textContainer.size = CGSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude)
-
-            // TextKit 2 can be viewport-lazy; when the container width changes during measurement,
-            // force layout invalidation so wrapping/anchor geometry settles immediately.
-            if #available(iOS 15.0, *) {
-                if let tlm = uiView.textLayoutManager {
-                    tlm.invalidateLayout(for: tlm.documentRange)
-                }
-            }
-            uiView.setNeedsLayout()
-        }
-
-        let shouldLog = (proposedWidth == nil) || abs(uiView.bounds.width - snappedBaseWidth) > 0.5
-        if Self.verboseRubyLoggingEnabled && shouldLog {
-            let message = String(
-                format: "MEASURE sizeThatFits proposalWidth=%@ baseWidth=%.2f boundsWidth=%.2f insetL=%.2f insetR=%.2f padding=%.2f containerW=%.2f",
-                String(describing: proposedWidth),
-                snappedBaseWidth,
-                uiView.bounds.width,
-                inset.left,
-                inset.right,
-                uiView.textContainer.lineFragmentPadding,
-                uiView.textContainer.size.width
-            )
-            CustomLogger.shared.debug(message)
-        }
-
-        let targetSize = CGSize(width: snappedBaseWidth, height: CGFloat.greatestFiniteMagnitude)
-        let measured = uiView.sizeThatFits(targetSize)
-        let measuredHeight = measured.height > 0 ? measured.height : targetSize.height
-        return CGSize(width: snappedBaseWidth, height: measuredHeight)
-    }
-
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
@@ -785,17 +699,6 @@ struct RubyText: UIViewRepresentable {
             let custom = UIMenu(title: "", options: .displayInline, children: actions)
             // Preserve system actions like Look Up by appending suggestedActions
             return UIMenu(children: [custom] + suggestedActions)
-        }
-
-        @available(iOS 16.0, *)
-        func textView(_ textView: UITextView,
-                      targetRectForEditMenuForTextIn range: NSRange) -> CGRect {
-            guard let start = textView.position(from: textView.beginningOfDocument, offset: range.location),
-                  let end = textView.position(from: start, offset: range.length),
-                  let tr = textView.textRange(from: start, to: end) else {
-                return .zero
-            }
-            return textView.firstRect(for: tr)
         }
     }
 

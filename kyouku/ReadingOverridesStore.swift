@@ -92,15 +92,6 @@ final class ReadingOverridesStore: ObservableObject {
         notifyChange()
     }
 
-    func remove(noteID: UUID, in range: NSRange) {
-        let before = overrides.count
-        overrides.removeAll { $0.noteID == noteID && $0.overlaps(range) }
-        if overrides.count != before {
-            save()
-            notifyChange()
-        }
-    }
-
     func removeAll(for noteID: UUID) {
         let before = overrides.count
         overrides.removeAll { $0.noteID == noteID }

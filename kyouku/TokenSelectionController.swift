@@ -23,10 +23,4 @@ final class TokenSelectionController: ObservableObject {
         pendingSplitFocusSelectionID = nil
         tokenPanelFrame = nil
     }
-
-    func beginPendingSelectionRestoration(for range: NSRange) {
-        guard range.location != NSNotFound, range.length > 0 else { return }
-        pendingSelectionRange = range
-        persistentSelectionRange = range
-    }
 }

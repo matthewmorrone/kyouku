@@ -441,6 +441,7 @@ private struct FlashcardCard: View {
     let onAgain: () -> Void
 
     @EnvironmentObject var notes: NotesStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private enum GestureMode {
         case undecided
@@ -521,6 +522,13 @@ private struct FlashcardCard: View {
         let radians = angle * .pi / 180
         let isFrontVisible = cos(radians) >= 0
 
+        let tilt = abs(sin(radians))
+        let perspective: CGFloat = reduceMotion ? 1 / 650 : 1 / 320
+        // Add a tiny sideways roll so the flip reads more 3D.
+        let roll = (reduceMotion ? 0 : (6 * tilt))
+        let frontRoll = roll
+        let backRoll = -roll
+
         ZStack {
             cardFace(flipAngle: angle, face: .front) {
                 frontFace
@@ -529,7 +537,12 @@ private struct FlashcardCard: View {
                 .rotation3DEffect(
                     .degrees(angle),
                     axis: (x: 1, y: 0, z: 0),
-                    perspective: 1 / 500
+                    perspective: perspective
+                )
+                .rotation3DEffect(
+                    .degrees(frontRoll),
+                    axis: (x: 0, y: 1, z: 0),
+                    perspective: perspective
                 )
 
             cardFace(flipAngle: angle, face: .back) {
@@ -539,7 +552,12 @@ private struct FlashcardCard: View {
                 .rotation3DEffect(
                     .degrees(angle - 180),
                     axis: (x: 1, y: 0, z: 0),
-                    perspective: 1 / 500
+                    perspective: perspective
+                )
+                .rotation3DEffect(
+                    .degrees(backRoll),
+                    axis: (x: 0, y: 1, z: 0),
+                    perspective: perspective
                 )
         }
     }
@@ -552,6 +570,10 @@ private struct FlashcardCard: View {
         let radians = flipAngle * .pi / 180
         let tilt = abs(sin(radians))
 
+        // Subtle face cue: a small gloss/shade that swaps corners per face.
+        let glossStrength = reduceMotion ? 0.0 : (0.03 + 0.10 * tilt)
+        let shadeStrength = 0.05 + 0.07 * tilt
+
         let highlightOpacity = 0.02 + 0.07 * tilt
         let shadowOpacity = 0.03 + 0.12 * tilt
 
@@ -560,6 +582,9 @@ private struct FlashcardCard: View {
         let highlightEnd: UnitPoint = .center
         let shadowStart: UnitPoint = .center
         let shadowEnd: UnitPoint = highlightFromTop ? .bottom : .top
+
+        let glossCorner: UnitPoint = (face == .front) ? .topLeading : .topTrailing
+        let shadeCorner: UnitPoint = (face == .front) ? .bottomTrailing : .bottomLeading
 
         return ZStack {
             RoundedRectangle(cornerRadius: 16)
@@ -580,6 +605,27 @@ private struct FlashcardCard: View {
                 }
                 .overlay {
                     Color.black.opacity(0.02 * tilt)
+                }
+                .overlay {
+                    RadialGradient(
+                        colors: [Color.white.opacity(glossStrength), Color.clear],
+                        center: glossCorner,
+                        startRadius: 0,
+                        endRadius: 180
+                    )
+                    .blendMode(.screen)
+                }
+                .overlay {
+                    RadialGradient(
+                        colors: [Color.black.opacity(shadeStrength), Color.clear],
+                        center: shadeCorner,
+                        startRadius: 0,
+                        endRadius: 220
+                    )
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16)
+                        .strokeBorder(Color.white.opacity(0.06 + 0.10 * tilt), lineWidth: 1)
                 }
 
             content()
@@ -824,13 +870,18 @@ private struct FlashcardCard: View {
         let offX: CGFloat = CGFloat(dir) * 720
         // Avoid spring rebounds here; a committed swipe should feel like a clean
         // transition to the next card.
+        let remaining = abs(offX - dragOffset.width)
+        // Clamp the perceived velocity so a quick flick doesn't yeet the card off-screen instantly.
+        let pointsPerSecond: CGFloat = 1600
+        let computedDuration = Double(remaining / pointsPerSecond)
+        let duration = reduceMotion ? 0.01 : min(0.50, max(0.28, computedDuration))
         isSwipingOut = true
         swipeDirection = dir
-        withAnimation(.easeOut(duration: 0.16)) {
+        withAnimation(.easeOut(duration: duration)) {
             dragOffset = CGSize(width: offX, height: dragOffset.height * 0.2)
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
             completion()
             showBack = false
             dragOffset = .zero

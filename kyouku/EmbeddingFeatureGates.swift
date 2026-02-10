@@ -40,12 +40,6 @@ final class EmbeddingFeatureGates: @unchecked Sendable {
         return (state.featureStates[feature]?.enabled ?? false) && state.metadataOK
     }
 
-    func disable(_ feature: EmbeddingFeature, reason: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        state.featureStates[feature] = GateState(enabled: false, reason: reason)
-    }
-
     func metadataStatus() -> GateState {
         lock.lock()
         defer { lock.unlock() }

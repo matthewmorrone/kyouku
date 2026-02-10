@@ -134,7 +134,7 @@ enum RubyTextProcessing {
     /// Uses the maximum ruby size found in the attributed string as a heuristic; otherwise falls back to `defaultRubyFontSize * 0.25`.
     static func requiredHorizontalInsetForRubyOverhang(
         in attributed: NSAttributedString,
-        baseFont: UIFont,
+        baseFont _: UIFont,
         defaultRubyFontSize: CGFloat
     ) -> CGFloat {
         guard attributed.length > 0 else { return max(0, defaultRubyFontSize * 0.25) }

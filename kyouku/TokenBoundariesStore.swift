@@ -28,10 +28,6 @@ final class TokenBoundariesStore: ObservableObject {
         (spansByNote[noteID]?.isEmpty == false)
     }
 
-    func hasHardCuts(for noteID: UUID) -> Bool {
-        (hardCutsByNote[noteID]?.isEmpty == false)
-    }
-
     func hardCuts(for noteID: UUID, text: String) -> [Int] {
         guard let cuts = hardCutsByNote[noteID], cuts.isEmpty == false else { return [] }
         let length = (text as NSString).length
@@ -65,15 +61,6 @@ final class TokenBoundariesStore: ObservableObject {
         }
         guard existing.count != beforeCount else { return }
         hardCutsByNote[noteID] = existing.sorted()
-        save()
-    }
-
-    func removeHardCut(noteID: UUID, utf16Index: Int) {
-        guard var cuts = hardCutsByNote[noteID], cuts.isEmpty == false else { return }
-        let before = cuts.count
-        cuts.removeAll { $0 == utf16Index }
-        guard cuts.count != before else { return }
-        hardCutsByNote[noteID] = cuts.isEmpty ? nil : cuts
         save()
     }
 
@@ -177,15 +164,6 @@ final class TokenBoundariesStore: ObservableObject {
             spansByNote[noteID] = snapshot
         } else {
             spansByNote[noteID] = nil
-        }
-        save()
-    }
-
-    func restoreHardCuts(noteID: UUID, cuts: [Int]?) {
-        if let cuts, cuts.isEmpty == false {
-            hardCutsByNote[noteID] = cuts
-        } else {
-            hardCutsByNote[noteID] = nil
         }
         save()
     }

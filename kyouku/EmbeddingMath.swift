@@ -13,14 +13,4 @@ enum EmbeddingMath {
         }
         return acc
     }
-
-    #if DEBUG
-    static func l2Norm(_ v: [Float]) -> Float {
-        var sum: Float = 0
-        for x in v {
-            sum += x * x
-        }
-        return sum.squareRoot()
-    }
-    #endif
 }

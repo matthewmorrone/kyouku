@@ -19,24 +19,12 @@ final class EmbeddingLRUCache<Key: Hashable, Value>: @unchecked Sendable {
     struct Stats {
         var hits: Int = 0
         var misses: Int = 0
-
-        var hitRate: Float {
-            let total = hits + misses
-            guard total > 0 else { return 0 }
-            return Float(hits) / Float(total)
-        }
     }
 
     init(capacity: Int) {
         self.capacity = max(0, capacity)
         self.lock = NSLock()
         self.state = State()
-    }
-
-    var stats: Stats {
-        lock.lock()
-        defer { lock.unlock() }
-        return state.stats
     }
 
     func get(_ key: Key) -> Value? {
@@ -74,16 +62,6 @@ final class EmbeddingLRUCache<Key: Hashable, Value>: @unchecked Sendable {
                 state.map.removeValue(forKey: tail.key)
             }
         }
-    }
-
-    func removeAll() {
-        lock.lock()
-        defer { lock.unlock() }
-
-        state.map.removeAll(keepingCapacity: false)
-        state.head = nil
-        state.tail = nil
-        state.stats = Stats()
     }
 
     // MARK: - Internals

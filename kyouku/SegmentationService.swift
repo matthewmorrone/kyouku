@@ -851,17 +851,6 @@ actor SegmentationService {
         return .other
     }
 
-    private static func isBoundaryChar(_ unit: unichar) -> Bool {
-        if unit == 0 { return true }
-        if isHiragana(unit) == false && isKatakana(unit) == false && (0x4E00...0x9FFF).contains(Int(unit)) == false {
-            return true
-        }
-        if let scalar = UnicodeScalar(unit) {
-            return isWhitespaceOrNewline(scalar) || isPunctuation(scalar)
-        }
-        return false
-    }
-
     private static let punctuationExtras: Set<UnicodeScalar> = {
         let chars = "、。！？：；（）［］｛｝「」『』・…―〜。・"
         return Set(chars.unicodeScalars)

@@ -44,11 +44,6 @@ struct SpanReadingAttacher {
         }
     }
 
-    func attachReadings(text: String, spans: [TextSpan]) async -> [AnnotatedSpan] {
-        let result = await attachReadings(text: text, spans: spans, treatSpanBoundariesAsAuthoritative: false, hardCuts: [])
-        return result.annotatedSpans
-    }
-
     /// Stage 2 (MeCab attachment) plus Stage 2.5 (semantic regrouping) in one pass.
     ///
     /// This intentionally lives downstream of Stage 1 because Stage 1 is frozen

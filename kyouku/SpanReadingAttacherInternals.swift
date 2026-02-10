@@ -7,13 +7,6 @@ import OSLog
 internal import StringTools
 
 extension SpanReadingAttacher {
-    private static func clamp(_ range: NSRange, toLength length: Int) -> NSRange {
-        guard length > 0 else { return NSRange(location: NSNotFound, length: 0) }
-        let start = max(0, min(length, range.location))
-        let end = max(start, min(length, NSMaxRange(range)))
-        return NSRange(location: start, length: end - start)
-    }
-
     private static func hardBoundaryCharacterSet() -> CharacterSet {
         CharacterSet.whitespacesAndNewlines
             .union(.punctuationCharacters)
@@ -28,143 +21,6 @@ extension SpanReadingAttacher {
             }
         }
         return true
-    }
-
-    private static func hardBoundaryRanges(in nsText: NSString) -> [NSRange] {
-        let length = nsText.length
-        guard length > 0 else { return [] }
-
-        var ranges: [NSRange] = []
-        ranges.reserveCapacity(16)
-
-        var cursor = 0
-        var pendingStart: Int? = nil
-        while cursor < length {
-            let r = nsText.rangeOfComposedCharacterSequence(at: cursor)
-            let s = nsText.substring(with: r)
-            if isHardBoundaryOnly(s) {
-                if pendingStart == nil { pendingStart = r.location }
-            } else if let start = pendingStart {
-                let end = r.location
-                if end > start {
-                    ranges.append(NSRange(location: start, length: end - start))
-                }
-                pendingStart = nil
-            }
-            cursor = NSMaxRange(r)
-        }
-
-        if let start = pendingStart, start < length {
-            ranges.append(NSRange(location: start, length: length - start))
-        }
-
-        return ranges
-    }
-
-    private static func nonBoundaryRuns(in nsText: NSString, hardBoundaries: [NSRange]) -> [NSRange] {
-        let length = nsText.length
-        guard length > 0 else { return [] }
-        guard hardBoundaries.isEmpty == false else { return [NSRange(location: 0, length: length)] }
-
-        let sorted = hardBoundaries.sorted { $0.location < $1.location }
-        var runs: [NSRange] = []
-        runs.reserveCapacity(sorted.count + 1)
-
-        var cursor = 0
-        for b in sorted {
-            if b.location > cursor {
-                runs.append(NSRange(location: cursor, length: b.location - cursor))
-            }
-            cursor = max(cursor, NSMaxRange(b))
-        }
-        if cursor < length {
-            runs.append(NSRange(location: cursor, length: length - cursor))
-        }
-        return runs
-    }
-
-    private static func split(_ range: NSRange, excluding boundaries: [NSRange]) -> [NSRange] {
-        guard range.location != NSNotFound, range.length > 0 else { return [] }
-        guard boundaries.isEmpty == false else { return [range] }
-
-        let rangeEnd = NSMaxRange(range)
-        let sorted = boundaries.sorted { $0.location < $1.location }
-        var pieces: [NSRange] = []
-        pieces.reserveCapacity(2)
-
-        var cursor = range.location
-        for b in sorted {
-            if b.location >= rangeEnd { break }
-            let bEnd = NSMaxRange(b)
-            if bEnd <= cursor { continue }
-            if b.location > cursor {
-                let piece = NSRange(location: cursor, length: b.location - cursor)
-                if piece.length > 0 { pieces.append(piece) }
-            }
-            cursor = max(cursor, bEnd)
-            if cursor >= rangeEnd { break }
-        }
-
-        if cursor < rangeEnd {
-            let piece = NSRange(location: cursor, length: rangeEnd - cursor)
-            if piece.length > 0 { pieces.append(piece) }
-        }
-
-        return pieces
-    }
-
-    private static func sourceSpanIndexRange(intersecting range: NSRange, spans: [TextSpan]) -> Range<Int> {
-        guard spans.isEmpty == false else { return 0..<0 }
-        var start: Int? = nil
-        var endExclusive: Int? = nil
-        for (idx, span) in spans.enumerated() {
-            if NSIntersectionRange(span.range, range).length > 0 {
-                if start == nil { start = idx }
-                endExclusive = idx + 1
-            } else if let s = start, idx > s {
-                // Spans are ordered and should be contiguous; once we leave, we can stop.
-                if span.range.location >= NSMaxRange(range) { break }
-            }
-        }
-        let s = start ?? 0
-        let e = endExclusive ?? min(spans.count, s + 1)
-        return s..<e
-    }
-
-    private static func semanticFallbackSpans(
-        in range: NSRange,
-        nsText: NSString,
-        spans: [TextSpan],
-        annotatedSpans: [AnnotatedSpan]
-    ) -> [SemanticSpan] {
-        guard range.length > 0 else { return [] }
-        var out: [SemanticSpan] = []
-        out.reserveCapacity(4)
-
-        for (idx, span) in spans.enumerated() {
-            let intersection = NSIntersectionRange(span.range, range)
-            guard intersection.length > 0 else { continue }
-            guard NSMaxRange(intersection) <= nsText.length else { continue }
-            let surface = nsText.substring(with: intersection)
-            guard isHardBoundaryOnly(surface) == false else { continue }
-
-            let reading = (idx < annotatedSpans.count) ? annotatedSpans[idx].readingKana : nil
-            out.append(SemanticSpan(range: intersection, surface: surface, sourceSpanIndices: idx..<(idx + 1), readingKana: reading))
-        }
-
-        // If Stage-1 spans didn't cover this region cleanly (should be rare), fall back to a single span.
-        if out.isEmpty {
-            let surface = nsText.substring(with: range)
-            if isHardBoundaryOnly(surface) == false {
-                out.append(SemanticSpan(range: range, surface: surface, sourceSpanIndices: 0..<0, readingKana: nil))
-            }
-        }
-
-        return out
-    }
-
-    private static func isWhitespaceOrPunctuationOnly(_ surface: String) -> Bool {
-        isHardBoundaryOnly(surface)
     }
 
     static func tokenizer() -> Tokenizer? {
@@ -522,20 +378,6 @@ extension SpanReadingAttacher {
         return String(String.UnicodeScalarView(scalars.reversed()))
     }
 
-    private static func trailingKanaRun(in surface: String) -> String? {
-        guard surface.isEmpty == false else { return nil }
-        var scalars: [UnicodeScalar] = []
-        for scalar in surface.unicodeScalars.reversed() {
-            if isKana(scalar) {
-                scalars.append(scalar)
-            } else {
-                break
-            }
-        }
-        guard scalars.isEmpty == false else { return nil }
-        return String(String.UnicodeScalarView(scalars.reversed()))
-    }
-
     func containsKanji(_ text: String) -> Bool {
         text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
     }
@@ -603,10 +445,6 @@ extension SpanReadingAttacher {
             hasher.combine(c)
         }
         return hasher.finalize()
-    }
-
-    static func elapsedMilliseconds(since start: CFAbsoluteTime) -> Double {
-        (CFAbsoluteTimeGetCurrent() - start) * 1000
     }
 
     struct MeCabAnnotation {

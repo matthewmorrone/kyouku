@@ -36,8 +36,4 @@ enum FuriganaKnownWordSettings {
     static let defaultScoreThreshold: Double = 0.85
 
     static let defaultMinimumReviews: Int = 5
-
-    /// Prevents words from being hidden after a tiny number of reviews.
-    /// Kept for compatibility with older callers; prefer `minimumReviewsKey`.
-    static let learnedMinimumReviews: Int = defaultMinimumReviews
 }

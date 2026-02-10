@@ -693,37 +693,6 @@ private struct EditingTextView: UIViewRepresentable {
         context.coordinator.resyncToLatestSnapshotIfIdle()
     }
 
-    static func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize {
-        let resolvedWidth: CGFloat = {
-            if let width = proposal.width, width.isFinite, width > 0 {
-                return width
-            }
-            if uiView.bounds.width.isFinite, uiView.bounds.width > 0 {
-                return uiView.bounds.width
-            }
-            if let screen = uiView.window?.windowScene?.screen {
-                return screen.bounds.width
-            }
-            return 320 // reasonable fallback width when no context is available
-        }()
-
-        let resolvedHeight: CGFloat = {
-            if let height = proposal.height, height.isFinite, height > 0 {
-                return height
-            }
-            if uiView.bounds.height.isFinite, uiView.bounds.height > 0 {
-                return uiView.bounds.height
-            }
-            if let screen = uiView.window?.windowScene?.screen {
-                // Use a small default height relative to screen to avoid zero sizing
-                return max(10, screen.bounds.height * 0.1)
-            }
-            return 10
-        }()
-
-        return CGSize(width: resolvedWidth, height: resolvedHeight)
-    }
-
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text, selectedRange: $selectedRange)
     }

@@ -38,7 +38,6 @@ extension Color {
     static var appTextPrimary: Color { AppTheme.color { $0.textPrimary } }
     static var appTextSecondary: Color { AppTheme.color { $0.textSecondary } }
     static var appAccent: Color { AppTheme.color { $0.accent } }
-    static var appHighlight: Color { AppTheme.color { $0.highlight } }
     static var appDestructive: Color { AppTheme.color { $0.destructive } }
 
     static var appBorder: Color {

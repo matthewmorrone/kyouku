@@ -15,10 +15,6 @@ final class LexiconTrie: @unchecked Sendable {
 
     var maxLexiconWordLength: Int { maxWordLength }
 
-//#if DEBUG
-    var debugMaxWordLength: Int { maxWordLength }
-//#endif
-
     /// Returns true if `word` exists as an exact lexicon surface form.
     ///
     /// This is a pure in-memory check (no SQLite).
@@ -149,50 +145,6 @@ final class LexiconTrie: @unchecked Sendable {
         instrumentation.recordSteps(steps)
         instrumentation.recordTrieTime(CFAbsoluteTimeGetCurrent() - loopStart)
         return ends
-    }
-
-    struct MatchInfo {
-        let lastWordEnd: Int?
-        let furthestPrefixEnd: Int
-        let hasKanji: Bool
-    }
-
-    /// Returns both the longest full-word match end (if any) and the furthest prefix end
-    /// reached in the trie before traversal fails.
-    func matchInfo(in text: NSString, from index: Int, requireKanji: Bool = true) -> MatchInfo? {
-        instrumentation.recordCursor()
-        let length = text.length
-        guard index < length else { return nil }
-        instrumentation.recordTraversal()
-
-        var node = root
-        var cursor = index
-        var steps = 0
-        var lastMatchEnd: Int? = nil
-        var hasKanji = false
-
-        let loopStart = CFAbsoluteTimeGetCurrent()
-
-        while cursor < length && steps < maxWordLength {
-            let unit = text.character(at: cursor)
-            instrumentation.recordCharAccess()
-            instrumentation.recordLookup()
-            guard let next = node.children[unit] else { break }
-            if Self.isKanji(unit) {
-                hasKanji = true
-            }
-            node = next
-            cursor += 1
-            steps += 1
-            if node.isWord, (requireKanji == false || hasKanji) {
-                lastMatchEnd = cursor
-            }
-        }
-
-        instrumentation.recordSteps(steps)
-        instrumentation.recordTrieTime(CFAbsoluteTimeGetCurrent() - loopStart)
-
-        return MatchInfo(lastWordEnd: lastMatchEnd, furthestPrefixEnd: cursor, hasKanji: hasKanji)
     }
 
     /// Returns true when the substring `[index, endExclusive)` exists as a prefix inside the lexicon.

@@ -1,11 +1,11 @@
 import Foundation
 
-struct JapaneseVerbConjugation: Hashable, Sendable {
+struct VerbConjugation: Hashable, Sendable {
     let label: String
     let surface: String
 }
 
-struct JapaneseVerbConjugator {
+struct VerbConjugator {
     enum VerbClass: Hashable, Sendable {
         case ichidan
         case godan
@@ -30,7 +30,7 @@ struct JapaneseVerbConjugator {
         return nil
     }
 
-    static func conjugations(for dictionaryForm: String, verbClass: VerbClass, set: ConjugationSet) -> [JapaneseVerbConjugation] {
+    static func conjugations(for dictionaryForm: String, verbClass: VerbClass, set: ConjugationSet) -> [VerbConjugation] {
         let base = dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines)
         guard base.isEmpty == false else { return [] }
 
@@ -50,8 +50,8 @@ struct JapaneseVerbConjugator {
     }
 }
 
-private extension JapaneseVerbConjugator {
-    static func buildAllConjugations(base: String, verbClass: VerbClass) -> [JapaneseVerbConjugation] {
+private extension VerbConjugator {
+    static func buildAllConjugations(base: String, verbClass: VerbClass) -> [VerbConjugation] {
         switch verbClass {
         case .ichidan:
             return ichidan(base)
@@ -64,7 +64,7 @@ private extension JapaneseVerbConjugator {
         }
     }
 
-    static func ichidan(_ base: String) -> [JapaneseVerbConjugation] {
+    static func ichidan(_ base: String) -> [VerbConjugation] {
         guard base.hasSuffix("る"), base.count >= 2 else { return [] }
         let stem = String(base.dropLast(1))
         return orderedUnique([
@@ -89,7 +89,7 @@ private extension JapaneseVerbConjugator {
         ])
     }
 
-    static func godan(_ base: String) -> [JapaneseVerbConjugation] {
+    static func godan(_ base: String) -> [VerbConjugation] {
         guard let last = base.last else { return [] }
         let lastKana = String(last)
         let stem = String(base.dropLast(1))
@@ -128,7 +128,7 @@ private extension JapaneseVerbConjugator {
         ])
     }
 
-    static func suru(_ base: String) -> [JapaneseVerbConjugation] {
+    static func suru(_ base: String) -> [VerbConjugation] {
         guard base.hasSuffix("する"), base.count >= 3 else { return [] }
         let stem = String(base.dropLast(2))
         return orderedUnique([
@@ -154,7 +154,7 @@ private extension JapaneseVerbConjugator {
         ])
     }
 
-    static func kuru(_ base: String) -> [JapaneseVerbConjugation] {
+    static func kuru(_ base: String) -> [VerbConjugation] {
         // Handle both kana and kanji spellings.
         if base.hasSuffix("くる") {
             let prefix = String(base.dropLast(2))
@@ -253,9 +253,9 @@ private extension JapaneseVerbConjugator {
         }
     }
 
-    static func orderedUnique(_ items: [JapaneseVerbConjugation]) -> [JapaneseVerbConjugation] {
+    static func orderedUnique(_ items: [VerbConjugation]) -> [VerbConjugation] {
         var seen: Set<String> = []
-        var out: [JapaneseVerbConjugation] = []
+        var out: [VerbConjugation] = []
         out.reserveCapacity(items.count)
         for item in items {
             let key = item.label + "|" + item.surface

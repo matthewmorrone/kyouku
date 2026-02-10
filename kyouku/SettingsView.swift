@@ -16,8 +16,6 @@ struct SettingsView: View {
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
     // Absolute gap between ruby and headword (in points). 0 means “touching”.
     @AppStorage("readingRubyBaselineGap") private var readingRubyBaselineGap: Double = 0.5
-    // Legacy: additive adjustment used by older builds.
-    @AppStorage("readingRubyBaselineGapAdjustment") private var readingRubyBaselineGapAdjustment: Double = 0
     @AppStorage("readingGlobalKerningPixels") private var readingGlobalKerningPixels: Double = 0
     /// Preferred base font PostScript name for reading text.
     /// Empty string means "System".

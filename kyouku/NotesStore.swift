@@ -32,11 +32,6 @@ class NotesStore: ObservableObject {
         load()
     }
 
-    // Backward-compatible convenience: still allows adding just text
-    func addNote(_ text: String) {
-        addNote(title: nil, text: text)
-    }
-
     func addNote(title: String?, text: String) {
         let cleanTitle = (title?.isEmpty == true) ? nil : title
         let note = Note(
@@ -47,15 +42,6 @@ class NotesStore: ObservableObject {
         )
         notes.insert(note, at: 0)
         save()
-    }
-
-    func deleteNote(at offsets: IndexSet) {
-        notes.remove(atOffsets: offsets)
-        save()
-    }
-    
-    func delete(_ offsets: IndexSet) {
-        deleteNote(at: offsets)
     }
     
     func updateNote(_ note: Note) {

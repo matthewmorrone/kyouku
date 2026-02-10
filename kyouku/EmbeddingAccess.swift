@@ -30,37 +30,6 @@ final class EmbeddingAccess: @unchecked Sendable {
         )
     }
 
-    func hasEmbedding(word: String) -> Bool {
-        // Query key verbatim (no rewriting). Cache handles misses as nil-by-absence.
-        if cache.get(word) != nil {
-            #if DEBUG
-            EmbeddingDiagnostics.shared.recordCacheHit()
-            #endif
-            return true
-        }
-
-        #if DEBUG
-        EmbeddingDiagnostics.shared.recordCacheMiss()
-        #endif
-
-        do {
-            let dict = try reader.fetchVectors(for: [word])
-            if let vec = dict[word] {
-                cache.set(word, vec)
-                #if DEBUG
-                EmbeddingDiagnostics.shared.recordLookupHit()
-                #endif
-                return true
-            }
-            #if DEBUG
-            EmbeddingDiagnostics.shared.recordLookupMiss()
-            #endif
-            return false
-        } catch {
-            return false
-        }
-    }
-
     /// Batch fetch vectors for provided words.
     ///
     /// Missing embeddings are omitted.
