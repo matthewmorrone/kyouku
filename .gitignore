@@ -13,3 +13,4 @@ data/
 # Local CLI DerivedData output
 .derivedData-device/
 .derivedData-sim/
+.derivedData-codex/

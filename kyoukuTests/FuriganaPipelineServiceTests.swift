@@ -1,12 +1,19 @@
 import XCTest
 @testable import kyouku
 
+@MainActor
 final class FuriganaPipelineServiceTests: XCTestCase {
     func testSkipsWhenNoConsumersNeedSpans() async {
         let service = FuriganaPipelineService()
         let placeholderSpan = AnnotatedSpan(
             span: TextSpan(range: NSRange(location: 0, length: 1), surface: "星"),
             readingKana: "ほし"
+        )
+        let placeholderSemantic = SemanticSpan(
+            range: placeholderSpan.span.range,
+            surface: placeholderSpan.span.surface,
+            sourceSpanIndices: 0..<1,
+            readingKana: placeholderSpan.readingKana
         )
         let input = FuriganaPipelineService.Input(
             text: "星",
@@ -16,8 +23,13 @@ final class FuriganaPipelineServiceTests: XCTestCase {
             furiganaSize: 9,
             recomputeSpans: false,
             existingSpans: [placeholderSpan],
-            overrides: [],
-            context: "FuriganaPipelineServiceTests"
+            existingSemanticSpans: [placeholderSemantic],
+            amendedSpans: nil,
+            hardCuts: [],
+            readingOverrides: [],
+            context: "FuriganaPipelineServiceTests",
+            padHeadwordSpacing: false,
+            knownWordSurfaceKeys: []
         )
 
         let result = await service.render(input)
@@ -36,8 +48,13 @@ final class FuriganaPipelineServiceTests: XCTestCase {
             furiganaSize: 9,
             recomputeSpans: true,
             existingSpans: nil,
-            overrides: [],
-            context: "FuriganaPipelineServiceTests"
+            existingSemanticSpans: [],
+            amendedSpans: nil,
+            hardCuts: [],
+            readingOverrides: [],
+            context: "FuriganaPipelineServiceTests",
+            padHeadwordSpacing: false,
+            knownWordSurfaceKeys: []
         )
 
         let result = await service.render(input)
@@ -59,8 +76,13 @@ final class FuriganaPipelineServiceTests: XCTestCase {
             furiganaSize: 9,
             recomputeSpans: true,
             existingSpans: nil,
-            overrides: [],
-            context: "FuriganaPipelineServiceTests"
+            existingSemanticSpans: [],
+            amendedSpans: nil,
+            hardCuts: [],
+            readingOverrides: [],
+            context: "FuriganaPipelineServiceTests",
+            padHeadwordSpacing: false,
+            knownWordSurfaceKeys: []
         )
 
         let result = await service.render(input)
@@ -69,7 +91,8 @@ final class FuriganaPipelineServiceTests: XCTestCase {
         }
 
         let key = NSAttributedString.Key("RubyReadingText")
-        let reading = attributed.attribute(key, at: 0, effectiveRange: nil) as? String
+        var effectiveRange = NSRange(location: 0, length: 0)
+        let reading = attributed.attribute(key, at: 0, effectiveRange: &effectiveRange) as? String
         XCTAssertEqual(reading, "わたし")
     }
 }

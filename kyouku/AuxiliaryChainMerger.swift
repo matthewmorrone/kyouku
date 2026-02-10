@@ -10,7 +10,7 @@ import Foundation
 /// - Pure in-memory (no trie / no SQLite).
 /// - Merge-only: never splits, never reorders, preserves exact UTF-16 coverage.
 /// - Respects `hardCuts` (user/token-locked boundaries) and never merges across them.
-/// - Avoids surface-word lists; decisions come from MeCab POS feature strings.
+/// - Uses MeCab POS metadata, with small lemma-based fallbacks when only coarse POS is available.
 struct AuxiliaryChainMerger {
     typealias MeCabAnnotation = SpanReadingAttacher.MeCabAnnotation
 
@@ -22,6 +22,7 @@ struct AuxiliaryChainMerger {
     private struct MorphToken {
         let range: NSRange
         let surface: String
+        let dictionaryForm: String
         let partOfSpeech: String
 
         private var fields: [String] {
@@ -31,14 +32,22 @@ struct AuxiliaryChainMerger {
                 .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
         }
 
+        private var normalizedDictionaryForm: String {
+            dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        private var coarsePOSNormalized: String {
+            coarsePOS.lowercased()
+        }
+
         var coarsePOS: String {
             fields.first ?? partOfSpeech
         }
 
-        var isVerb: Bool { coarsePOS == "動詞" }
-        var isAdjective: Bool { coarsePOS == "形容詞" }
+        var isVerb: Bool { coarsePOS == "動詞" || coarsePOSNormalized == "verb" }
+        var isAdjective: Bool { coarsePOS == "形容詞" || coarsePOSNormalized == "adjective" }
         var isAuxiliary: Bool { coarsePOS == "助動詞" }
-        var isParticle: Bool { coarsePOS == "助詞" }
+        var isParticle: Bool { coarsePOS == "助詞" || coarsePOSNormalized == "particle" }
 
         var isNominalizer: Bool {
             coarsePOS == "名詞" && fields.contains("接尾")
@@ -51,13 +60,26 @@ struct AuxiliaryChainMerger {
 
         /// Connective particle (接続助詞) is allowed inside auxiliary chains (e.g. て, ながら).
         var isConnectiveParticle: Bool {
-            isParticle && fields.contains("接続助詞")
+            if isParticle == false { return false }
+            if fields.contains("接続助詞") { return true }
+            // Coarse POS fallback from Mecab-Swift: only allow known connective particles.
+            let lemma = normalizedDictionaryForm
+            return lemma == "て" || lemma == "で"
         }
 
         /// Boundary-sensitive particles should remain separable from the preceding token.
         /// Example: 気づいて + は should not be merged into 気づいては.
         var isBoundarySensitiveParticle: Bool {
-            isParticle && (fields.contains("係助詞") || fields.contains("格助詞"))
+            if isParticle == false { return false }
+            if fields.contains("係助詞") || fields.contains("格助詞") { return true }
+
+            // Coarse POS fallback from Mecab-Swift where subcategories are unavailable.
+            switch normalizedDictionaryForm {
+            case "は", "を", "が", "に", "へ", "と", "も", "の":
+                return true
+            default:
+                return false
+            }
         }
 
         /// True when IPADic marks this as bound / non-independent.
@@ -65,7 +87,13 @@ struct AuxiliaryChainMerger {
             partOfSpeech.contains("非自立") || partOfSpeech.contains("接尾")
         }
 
-        /// Aux-like follower tokens based on metadata (not surface lists).
+        /// Coarse POS fallback:
+        /// Mecab-Swift can surface negatives like ない/なく as `unknown` with lemma `ない`.
+        var isNegativeAuxiliaryLike: Bool {
+            normalizedDictionaryForm == "ない"
+        }
+
+        /// Aux-like follower tokens based on POS metadata, with a narrow lemma fallback for coarse POS.
         /// Includes:
         /// - auxiliaries (助動詞)
         /// - connective particles (接続助詞)
@@ -74,6 +102,7 @@ struct AuxiliaryChainMerger {
             if isAuxiliary { return true }
             if isConnectiveParticle { return true }
             if (isVerb || isAdjective) && isNonIndependent { return true }
+            if isNegativeAuxiliaryLike { return true }
             return false
         }
 
@@ -128,7 +157,7 @@ struct AuxiliaryChainMerger {
         for start in starts {
             guard start >= cursor else { continue }
             guard let best = candidatesByStart[start]?.first else { continue }
-            let tok = MorphToken(range: best.range, surface: best.surface, partOfSpeech: best.partOfSpeech)
+            let tok = MorphToken(range: best.range, surface: best.surface, dictionaryForm: best.dictionaryForm, partOfSpeech: best.partOfSpeech)
             tokens.append(tok)
             cursor = NSMaxRange(best.range)
         }
@@ -181,30 +210,38 @@ struct AuxiliaryChainMerger {
             var i = 0
             while i < spans.count {
                 let start = spans[i].range.location
-                guard let tokenEnd = tokenEndByStart[start] else {
-                    out.append(spans[i])
-                    i += 1
-                    continue
-                }
 
                 func isBoundarySensitiveParticleSpanStart(_ start: Int) -> Bool {
-                    guard let candidates = candidatesByStart[start], candidates.isEmpty == false else { return false }
-                    // Consider any candidate starting here. If MeCab can interpret it as a binding particle,
-                    // do not allow authoritative merges to swallow it.
-                    return candidates.contains { a in
-                        let tok = MorphToken(range: a.range, surface: a.surface, partOfSpeech: a.partOfSpeech)
-                        return tok.isBoundarySensitiveParticle
-                    }
+                    // Only trust the selected non-overlapping token stream here.
+                    // Considering all overlapping candidates can incorrectly block merges.
+                    guard let tok = tokenByStart[start] else { return false }
+                    return tok.isBoundarySensitiveParticle
                 }
 
                 func mergedRangeEndsWithBoundarySensitiveParticle(_ range: NSRange) -> Bool {
                     // If MeCab yields a boundary-sensitive particle token whose end aligns with the end
                     // of the proposed merged range, keep it separable (e.g. ...ては, ...では).
                     let end = NSMaxRange(range)
-                    for a in mecab {
-                        guard a.range.location != NSNotFound, a.range.length > 0 else { continue }
-                        guard NSMaxRange(a.range) == end else { continue }
-                        let tok = MorphToken(range: a.range, surface: a.surface, partOfSpeech: a.partOfSpeech)
+                    for tok in tokens {
+                        guard NSMaxRange(tok.range) == end else { continue }
+                        if tok.isBoundarySensitiveParticle {
+                            return true
+                        }
+                    }
+                    return false
+                }
+
+                func spanIsBoundarySensitiveParticle(_ span: TextSpan) -> Bool {
+                    guard let candidates = candidatesByStart[span.range.location], candidates.isEmpty == false else { return false }
+                    let spanEnd = NSMaxRange(span.range)
+                    for candidate in candidates {
+                        guard NSMaxRange(candidate.range) == spanEnd else { continue }
+                        let tok = MorphToken(
+                            range: candidate.range,
+                            surface: candidate.surface,
+                            dictionaryForm: candidate.dictionaryForm,
+                            partOfSpeech: candidate.partOfSpeech
+                        )
                         if tok.isBoundarySensitiveParticle {
                             return true
                         }
@@ -213,7 +250,42 @@ struct AuxiliaryChainMerger {
                 }
 
                 // Grow a contiguous union forward and see if it matches exactly this token range.
-                var unionEnd = NSMaxRange(spans[i].range)
+                if spanIsBoundarySensitiveParticle(spans[i]) {
+                    out.append(spans[i])
+                    i += 1
+                    continue
+                }
+
+                let currentSpanEnd = NSMaxRange(spans[i].range)
+                let fallbackTokenEnd: Int? = {
+                    guard let candidates = candidatesByStart[start], candidates.isEmpty == false else { return nil }
+                    var best: Int?
+                    for candidate in candidates {
+                        let tok = MorphToken(
+                            range: candidate.range,
+                            surface: candidate.surface,
+                            dictionaryForm: candidate.dictionaryForm,
+                            partOfSpeech: candidate.partOfSpeech
+                        )
+                        if tok.isBoundarySensitiveParticle { continue }
+                        let end = NSMaxRange(candidate.range)
+                        guard end > currentSpanEnd else { continue }
+                        if let best, best >= end {
+                            continue
+                        }
+                        best = end
+                    }
+                    return best
+                }()
+
+                guard let tokenEnd = [tokenEndByStart[start], fallbackTokenEnd].compactMap({ $0 }).max(),
+                      tokenEnd > currentSpanEnd else {
+                    out.append(spans[i])
+                    i += 1
+                    continue
+                }
+
+                var unionEnd = currentSpanEnd
                 var j = i
                 var bestJ: Int? = nil
 
@@ -271,6 +343,46 @@ struct AuxiliaryChainMerger {
             var out: [TextSpan] = []
             out.reserveCapacity(spans.count)
 
+            func fallbackBoundaryPair(boundary: Int, mergedRange: NSRange, nextRange: NSRange) -> (left: MorphToken, right: MorphToken)? {
+                var leftCandidates: [MorphToken] = []
+                leftCandidates.reserveCapacity(4)
+                var rightCandidates: [MorphToken] = []
+                rightCandidates.reserveCapacity(4)
+
+                for a in mecab {
+                    guard a.range.location != NSNotFound, a.range.length > 0 else { continue }
+                    let tok = MorphToken(
+                        range: a.range,
+                        surface: a.surface,
+                        dictionaryForm: a.dictionaryForm,
+                        partOfSpeech: a.partOfSpeech
+                    )
+                    let start = tok.range.location
+                    let end = NSMaxRange(tok.range)
+                    if end == boundary, start >= mergedRange.location {
+                        leftCandidates.append(tok)
+                    }
+                    if start == boundary, end <= NSMaxRange(nextRange) {
+                        rightCandidates.append(tok)
+                    }
+                }
+
+                guard leftCandidates.isEmpty == false, rightCandidates.isEmpty == false else { return nil }
+
+                let left = leftCandidates.sorted {
+                    if $0.range.location != $1.range.location { return $0.range.location > $1.range.location }
+                    if $0.range.length != $1.range.length { return $0.range.length > $1.range.length }
+                    return $0.surface.count > $1.surface.count
+                }.first!
+
+                let right = rightCandidates.sorted {
+                    if $0.range.length != $1.range.length { return $0.range.length > $1.range.length }
+                    return $0.surface.count > $1.surface.count
+                }.first!
+
+                return (left: left, right: right)
+            }
+
             var merges = 0
             var i = 0
             while i < spans.count {
@@ -291,7 +403,7 @@ struct AuxiliaryChainMerger {
                     let boundary = NSMaxRange(mergedRange)
                     guard boundaryAllowed(boundary) else { break }
 
-                    guard let pair = boundaryPairs[boundary] else { break }
+                    guard let pair = boundaryPairs[boundary] ?? fallbackBoundaryPair(boundary: boundary, mergedRange: mergedRange, nextRange: next.range) else { break }
                     let leftTok = pair.left
                     let rightTok = pair.right
 

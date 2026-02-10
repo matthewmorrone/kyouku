@@ -49,6 +49,7 @@ extension DictionarySQLiteStore {
             "kya": "きゃ", "kyu": "きゅ", "kyo": "きょ",
             "gya": "ぎゃ", "gyu": "ぎゅ", "gyo": "ぎょ",
             "sha": "しゃ", "shu": "しゅ", "sho": "しょ",
+            "shi": "し",
             "sya": "しゃ", "syu": "しゅ", "syo": "しょ",
             "ja": "じゃ", "ju": "じゅ", "jo": "じょ",
             "jya": "じゃ", "jyu": "じゅ", "jyo": "じょ",

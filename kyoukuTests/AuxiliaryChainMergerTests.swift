@@ -52,4 +52,101 @@ final class AuxiliaryChainMergerTests: XCTestCase {
         XCTAssertEqual(blocked.spans.count, spans.count)
         XCTAssertEqual(blocked.merges, 0)
     }
+
+    func testAuthoritativeCoverageIgnoresNonSelectedParticleCandidateAtBoundary() {
+        let text = "くれなくて"
+        let nsText = text as NSString
+        let spans = [
+            TextSpan(range: NSRange(location: 0, length: 2), surface: nsText.substring(with: NSRange(location: 0, length: 2)), isLexiconMatch: false),
+            TextSpan(range: NSRange(location: 2, length: 3), surface: nsText.substring(with: NSRange(location: 2, length: 3)), isLexiconMatch: false)
+        ]
+        let mecab = [
+            mecab(NSRange(location: 0, length: 5), surface: "くれなくて", pos: "動詞"),
+            // Overlapping candidate at the boundary that should not block authoritative coverage merge.
+            mecab(NSRange(location: 2, length: 1), surface: "な", pos: "助詞,係助詞"),
+            mecab(NSRange(location: 2, length: 2), surface: "なく", pos: "助動詞"),
+            mecab(NSRange(location: 4, length: 1), surface: "て", pos: "助詞,接続助詞")
+        ]
+
+        let result = AuxiliaryChainMerger.apply(text: nsText, spans: spans, hardCuts: [], mecab: mecab)
+
+        XCTAssertEqual(result.merges, 1)
+        XCTAssertEqual(result.spans.count, 1)
+        XCTAssertEqual(result.spans.first?.surface, text)
+    }
+
+    func testMergesCoarsePosNegativeAuxChain() {
+        let text = "くれなくて"
+        let nsText = text as NSString
+        let spans = [
+            TextSpan(range: NSRange(location: 0, length: 2), surface: nsText.substring(with: NSRange(location: 0, length: 2)), isLexiconMatch: false),
+            TextSpan(range: NSRange(location: 2, length: 2), surface: nsText.substring(with: NSRange(location: 2, length: 2)), isLexiconMatch: false),
+            TextSpan(range: NSRange(location: 4, length: 1), surface: nsText.substring(with: NSRange(location: 4, length: 1)), isLexiconMatch: false)
+        ]
+        let mecab = [
+            SpanReadingAttacher.MeCabAnnotation(
+                range: NSRange(location: 0, length: 2),
+                reading: "くれ",
+                surface: "くれ",
+                dictionaryForm: "くれる",
+                partOfSpeech: "verb"
+            ),
+            SpanReadingAttacher.MeCabAnnotation(
+                range: NSRange(location: 2, length: 2),
+                reading: "なく",
+                surface: "なく",
+                dictionaryForm: "ない",
+                partOfSpeech: "unknown"
+            ),
+            SpanReadingAttacher.MeCabAnnotation(
+                range: NSRange(location: 4, length: 1),
+                reading: "て",
+                surface: "て",
+                dictionaryForm: "て",
+                partOfSpeech: "particle"
+            )
+        ]
+
+        let result = AuxiliaryChainMerger.apply(text: nsText, spans: spans, hardCuts: [], mecab: mecab)
+
+        XCTAssertEqual(result.spans.count, 1)
+        XCTAssertEqual(result.spans.first?.surface, text)
+    }
+
+    func testKeepsBoundarySensitiveParticleSeparateWithCoarsePos() {
+        let text = "気づいては"
+        let nsText = text as NSString
+        let spans = [
+            TextSpan(range: NSRange(location: 0, length: 3), surface: nsText.substring(with: NSRange(location: 0, length: 3)), isLexiconMatch: false),
+            TextSpan(range: NSRange(location: 3, length: 1), surface: nsText.substring(with: NSRange(location: 3, length: 1)), isLexiconMatch: false),
+            TextSpan(range: NSRange(location: 4, length: 1), surface: nsText.substring(with: NSRange(location: 4, length: 1)), isLexiconMatch: false)
+        ]
+        let mecab = [
+            SpanReadingAttacher.MeCabAnnotation(
+                range: NSRange(location: 0, length: 3),
+                reading: "きづい",
+                surface: "気づい",
+                dictionaryForm: "気づく",
+                partOfSpeech: "verb"
+            ),
+            SpanReadingAttacher.MeCabAnnotation(
+                range: NSRange(location: 3, length: 1),
+                reading: "て",
+                surface: "て",
+                dictionaryForm: "て",
+                partOfSpeech: "particle"
+            ),
+            SpanReadingAttacher.MeCabAnnotation(
+                range: NSRange(location: 4, length: 1),
+                reading: "は",
+                surface: "は",
+                dictionaryForm: "は",
+                partOfSpeech: "particle"
+            )
+        ]
+
+        let result = AuxiliaryChainMerger.apply(text: nsText, spans: spans, hardCuts: [], mecab: mecab)
+
+        XCTAssertEqual(result.spans.map(\.surface), ["気づいて", "は"])
+    }
 }

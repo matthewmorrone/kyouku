@@ -13,11 +13,27 @@
 		E338EC172EFFC9BA004FC07C /* StringTools in Frameworks */ = {isa = PBXBuildFile; productRef = E338EC162EFFC9BA004FC07C /* StringTools */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		E38CAFFF2EF92C43002D7A19 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E392E5222EE804A50069963A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E392E5292EE804A50069963A;
+			remoteInfo = kyouku;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		E38CAFF82EF92C43002D7A19 /* kyoukuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = kyoukuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E392E52A2EE804A50069963A /* kyouku.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = kyouku.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		E38CAFF32EF92C43002D7A19 /* kyoukuTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = kyoukuTests;
+			sourceTree = "<group>";
+		};
 		E392E52C2EE804A50069963A /* kyouku */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = kyouku;
@@ -26,6 +42,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		E38CAFF42EF92C43002D7A19 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		E392E5272EE804A50069963A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -44,6 +67,7 @@
 			isa = PBXGroup;
 			children = (
 				E392E52C2EE804A50069963A /* kyouku */,
+				E38CAFF32EF92C43002D7A19 /* kyoukuTests */,
 				E392E52B2EE804A50069963A /* Products */,
 			);
 			sourceTree = "<group>";
@@ -52,6 +76,7 @@
 			isa = PBXGroup;
 			children = (
 				E392E52A2EE804A50069963A /* kyouku.app */,
+				E38CAFF82EF92C43002D7A19 /* kyoukuTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -59,6 +84,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		E38CAFF72EF92C43002D7A19 /* kyoukuTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E38CAFFE2EF92C43002D7A19 /* Build configuration list for PBXNativeTarget "kyoukuTests" */;
+			buildPhases = (
+				E38CAFF62EF92C43002D7A19 /* Sources */,
+				E38CAFF42EF92C43002D7A19 /* Frameworks */,
+				E38CAFF52EF92C43002D7A19 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E38CB0002EF92C43002D7A19 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E38CAFF32EF92C43002D7A19 /* kyoukuTests */,
+			);
+			name = kyoukuTests;
+			packageProductDependencies = (
+			);
+			productName = kyoukuTests;
+			productReference = E38CAFF82EF92C43002D7A19 /* kyoukuTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		E392E5292EE804A50069963A /* kyouku */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = E392E5352EE804A70069963A /* Build configuration list for PBXNativeTarget "kyouku" */;
@@ -98,6 +146,10 @@
 				LastSwiftUpdateCheck = 2610;
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
+					E38CAFF72EF92C43002D7A19 = {
+						CreatedOnToolsVersion = 26.1.1;
+						TestTargetID = E392E5292EE804A50069963A;
+					};
 					E392E5292EE804A50069963A = {
 						CreatedOnToolsVersion = 26.1.1;
 					};
@@ -121,11 +173,19 @@
 			projectRoot = "";
 			targets = (
 				E392E5292EE804A50069963A /* kyouku */,
+				E38CAFF72EF92C43002D7A19 /* kyoukuTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		E38CAFF52EF92C43002D7A19 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		E392E5282EE804A50069963A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -136,6 +196,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		E38CAFF62EF92C43002D7A19 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		E392E5262EE804A50069963A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -145,7 +212,62 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		E38CB0002EF92C43002D7A19 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E392E5292EE804A50069963A /* kyouku */;
+			targetProxy = E38CAFFF2EF92C43002D7A19 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		E38CAFFC2EF92C43002D7A19 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PZ69YU2D7L;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = matthewmorrone.kyoukuTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/kyouku.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/kyouku";
+				TEST_TARGET_NAME = kyouku;
+			};
+			name = Debug;
+		};
+		E38CAFFD2EF92C43002D7A19 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PZ69YU2D7L;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = matthewmorrone.kyoukuTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/kyouku.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/kyouku";
+				TEST_TARGET_NAME = kyouku;
+			};
+			name = Release;
+		};
 		E392E5332EE804A70069963A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -350,6 +472,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		E38CAFFE2EF92C43002D7A19 /* Build configuration list for PBXNativeTarget "kyoukuTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E38CAFFC2EF92C43002D7A19 /* Debug */,
+				E38CAFFD2EF92C43002D7A19 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		E392E5252EE804A50069963A /* Build configuration list for PBXProject "kyouku" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
