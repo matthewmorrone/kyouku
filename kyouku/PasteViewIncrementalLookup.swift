@@ -310,7 +310,7 @@ extension PasteView {
             return
         }
         let savedWords = words.words
-            .filter { $0.sourceNoteID == noteID }
+            .filter { $0.sourceNoteIDs.contains(noteID) }
         let candidateSurfaces = savedWords
             .map { $0.surface.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.isEmpty == false }

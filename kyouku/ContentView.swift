@@ -9,6 +9,8 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var router: AppRouter
+    @EnvironmentObject private var notesStore: NotesStore
+    @EnvironmentObject private var store: WordsStore
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(AppColorThemeID.storageKey) private var appColorThemeRaw: String = AppColorThemeID.defaultValue.rawValue
     @AppStorage("debugPixelRulerOverlay") private var debugPixelRulerOverlay: Bool = false
@@ -57,21 +59,29 @@ struct ContentView: View {
             }
         }
 
-        if appColorTheme.id == .systemDefault {
-            ZStack {
-                tabView
-                    .environment(\.appColorTheme, appColorTheme)
-                    .appThemedRoot(themeID: appColorTheme.id)
-                overlay
+        return Group {
+            if appColorTheme.id == .systemDefault {
+                ZStack {
+                    tabView
+                        .environment(\.appColorTheme, appColorTheme)
+                        .appThemedRoot(themeID: appColorTheme.id)
+                    overlay
+                }
+            } else {
+                ZStack {
+                    tabView
+                        .tint(appColorTheme.palette.accent)
+                        .environment(\.appColorTheme, appColorTheme)
+                        .appThemedRoot(themeID: appColorTheme.id)
+                    overlay
+                }
             }
-        } else {
-            ZStack {
-                tabView
-                    .tint(appColorTheme.palette.accent)
-                    .environment(\.appColorTheme, appColorTheme)
-                    .appThemedRoot(themeID: appColorTheme.id)
-                overlay
-            }
+        }
+        .onAppear {
+            store.pruneMissingNoteAssociations(validNoteIDs: Set(notesStore.notes.map(\.id)))
+        }
+        .onChange(of: notesStore.notes.map(\.id)) { _, newIDs in
+            store.pruneMissingNoteAssociations(validNoteIDs: Set(newIDs))
         }
     }
 }

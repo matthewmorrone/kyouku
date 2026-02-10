@@ -56,6 +56,8 @@ struct PasteEditorColumnBody: View {
     let onHideKeyboard: () -> Void
     let onPaste: () -> Void
     let onSave: () -> Void
+    let onPasteContextMenuAction: (_ action: PasteControlsBar.PasteContextMenuAction) -> Void
+    let clipboardAccessEnabled: Bool
     let onToggleFurigana: (Bool) -> Void
     let onShowToast: (String) -> Void
     let onHaptic: () -> Void
@@ -121,6 +123,8 @@ struct PasteEditorColumnBody: View {
                 onHideKeyboard: onHideKeyboard,
                 onPaste: onPaste,
                 onSave: onSave,
+                onPasteContextMenuAction: onPasteContextMenuAction,
+                clipboardAccessEnabled: clipboardAccessEnabled,
                 onToggleFurigana: onToggleFurigana,
                 onShowToast: onShowToast,
                 onHaptic: onHaptic

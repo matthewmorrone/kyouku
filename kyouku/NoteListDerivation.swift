@@ -34,22 +34,24 @@ func buildNoteTitlesByID(from notes: [Note], maxDerivedTitleLength: Int = 42) ->
 func buildNoteWordCountsByID(from words: [Word]) -> [UUID: Int] {
     var counts: [UUID: Int] = [:]
     for word in words {
-        guard let noteID = word.sourceNoteID else { continue }
-        counts[noteID, default: 0] += 1
+        for noteID in word.sourceNoteIDs {
+            counts[noteID, default: 0] += 1
+        }
     }
     return counts
 }
 
 func buildSortedNoteCountEntries(
     from words: [Word],
-    titleFor noteTitle: (UUID) -> String
+    titleFor noteTitle: (UUID) -> String?
 ) -> [(noteID: UUID, title: String, count: Int)] {
     let counts = buildNoteWordCountsByID(from: words)
     guard counts.isEmpty == false else { return [] }
 
     return counts
-        .map { (noteID, count) in
-            (noteID: noteID, title: noteTitle(noteID), count: count)
+        .compactMap { (noteID, count) in
+            guard let title = noteTitle(noteID) else { return nil }
+            return (noteID: noteID, title: title, count: count)
         }
         .sorted { lhs, rhs in
             if lhs.count != rhs.count { return lhs.count > rhs.count }

@@ -184,6 +184,37 @@ struct WordDefinitionsView: View {
             }
             // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
 
+            if let saved = activeSavedWord {
+                Section("Lists") {
+                    let assigned = assignedLists(for: saved)
+
+                    if assigned.isEmpty {
+                        Text("Not in any lists")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        InlineWrapLayout(spacing: 8, lineSpacing: 8) {
+                            ForEach(assigned) { list in
+                                Text(list.name)
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 10)
+                                    .background(Color(UIColor.tertiarySystemFill), in: Capsule())
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+
+                    Button {
+                        let fallbackMeaning = saved.meaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? (definitionRows.first?.pages.first?.gloss ?? "")
+                            : saved.meaning
+                        listAssignmentTarget = ListAssignmentTarget(surface: saved.surface, kana: saved.kana, meaning: fallbackMeaning)
+                    } label: {
+                        Label("Manage lists", systemImage: "folder")
+                    }
+                }
+            }
+
             let partsForDisplay = displayTokenParts
             if partsForDisplay.count > 1 {
                 Section("Components") {
@@ -272,48 +303,16 @@ struct WordDefinitionsView: View {
                 }
             }
 
-            Section("Pitch Accent") {
-                if hasPitchAccentsTable == false {
-                    Text("Pitch accent data isn’t available in the bundled dictionary (missing pitch_accents table).")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if isLoadingPitchAccents {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Loading pitch accents…")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                    }
-                } else if pitchAccentsForTerm.isEmpty {
-                    Text("No pitch accents found for this term.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else {
-                    let morph = verbMorphologyAnalysis
-                    let lemmaHeadword = (entryDetails.first.map { primaryHeadword(for: $0) } ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let lemmaReading = (entryDetails.first?.kanaForms.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-
-                    if let morph, lemmaHeadword.isEmpty == false {
-                        Text("Shown for lemma: \(morph.lemmaDisplay). Surface-form pitch may differ; it isn’t computed here.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    let headwordForDisplay = (morph == nil ? titleText : (lemmaHeadword.isEmpty ? titleText : lemmaHeadword))
-                    let readingForDisplay = (morph == nil
-                        ? (kana ?? entryDetails.first?.kanaForms.first?.text)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        : (lemmaReading.isEmpty ? ((kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) : lemmaReading)
-                    )
-                    PitchAccentSection(
-                        headword: headwordForDisplay,
-                        reading: readingForDisplay,
-                        accents: pitchAccentsForTerm,
-                        showsTitle: false,
-                        visualScale: 3
-                    )
+            // Pitch accents render under each resolved dictionary entry (keyed by kana reading).
+            // Keep a single status section for missing/loading/empty states, and fall back to the
+            // old global display only when no entries are available.
+            if entryDetails.isEmpty {
+                Section("Pitch Accent") {
+                    pitchAccentGlobalContent
+                }
+            } else if hasPitchAccentsTable == false || isLoadingPitchAccents || pitchAccentsForTerm.isEmpty {
+                Section("Pitch Accent") {
+                    pitchAccentStatusOnlyContent
                 }
             }
 
@@ -984,6 +983,12 @@ struct WordDefinitionsView: View {
             entryDetailHeader(detail)
                 // .modifier(dbgBG(LayoutDebugColor.DBG_INDIGO__EntryHeader))
 
+            if let pitchBlock = entryPitchAccentBlock(detail) {
+                Divider()
+                    .padding(.vertical, 2)
+                pitchBlock
+            }
+
             if detail.senses.isEmpty == false {
                 Divider()
                     .padding(.vertical, 2)
@@ -1055,6 +1060,140 @@ struct WordDefinitionsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    @ViewBuilder
+    private var pitchAccentGlobalContent: some View {
+        if hasPitchAccentsTable == false {
+            Text("Pitch accent data isn’t available in the bundled dictionary (missing pitch_accents table).")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if isLoadingPitchAccents {
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Loading pitch accents…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+        } else if pitchAccentsForTerm.isEmpty {
+            Text("No pitch accents found for this term.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else {
+            let morph = verbMorphologyAnalysis
+            let lemmaHeadword = (entryDetails.first.map { primaryHeadword(for: $0) } ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let lemmaReading = (entryDetails.first?.kanaForms.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let morph, lemmaHeadword.isEmpty == false {
+                Text("Shown for lemma: \(morph.lemmaDisplay). Surface-form pitch may differ; it isn’t computed here.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            let headwordForDisplay = (morph == nil ? titleText : (lemmaHeadword.isEmpty ? titleText : lemmaHeadword))
+            let readingForDisplay = (morph == nil
+                ? (kana ?? entryDetails.first?.kanaForms.first?.text)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                : (lemmaReading.isEmpty ? ((kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) : lemmaReading)
+            )
+            PitchAccentSection(
+                headword: headwordForDisplay,
+                reading: readingForDisplay,
+                accents: pitchAccentsForTerm,
+                showsTitle: false,
+                visualScale: 3
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var pitchAccentStatusOnlyContent: some View {
+        if hasPitchAccentsTable == false {
+            Text("Pitch accent data isn’t available in the bundled dictionary (missing pitch_accents table).")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if isLoadingPitchAccents {
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Loading pitch accents…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+        } else {
+            Text("No pitch accents found for this term.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func pitchAccentsByReading() -> [String: [PitchAccent]] {
+        var out: [String: [PitchAccent]] = [:]
+        out.reserveCapacity(4)
+
+        func normalize(_ value: String?) -> String {
+            (value ?? "")
+                .replacingOccurrences(of: "◦", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        for row in pitchAccentsForTerm {
+            let reading = normalize(row.reading.isEmpty ? row.readingMarked : row.reading)
+            guard reading.isEmpty == false else { continue }
+            out[reading, default: []].append(row)
+        }
+
+        // Keep the per-reading display stable.
+        for key in out.keys {
+            out[key]?.sort {
+                if $0.accent != $1.accent { return $0.accent < $1.accent }
+                if $0.morae != $1.morae { return $0.morae < $1.morae }
+                return ($0.kind ?? "") < ($1.kind ?? "")
+            }
+        }
+
+        return out
+    }
+
+    private func entryPitchAccentBlock(_ detail: DictionaryEntryDetail) -> AnyView? {
+        guard hasPitchAccentsTable == true else { return nil }
+        guard isLoadingPitchAccents == false else { return nil }
+        guard pitchAccentsForTerm.isEmpty == false else { return nil }
+
+        let headword = primaryHeadword(for: detail).trimmingCharacters(in: .whitespacesAndNewlines)
+        let readings = orderedUniqueForms(from: detail.kanaForms)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+
+        guard readings.isEmpty == false else { return nil }
+        let grouped = pitchAccentsByReading()
+
+        let blocks: [(reading: String, accents: [PitchAccent])] = readings.compactMap { reading in
+            guard let accents = grouped[reading], accents.isEmpty == false else { return nil }
+            return (reading, accents)
+        }
+        guard blocks.isEmpty == false else { return nil }
+
+        return AnyView(
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Pitch Accent")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, item in
+                    PitchAccentSection(
+                        headword: headword,
+                        reading: item.reading,
+                        accents: item.accents,
+                        showsTitle: false,
+                        visualScale: 1.6
+                    )
+                }
+            }
+        )
     }
 
     private func senseView(_ sense: DictionaryEntrySense, index: Int, showIndex: Bool) -> some View {
@@ -2569,7 +2708,9 @@ struct WordDefinitionsView: View {
         // Use embedding distance rather than neighbors() membership.
         // This is more stable for cases like “miss” vs “missed” and “old” (from gloss parentheses).
         let distanceThreshold: Double = 0.52
-        let maxHighlights = 2
+        // Pick a single best match (plus optional adjacent negation) to represent the
+        // most likely English equivalent in the translation.
+        let maxHighlights = 1
 
         let negationTokens: Set<String> = [
             "not", "no", "never", "dont", "don't", "cant", "can't", "cannot",
@@ -3055,6 +3196,11 @@ struct WordDefinitionsView: View {
         let k = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKana = (k?.isEmpty == false) ? k : nil
         guard s.isEmpty == false else { return false }
+        if let sourceNoteID {
+            return store.words.contains {
+                $0.surface == s && $0.kana == normalizedKana && $0.sourceNoteIDs.contains(sourceNoteID)
+            }
+        }
         return store.words.contains { $0.surface == s && $0.kana == normalizedKana }
     }
 
@@ -3086,7 +3232,7 @@ struct WordDefinitionsView: View {
         let m = meaning.trimmingCharacters(in: .whitespacesAndNewlines)
         guard s.isEmpty == false, m.isEmpty == false else { return nil }
 
-        store.add(surface: s, kana: normalizedKana, meaning: m)
+        store.add(surface: s, kana: normalizedKana, meaning: m, sourceNoteID: sourceNoteID)
         return savedWordID(surface: s, kana: normalizedKana)
     }
 
@@ -3104,9 +3250,37 @@ struct WordDefinitionsView: View {
         )
 
         if matchingIDs.isEmpty {
-            store.add(surface: s, kana: normalizedKana, meaning: m)
+            store.add(surface: s, kana: normalizedKana, meaning: m, sourceNoteID: sourceNoteID)
+            return
+        }
+
+        if let sourceNoteID {
+            let isAssociatedWithThisNote = store.words.contains {
+                $0.surface == s && $0.kana == normalizedKana && $0.sourceNoteIDs.contains(sourceNoteID)
+            }
+            if isAssociatedWithThisNote {
+                store.removeWords(ids: matchingIDs, fromNoteID: sourceNoteID)
+            } else {
+                store.add(surface: s, kana: normalizedKana, meaning: m, sourceNoteID: sourceNoteID)
+            }
         } else {
             store.delete(ids: matchingIDs)
+        }
+    }
+
+    private var activeSavedWord: Word? {
+        let s = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let k = kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedKana = (k?.isEmpty == false) ? k : nil
+        guard s.isEmpty == false else { return nil }
+        return store.words.first(where: { $0.surface == s && $0.kana == normalizedKana })
+    }
+
+    private func assignedLists(for word: Word) -> [WordList] {
+        guard word.listIDs.isEmpty == false else { return [] }
+        let out = store.lists.filter { word.listIDs.contains($0.id) }
+        return out.sorted { lhs, rhs in
+            lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
 

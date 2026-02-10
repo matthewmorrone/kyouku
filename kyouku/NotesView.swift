@@ -16,6 +16,7 @@ struct NotesView: View {
     @EnvironmentObject var tokenBoundaries: TokenBoundariesStore
 
     @AppStorage("notesPreviewLineCount") private var notesPreviewLineCount: Int = 3
+    @AppStorage("clipboardAccessEnabled") private var clipboardAccessEnabled: Bool = true
 
     @State private var pendingDeleteOffsets: IndexSet? = nil
     @State private var pendingDeleteNoteTitle: String? = nil
@@ -64,10 +65,15 @@ struct NotesView: View {
                         }
                         .contextMenu {
                             Button {
+                                guard clipboardAccessEnabled else {
+                                    showToast("Clipboard access is disabled in Settings")
+                                    return
+                                }
                                 UIPasteboard.general.string = note.text
                             } label: {
                                 Label("Copy", systemImage: "doc.on.doc")
                             }
+                            .disabled(clipboardAccessEnabled == false)
                             Button {
                                 // Duplicate note: insert a copy at the top and save
                                 let copy = Note(id: UUID(), title: note.title, text: note.text, createdAt: Date())
@@ -103,7 +109,7 @@ struct NotesView: View {
                                         ? note.title
                                         : "Untitled"
                                     let noteID = notesStore.notes[index].id
-                                    pendingDeleteHasAssociatedWords = store.words.contains { $0.sourceNoteID == noteID }
+                                    pendingDeleteHasAssociatedWords = store.words.contains { $0.sourceNoteIDs.contains(noteID) }
                                     deleteAssociatedWords = false
                                     showDeleteAlert = true
                                 }
@@ -121,7 +127,7 @@ struct NotesView: View {
                         for index in offsets {
                             guard index < notesStore.notes.count else { continue }
                             let noteID = notesStore.notes[index].id
-                            if store.words.contains(where: { $0.sourceNoteID == noteID }) {
+                            if store.words.contains(where: { $0.sourceNoteIDs.contains(noteID) }) {
                                 hasAssociatedWords = true
                                 break
                             }

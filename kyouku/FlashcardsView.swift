@@ -17,6 +17,10 @@ struct FlashcardsView: View {
     @State private var sessionCorrect: Int = 0
     @State private var sessionAgain: Int = 0
 
+    // Progress UI: keep a stable denominator for the session.
+    @State private var sessionTotalCount: Int = 0
+    @State private var reviewedCount: Int = 0
+
     @State private var showEndSessionConfirm: Bool = false
 
     private struct EditingWord: Identifiable {
@@ -130,7 +134,7 @@ struct FlashcardsView: View {
     
     private var header: some View {
         HStack {
-            Text("\(index + 1) / \(session.count)")
+            Text("\(progressNumerator) / \(sessionTotalCount)")
                 .font(.subheadline)
                 .foregroundStyle(Color.appTextSecondary)
             Spacer()
@@ -156,6 +160,7 @@ struct FlashcardsView: View {
                     word: session[idx],
                     isTop: isTop,
                     direction: direction,
+                    preferredNoteID: (scope == .fromNote ? selectedNoteID : nil),
                     showBack: $showBack,
                     dragOffset: $dragOffset,
                     isSwipingOut: $isSwipingOut,
@@ -174,6 +179,7 @@ struct FlashcardsView: View {
                 HStack { Image(systemName: "arrow.uturn.left.circle"); Text("Again") }
             }
             .buttonStyle(.bordered)
+            .tint(Color(UIColor.systemRed))
 
             Spacer()
 
@@ -184,6 +190,7 @@ struct FlashcardsView: View {
                 HStack { Image(systemName: "pencil"); Text("Edit") }
             }
             .buttonStyle(.bordered)
+            .tint(Color(UIColor.label))
 
             Spacer()
 
@@ -191,7 +198,14 @@ struct FlashcardsView: View {
                 HStack { Image(systemName: "checkmark.circle.fill"); Text("Know") }
             }
             .buttonStyle(.borderedProminent)
+            .tint(Color(UIColor.systemGreen))
         }
+    }
+
+    private var progressNumerator: Int {
+        guard sessionTotalCount > 0 else { return 0 }
+        // Display the next "card number" (1-indexed), not the mutable session.count.
+        return reviewedCount + 1
     }
 
     private var emptySavedState: some View {
@@ -336,9 +350,11 @@ struct FlashcardsView: View {
 
         sessionCorrect = 0
         sessionAgain = 0
+        reviewedCount = 0
 
         session = sessionSource
         if shuffled { session.shuffle() }
+        sessionTotalCount = session.count
         index = 0
         showBack = false
         dragOffset = .zero
@@ -347,6 +363,7 @@ struct FlashcardsView: View {
     private func again() {
         guard !session.isEmpty else { return }
         sessionAgain += 1
+        reviewedCount += 1
         ReviewPersistence.incrementAgain()
         let w = session[index]
         ReviewPersistence.recordAgain(for: w.id)
@@ -362,6 +379,7 @@ struct FlashcardsView: View {
     private func know() {
         guard !session.isEmpty else { return }
         sessionCorrect += 1
+        reviewedCount += 1
         ReviewPersistence.incrementCorrect()
         ReviewPersistence.recordCorrect(for: session[index].id)
         ReviewPersistence.markRight(session[index].id)
@@ -387,6 +405,8 @@ struct FlashcardsView: View {
         swipeDirection = 0
         sessionCorrect = 0
         sessionAgain = 0
+        sessionTotalCount = 0
+        reviewedCount = 0
     }
 
     private func wordsMatchingSelection() -> [Word] {
@@ -401,7 +421,7 @@ struct FlashcardsView: View {
             base = base.filter { wrong.contains($0.id) }
         case .fromNote:
             if let id = selectedNoteID {
-                base = base.filter { $0.sourceNoteID == id }
+                base = base.filter { $0.sourceNoteIDs.contains(id) }
             }
         }
         return base
@@ -412,6 +432,7 @@ private struct FlashcardCard: View {
     let word: Word
     let isTop: Bool
     let direction: FlashcardsView.CardDirection
+    let preferredNoteID: UUID?
     @Binding var showBack: Bool
     @Binding var dragOffset: CGSize
     @Binding var isSwipingOut: Bool
@@ -635,7 +656,8 @@ private struct FlashcardCard: View {
         let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKana = (kana?.isEmpty == false) ? kana : nil
 
-        guard let noteID = word.sourceNoteID else {
+        let candidateNoteID = preferredNoteID ?? word.sourceNoteIDs.first
+        guard let noteID = candidateNoteID else {
             return surface
         }
         guard let noteText = notes.notes.first(where: { $0.id == noteID })?.text, noteText.isEmpty == false else {
@@ -800,19 +822,22 @@ private struct FlashcardCard: View {
 
     private func swipeOut(direction dir: Int, completion: @escaping () -> Void) {
         let offX: CGFloat = CGFloat(dir) * 720
-        withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.9)) {
-            isSwipingOut = true
-            swipeDirection = dir
+        // Avoid spring rebounds here; a committed swipe should feel like a clean
+        // transition to the next card.
+        isSwipingOut = true
+        swipeDirection = dir
+        withAnimation(.easeOut(duration: 0.16)) {
             dragOffset = CGSize(width: offX, height: dragOffset.height * 0.2)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
             completion()
             showBack = false
             dragOffset = .zero
-            withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86)) {
-                isSwipingOut = false
-                swipeDirection = 0
-            }
+
+            // Reset without animation so the next card doesn't "bounce".
+            isSwipingOut = false
+            swipeDirection = 0
         }
     }
 

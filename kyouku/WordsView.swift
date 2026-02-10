@@ -359,7 +359,7 @@ struct WordsView: View {
                         contextSentence: nil,
                         lemmaCandidates: [],
                         tokenPartOfSpeech: nil,
-                        sourceNoteID: word.sourceNoteID,
+                        sourceNoteID: word.sourceNoteIDs.sorted { $0.uuidString < $1.uuidString }.first,
                         tokenParts: []
                     )
                 } else {
@@ -542,7 +542,7 @@ struct WordsView: View {
                             contextSentence: nil,
                             lemmaCandidates: [],
                             tokenPartOfSpeech: nil,
-                            sourceNoteID: word.sourceNoteID,
+                            sourceNoteID: word.sourceNoteIDs.sorted { $0.uuidString < $1.uuidString }.first,
                             tokenParts: []
                         )
                     } label: {
@@ -708,7 +708,7 @@ struct WordsView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .accessibilityLabel("Source: \(sourceLabel)")
-            } else if word.sourceNoteID != nil {
+            } else if word.sourceNoteIDs.isEmpty == false {
                 Image(systemName: "note.text")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -781,7 +781,7 @@ struct WordsView: View {
         case .list(let listID):
             filtered = base.filter { $0.listIDs.contains(listID) }
         case .note(let noteID):
-            filtered = base.filter { $0.sourceNoteID == noteID }
+            filtered = base.filter { $0.sourceNoteIDs.contains(noteID) }
         }
         cachedSortedWords = filtered.sorted { $0.createdAt > $1.createdAt }
     }
@@ -789,9 +789,22 @@ struct WordsView: View {
     private func entrySourceLabel(for word: Word) -> String? {
         var components: [String] = []
 
-        if let noteID = word.sourceNoteID {
-            let title = title(forNoteID: noteID)
-            components.append(title)
+        if word.sourceNoteIDs.isEmpty == false {
+            let sorted = word.sourceNoteIDs
+                .filter { noteTitlesByID[$0] != nil }
+                .sorted { $0.uuidString < $1.uuidString }
+            guard sorted.isEmpty == false else {
+                // If we somehow have stale IDs, just omit the note label.
+                // (WordsStore also prunes these on notes changes.)
+                return components.isEmpty ? nil : components.joined(separator: " · ")
+            }
+            let first = sorted[0]
+            let title = title(forNoteID: first) ?? ""
+            if sorted.count == 1 {
+                components.append(title)
+            } else {
+                components.append("\(title) +\(sorted.count - 1)")
+            }
         }
 
         let listIDs = word.listIDs
@@ -819,8 +832,8 @@ struct WordsView: View {
         listNamesByID[id]
     }
 
-    private func title(forNoteID id: UUID) -> String {
-        noteTitlesByID[id] ?? "Deleted Note"
+    private func title(forNoteID id: UUID) -> String? {
+        noteTitlesByID[id]
     }
 
     private struct NoteListItem: Identifiable, Hashable {
@@ -919,8 +932,8 @@ private struct WordListsBrowserView: View {
         cachedListCounts = counts
     }
 
-    private func title(forNoteID id: UUID) -> String {
-        noteTitlesByID[id] ?? "Deleted Note"
+    private func title(forNoteID id: UUID) -> String? {
+        noteTitlesByID[id]
     }
 
     var body: some View {
@@ -1113,7 +1126,7 @@ private struct WordListsBrowserView: View {
         let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKana = (kana?.isEmpty == false) ? kana : nil
 
-        guard let noteID = word.sourceNoteID else {
+        guard let noteID = word.sourceNoteIDs.sorted(by: { $0.uuidString < $1.uuidString }).first else {
             return surface
         }
         guard let noteText = notesStore.notes.first(where: { $0.id == noteID })?.text, noteText.isEmpty == false else {

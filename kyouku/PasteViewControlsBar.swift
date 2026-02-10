@@ -2,6 +2,15 @@ import SwiftUI
 import UIKit
 
 struct PasteControlsBar: View {
+    enum PasteContextMenuAction {
+        case cut
+        case copy
+        case pasteInsert
+        case pasteReplaceAll
+        case selectAll
+        case newNoteFromClipboard
+    }
+
     @Binding var isEditing: Bool
     @Binding var showFurigana: Bool
 
@@ -13,6 +22,9 @@ struct PasteControlsBar: View {
     let onHideKeyboard: () -> Void
     let onPaste: () -> Void
     let onSave: () -> Void
+
+    let onPasteContextMenuAction: (_ action: PasteContextMenuAction) -> Void
+    let clipboardAccessEnabled: Bool
 
     let onToggleFurigana: (_ enabled: Bool) -> Void
     let onShowToast: (_ message: String) -> Void
@@ -38,6 +50,48 @@ struct PasteControlsBar: View {
                         .font(.title2)
                 }
                 .accessibilityLabel("Paste")
+                .contextMenu {
+                    Button {
+                        onPasteContextMenuAction(.cut)
+                    } label: {
+                        Label("Cut", systemImage: "scissors")
+                    }
+                    .disabled(clipboardAccessEnabled == false)
+
+                    Button {
+                        onPasteContextMenuAction(.copy)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    .disabled(clipboardAccessEnabled == false)
+
+                    Button {
+                        onPasteContextMenuAction(.pasteInsert)
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+                    .disabled(clipboardAccessEnabled == false)
+
+                    Button {
+                        onPasteContextMenuAction(.pasteReplaceAll)
+                    } label: {
+                        Label("Paste (Replace)", systemImage: "arrow.down.doc")
+                    }
+                    .disabled(clipboardAccessEnabled == false)
+
+                    Button {
+                        onPasteContextMenuAction(.selectAll)
+                    } label: {
+                        Label("Select All", systemImage: "selection.pin.in.out")
+                    }
+
+                    Button {
+                        onPasteContextMenuAction(.newNoteFromClipboard)
+                    } label: {
+                        Label("New Note from Clipboard", systemImage: "square.and.pencil")
+                    }
+                    .disabled(clipboardAccessEnabled == false)
+                }
             }
 
             ControlCell {

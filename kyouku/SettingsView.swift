@@ -33,6 +33,8 @@ struct SettingsView: View {
 
     @AppStorage("notesPreviewLineCount") private var notesPreviewLineCount: Int = 3
 
+    @AppStorage("clipboardAccessEnabled") private var clipboardAccessEnabled: Bool = true
+
     @AppStorage(WordOfTheDayScheduler.enabledKey) private var wotdEnabled: Bool = false
     @AppStorage(WordOfTheDayScheduler.hourKey) private var wotdHour: Int = 9
     @AppStorage(WordOfTheDayScheduler.minuteKey) private var wotdMinute: Int = 0
@@ -171,6 +173,7 @@ struct SettingsView: View {
                 furiganaBehaviorSection
                 tokenHighlightSection
                 notesSection
+                clipboardSection
                 extractFilterSection
                 wordOfTheDaySection
                 debugSection
@@ -430,6 +433,21 @@ struct SettingsView: View {
                 ForEach(0...4, id: \.self) { count in
                     Text("\(count)").tag(count)
                 }
+            }
+        }
+    }
+
+    private var clipboardSection: some View {
+        Section("Clipboard") {
+            Toggle("Allow clipboard access", isOn: $clipboardAccessEnabled)
+
+            Text("Used by Paste actions (including “New Note from Clipboard”). iOS may still ask for paste permission the first time you use it.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Button("Open iOS Settings") {
+                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                UIApplication.shared.open(url)
             }
         }
     }

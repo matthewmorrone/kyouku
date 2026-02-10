@@ -121,6 +121,8 @@ struct PasteView: View {
     @AppStorage("readingWrapLines") private var wrapLines: Bool = false
     @AppStorage("readingAlternateTokenColors") private var alternateTokenColors: Bool = false
     @AppStorage("readingHighlightUnknownTokens") private var highlightUnknownTokens: Bool = false
+
+    @AppStorage("clipboardAccessEnabled") private var clipboardAccessEnabled: Bool = true
     // One-time migration to disable token overlay highlighting that can hurt responsiveness.
     // Users can re-enable manually in the furigana options menu if desired.
     @AppStorage("paste.migrated.disableTokenOverlayHighlighting.v1") private var didDisableTokenOverlayHighlightingV1: Bool = false
@@ -836,6 +838,10 @@ struct PasteView: View {
             onSave: {
                 saveNote()
             },
+            onPasteContextMenuAction: { action in
+                handlePasteContextMenuAction(action)
+            },
+            clipboardAccessEnabled: clipboardAccessEnabled,
             onToggleFurigana: { enabled in
                 if enabled {
                     // Manual toggle should not force a fresh segmentation pass; reuse
@@ -883,6 +889,42 @@ struct PasteView: View {
         let generator = UIImpactFeedbackGenerator(style: .light)
         generator.prepare()
         generator.impactOccurred()
+    }
+
+    private func ensureClipboardAccessEnabledOrToast() -> Bool {
+        guard clipboardAccessEnabled else {
+            showToast("Clipboard access is disabled in Settings")
+            return false
+        }
+        return true
+    }
+
+    private func sendStandardEditAction(_ selector: Selector) {
+        // Best-effort: enable editing so the text view can accept responder actions.
+        setEditing(true)
+        DispatchQueue.main.async {
+            UIApplication.shared.sendAction(selector, to: nil, from: nil, for: nil)
+        }
+    }
+
+    private func handlePasteContextMenuAction(_ action: PasteControlsBar.PasteContextMenuAction) {
+        switch action {
+        case .cut:
+            guard ensureClipboardAccessEnabledOrToast() else { return }
+            sendStandardEditAction(#selector(UIResponderStandardEditActions.cut(_:)))
+        case .copy:
+            guard ensureClipboardAccessEnabledOrToast() else { return }
+            sendStandardEditAction(#selector(UIResponderStandardEditActions.copy(_:)))
+        case .pasteInsert:
+            guard ensureClipboardAccessEnabledOrToast() else { return }
+            sendStandardEditAction(#selector(UIResponderStandardEditActions.paste(_:)))
+        case .pasteReplaceAll:
+            pasteFromClipboard()
+        case .selectAll:
+            sendStandardEditAction(#selector(UIResponderStandardEditActions.selectAll(_:)))
+        case .newNoteFromClipboard:
+            newNoteFromClipboard()
+        }
     }
 
     private var tokenListItems: [TokenListItem] {
@@ -1054,9 +1096,30 @@ struct PasteView: View {
     }
 
     private func pasteFromClipboard() {
+        guard ensureClipboardAccessEnabledOrToast() else { return }
         if let str = UIPasteboard.general.string {
             inputText = str
+        } else {
+            showToast("Clipboard is empty")
         }
+    }
+
+    private func newNoteFromClipboard() {
+        guard ensureClipboardAccessEnabledOrToast() else { return }
+        guard let str = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), str.isEmpty == false else {
+            showToast("Clipboard is empty")
+            return
+        }
+
+        let resolvedTitle = inferredTitle(from: str)
+        notes.addNote(title: resolvedTitle, text: str)
+        if let newest = notes.notes.first {
+            router.noteToOpen = newest
+            router.pasteShouldBeginEditing = true
+            router.selectedTab = .paste
+        }
+        PasteBufferStore.save(str)
+        showToast("Pasted to new note")
     }
 
     private func saveNote() {
@@ -1609,7 +1672,7 @@ struct PasteView: View {
         let targetKana = kanaFoldToHiragana(kana)
         let preferredKana = kanaFoldToHiragana(preferredReading)
         return words.words.contains { word in
-            guard word.sourceNoteID == noteID else { return false }
+            guard word.isAssociated(with: noteID) else { return false }
             let savedSurface = kanaFoldToHiragana(word.surface)
             let savedDictionarySurface = kanaFoldToHiragana(word.dictionarySurface)
             // New shape: surface matches note token; legacy shape: surface matches dictionary headword.
@@ -1637,7 +1700,7 @@ struct PasteView: View {
         let preferredKana = kanaFoldToHiragana(preferredReading)
 
         func matchesSavedKey(_ word: Word) -> Bool {
-            guard word.sourceNoteID == noteID else { return false }
+            guard word.isAssociated(with: noteID) else { return false }
             let savedSurface = kanaFoldToHiragana(word.surface)
             let savedDictionarySurface = kanaFoldToHiragana(word.dictionarySurface)
             guard savedSurface == tokenSurface || savedSurface == dictionarySurface || savedDictionarySurface == dictionarySurface else { return false }
@@ -1663,7 +1726,11 @@ struct PasteView: View {
             // UIs can reliably recognize the saved state.
             words.add(surface: s, dictionarySurface: resolvedDictionarySurface, kana: resolvedKana, meaning: meaning, note: nil, sourceNoteID: noteID)
         } else {
-            words.delete(ids: matchingIDs)
+            if let noteID {
+                words.removeWords(ids: matchingIDs, fromNoteID: noteID)
+            } else {
+                words.delete(ids: matchingIDs)
+            }
         }
     }
 
@@ -1947,7 +2014,7 @@ struct PasteView: View {
         let noteID = currentNote?.id
 
         func matchesSavedKey(_ word: Word) -> Bool {
-            guard word.sourceNoteID == noteID else { return false }
+            guard word.isAssociated(with: noteID) else { return false }
             guard kanaFoldToHiragana(word.surface) == kanaFoldToHiragana(surface) else { return false }
             // If we don't know the token's reading (common when we haven't attached readings
             // for this token), treat reading as a wildcard so the star can still toggle.
@@ -1962,7 +2029,11 @@ struct PasteView: View {
             let matches = words.words.filter(matchesSavedKey)
             let ids = Set(matches.map { $0.id })
             if ids.isEmpty == false {
-                words.delete(ids: ids)
+                if let noteID {
+                    words.removeWords(ids: ids, fromNoteID: noteID)
+                } else {
+                    words.delete(ids: ids)
+                }
             }
             return
         }
@@ -2209,7 +2280,7 @@ struct PasteView: View {
         let targetSurface = kanaFoldToHiragana(surface)
         let targetKana = kanaFoldToHiragana(reading)
         return words.words.contains { word in
-            guard word.sourceNoteID == noteID else { return false }
+            guard word.isAssociated(with: noteID) else { return false }
             guard kanaFoldToHiragana(word.surface) == targetSurface else { return false }
             // If we don't know the reading for this token, match on surface alone.
             // This keeps the Extract Words star button reliable (no "can't bookmark" feeling).
@@ -3207,8 +3278,12 @@ struct PasteView: View {
         Task {
             let existingKeys: Set<String> = await MainActor.run {
                 Set(
-                    words.words
-                        .filter { $0.sourceNoteID == noteID }
+                    {
+                        if let noteID {
+                            return words.words.filter { $0.sourceNoteIDs.contains(noteID) }
+                        }
+                        return words.words
+                    }()
                         .map { w in
                             let s = w.surface.trimmingCharacters(in: .whitespacesAndNewlines)
                             let k = w.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
