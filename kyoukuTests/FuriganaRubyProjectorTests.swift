@@ -78,6 +78,29 @@ final class FuriganaRubyProjectorTests: XCTestCase {
         XCTAssertEqual(segments.first?.commonKanaRemoved, "なく")
     }
 
+
+    func testIdeographicIterationMarkIsTreatedAsKanjiCluster() {
+        // Regression: words like 時々 should project one ruby span over both glyphs.
+        let spanText = "時々"
+        let reading = "ときどき"
+        let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: NSRange(location: 0, length: (spanText as NSString).length))
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments.first?.range, NSRange(location: 0, length: 2))
+        XCTAssertEqual(segments.first?.reading, "ときどき")
+    }
+
+
+    func testKatakanaAfterHiraganaIsNotTreatedAsOkurigana() {
+        // Regression: katakana after hiragana should not be stripped as okurigana.
+        let spanText = "切なトキメキ"
+        let reading = "せつなときめき"
+        let segments = FuriganaRubyProjector.project(spanText: spanText, reading: reading, spanRange: NSRange(location: 0, length: (spanText as NSString).length))
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments.first?.range, NSRange(location: 0, length: 1))
+        XCTAssertEqual(segments.first?.reading, "せつ")
+        XCTAssertEqual(segments.first?.commonKanaRemoved, "な")
+    }
+
     func testWatashiTachiProjectsWatashiOverWatashiKanji() {
         // Regression: "私たち" should not split "わたし" at the internal "た".
         let spanText = "私たち"

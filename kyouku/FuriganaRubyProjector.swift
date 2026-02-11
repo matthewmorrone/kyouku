@@ -14,6 +14,7 @@ enum FuriganaRubyProjector {
         let utf16Length: Int
         let isKanji: Bool
         let isKana: Bool
+        let isHiragana: Bool
     }
 
     private struct KanjiCluster {
@@ -123,7 +124,8 @@ enum FuriganaRubyProjector {
                     utf16Location: range.location,
                     utf16Length: range.length,
                     isKanji: containsKanji(character),
-                    isKana: isKana(character)
+                    isKana: isKana(character),
+                    isHiragana: isHiragana(character)
                 ))
             }
             index += range.length
@@ -160,7 +162,10 @@ enum FuriganaRubyProjector {
     private static func nextKanaSequence(startingAt index: Int, chars: [CharInfo]) -> [Character] {
         var sequence: [Character] = []
         var idx = index
-        while idx < chars.count, chars[idx].isKana {
+        // Okurigana is hiragana. Do not consume katakana here: katakana following a
+        // kanji is typically a separate lexical unit and should not be stripped as
+        // common trailing kana from ruby.
+        while idx < chars.count, chars[idx].isHiragana {
             sequence.append(chars[idx].character)
             idx += 1
         }
@@ -258,11 +263,34 @@ enum FuriganaRubyProjector {
     }
 
     private static func containsKanji(_ character: Character) -> Bool {
-        character.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+        character.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3400...0x4DBF, // CJK Ext A
+                 0x4E00...0x9FFF, // CJK Unified
+                 0xF900...0xFAFF, // CJK Compatibility
+                 0x20000...0x2A6DF, // CJK Ext B
+                 0x2A700...0x2B73F, // CJK Ext C
+                 0x2B740...0x2B81F, // CJK Ext D
+                 0x2B820...0x2CEAF, // CJK Ext E
+                 0x2CEB0...0x2EBEF, // CJK Ext F
+                 0x30000...0x3134F: // CJK Ext G
+                return true
+            case 0x3005, // 々 ideographic iteration mark
+                 0x3006, // 〆 ideographic closing mark
+                 0x30F6: // ヶ small ke (common in Japanese place names)
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private static func isKana(_ character: Character) -> Bool {
         character.unicodeScalars.allSatisfy { kanaCharacterSet.contains($0) }
+    }
+
+    private static func isHiragana(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { (0x3040...0x309F).contains($0.value) }
     }
 
     private static func kanaSuffixTrimCount(in chunk: String, nextKana: [Character]) -> Int {
