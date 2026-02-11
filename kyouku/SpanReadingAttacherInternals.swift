@@ -368,7 +368,10 @@ extension SpanReadingAttacher {
         guard surface.isEmpty == false else { return "" }
         var scalars: [UnicodeScalar] = []
         for scalar in surface.unicodeScalars.reversed() {
-            if isKana(scalar) {
+            // Okurigana is hiragana. Do not consume katakana here: katakana following a
+            // kanji is typically a separate lexical unit and should not be treated as
+            // okurigana for removal.
+            if isHiragana(scalar) {
                 scalars.append(scalar)
             } else {
                 break
@@ -414,6 +417,10 @@ extension SpanReadingAttacher {
 
     private static func isKana(_ scalar: UnicodeScalar) -> Bool {
         (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
+    }
+
+    private static func isHiragana(_ scalar: UnicodeScalar) -> Bool {
+        (0x3040...0x309F).contains(scalar.value)
     }
 
     private static func appendLemmaCandidate(_ candidate: String?, to list: inout [String]) {
