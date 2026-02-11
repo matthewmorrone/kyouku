@@ -51,6 +51,7 @@ struct SettingsView: View {
     @AppStorage("debugHighlightAllDictionaryEntries") private var debugHighlightAllDictionaryEntries: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
     @AppStorage("debugPixelRulerOverlay") private var debugPixelRulerOverlay: Bool = false
+    @AppStorage("debugPasteDragToMoveWords") private var debugPasteDragToMoveWords: Bool = false
 
     @State private var wotdAuthStatus: UNAuthorizationStatus = .notDetermined
     @State private var wotdPendingCount: Int = 0
@@ -513,6 +514,7 @@ struct SettingsView: View {
             Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
             Toggle("Pipeline trace (token lists)", isOn: $debugPipelineTrace)
             Toggle("Highlight all dictionary entries (overlaps)", isOn: $debugHighlightAllDictionaryEntries)
+            Toggle("Paste: drag words to move them", isOn: $debugPasteDragToMoveWords)
             Toggle("View metrics", isOn: $debugViewMetricsHUD)
             Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
             Toggle("Pixel ruler overlay", isOn: $debugPixelRulerOverlay)

@@ -142,6 +142,7 @@ struct PasteView: View {
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
     @AppStorage("debugHighlightAllDictionaryEntries") private var debugHighlightAllDictionaryEntries: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
+    @AppStorage("debugPasteDragToMoveWords") private var debugPasteDragToMoveWords: Bool = false
 
     private var scratchNoteID: UUID {
         if let cached = UUID(uuidString: scratchNoteIDRaw) {
@@ -753,16 +754,16 @@ struct PasteView: View {
             return tokenBoundaries.interTokenSpacing(for: noteID, text: inputText)
         }()
 
-        let tokenSpacingValueProvider: ((Int) -> CGFloat)? = {
+        let tokenSpacingValueProvider: ((Int) -> CGFloat)? = debugPasteDragToMoveWords ? {
             guard let noteID = currentNote?.id else { return 0 }
             return tokenBoundaries.interTokenSpacingWidth(noteID: noteID, boundaryUTF16Index: $0)
-        }
+        } : nil
 
-        let onTokenSpacingChanged: ((Int, CGFloat, Bool) -> Void)? = { boundary, width, _ in
+        let onTokenSpacingChanged: ((Int, CGFloat, Bool) -> Void)? = debugPasteDragToMoveWords ? { boundary, width, _ in
             guard let noteID = currentNote?.id else { return }
             tokenBoundaries.setInterTokenSpacing(noteID: noteID, boundaryUTF16Index: boundary, width: width, text: inputText)
             // Spacing is display-only; no need to resync notes or spans.
-        }
+        } : nil
 
         return PasteEditorColumnBody(
             text: $inputText,
@@ -2351,7 +2352,6 @@ struct PasteView: View {
         let currentAmendedSpans = tokenBoundaries.spans(for: activeNoteID, text: currentText)
         let currentHardCuts = tokenBoundaries.hardCuts(for: activeNoteID, text: currentText)
         let currentHeadwordSpacingPadding = readingHeadwordSpacingPadding
-        let currentSelectedRange = tokenSelection?.range
 
         let knownWordSurfaceKeys: Set<String> = {
             let mode = FuriganaKnownWordMode(rawValue: knownWordFuriganaModeRaw) ?? .off
@@ -2402,8 +2402,7 @@ struct PasteView: View {
             readingOverrides: currentOverrides,
             context: "PasteView",
             padHeadwordSpacing: currentHeadwordSpacingPadding,
-            knownWordSurfaceKeys: knownWordSurfaceKeys,
-            selectedRange: currentSelectedRange
+            knownWordSurfaceKeys: knownWordSurfaceKeys
         )
         let service = furiganaPipeline
         return {

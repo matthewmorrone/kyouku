@@ -73,11 +73,6 @@ struct FuriganaPipelineService {
         /// Kana-folded “known word” surfaces used for adaptive ruby suppression.
         /// When non-empty, ruby annotations are removed for semantic spans that match.
         let knownWordSurfaceKeys: Set<String>
-
-        /// Optional active selection range.
-        /// When present, known-word ruby suppression is skipped for semantic spans that
-        /// intersect this range so the focused token keeps visible furigana.
-        let selectedRange: NSRange?
     }
 
     struct Result {
@@ -191,8 +186,7 @@ struct FuriganaPipelineService {
                     attributed: projected,
                     semanticSpans: mergedSemantic,
                     stage2Spans: resolvedSpans,
-                    knownSurfaceKeys: input.knownWordSurfaceKeys,
-                    selectedRange: input.selectedRange
+                    knownSurfaceKeys: input.knownWordSurfaceKeys
                 )
             }
             log("R10", stageLine("RubyProjection(basis)", describeSemantic(mergedSemantic)))
@@ -719,8 +713,7 @@ struct FuriganaPipelineService {
         attributed: NSAttributedString,
         semanticSpans: [SemanticSpan],
         stage2Spans: [AnnotatedSpan],
-        knownSurfaceKeys: Set<String>,
-        selectedRange: NSRange?
+        knownSurfaceKeys: Set<String>
     ) -> NSAttributedString {
         guard knownSurfaceKeys.isEmpty == false else { return attributed }
         guard semanticSpans.isEmpty == false else { return attributed }
@@ -748,12 +741,6 @@ struct FuriganaPipelineService {
         for semantic in semanticSpans {
             guard semantic.range.location != NSNotFound, semantic.range.length > 0 else { continue }
             guard matchesKnown(for: semantic) else { continue }
-            if let selectedRange,
-               selectedRange.location != NSNotFound,
-               selectedRange.length > 0,
-               NSIntersectionRange(semantic.range, selectedRange).length > 0 {
-                continue
-            }
 
             mutable.removeAttribute(.rubyAnnotation, range: semantic.range)
             mutable.removeAttribute(.rubyReadingText, range: semantic.range)
