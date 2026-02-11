@@ -88,6 +88,17 @@ enum FuriganaAttributedTextBuilder {
             guard shouldDumpStages else { return }
             CustomLogger.shared.pipeline(context: context, stage: prefix, message)
         }
+        func stageLine(_ name: String, _ value: String) -> String {
+            let columnWidth = 26
+            if name.count >= columnWidth {
+                return "\(name) -> \(value)"
+            }
+            return "\(name)\(String(repeating: " ", count: columnWidth - name.count)) -> \(value)"
+        }
+        func cutDescription(_ cuts: [Int]) -> String {
+            guard cuts.isEmpty == false else { return "(no user hard cuts)" }
+            return "[\(cuts.sorted().map(String.init).joined(separator: ","))]"
+        }
 
         let segmentationStart = CFAbsoluteTimeGetCurrent()
         let segmented: [TextSpan]
@@ -111,16 +122,20 @@ enum FuriganaAttributedTextBuilder {
         // Start with user/token boundaries; refinement stages may add more structural hard cuts.
         var stage125HardCuts = tokenBoundaries
 
-        log("S1", "spans after normalizeCoverage: \(describe(spans: adjustedSpans))")
+        if shouldDumpStages {
+            log("S20", stageLine("BoundaryPolicy", cutDescription(tokenBoundaries)))
+            log("S20", stageLine("BoundaryAuthority", baseSpans == nil ? "pipeline segmentation" : "user-authored spans"))
+        }
+
+        var structuralNotes: [String] = []
 
         // Optional embedding-based boundary refinement stage.
         // This never rewrites strings; it selects a best-cover over token-aligned spans
         // derived by slicing the original text.
         var spansForAttachment = adjustedSpans
         var boundariesAuthoritative = (baseSpans != nil)
-        if pipelineTraceEnabled, baseSpans != nil {
-            log("MIG", "skipped (baseSpans provided)")
-            log("EBS", "skipped (baseSpans provided)")
+        if baseSpans != nil {
+            structuralNotes.append("baseSpans")
         }
         if baseSpans == nil {
             let session = EmbeddingSession()
@@ -162,13 +177,10 @@ enum FuriganaAttributedTextBuilder {
                 var combinedHardCuts = tokenBoundaries
 
                 // (2) Verb-headed spans: boundary-frozen.
-                if pipelineTraceEnabled {
-                    log("MIG", "before: \(describe(spans: workingSpans))")
-                }
                 let gated = MorphologicalIntegrityGate.apply(text: nsText, spans: workingSpans, hardCuts: combinedHardCuts, trie: trie)
                 workingSpans = gated.spans
-                if pipelineTraceEnabled {
-                    log("MIG", "after: \(describe(spans: workingSpans))")
+                if gated.merges > 0 {
+                    structuralNotes.append("MIG merges=\(gated.merges)")
                 }
 
                 // (3) Reduplication is structural.
@@ -176,6 +188,7 @@ enum FuriganaAttributedTextBuilder {
                     let redup = ReduplicationGate.apply(text: nsText, spans: workingSpans, hardCuts: combinedHardCuts, trie: trie)
                     if redup.addedHardCuts.isEmpty == false {
                         combinedHardCuts.append(contentsOf: redup.addedHardCuts)
+                        structuralNotes.append("Redup cuts=\(redup.addedHardCuts.count)")
                     }
                 }
 
@@ -190,6 +203,9 @@ enum FuriganaAttributedTextBuilder {
                         deinflectionLocks = merged.deinflectionLocks
                         if merged.addedHardCuts.isEmpty == false {
                             combinedHardCuts.append(contentsOf: merged.addedHardCuts)
+                        }
+                        if deinflectionLocks > 0 {
+                            structuralNotes.append("Deinflect locks=\(deinflectionLocks)")
                         }
                     }
                 }
@@ -273,11 +289,6 @@ enum FuriganaAttributedTextBuilder {
                     let hardCutsSnapshot = combinedHardCuts
                     let trieSnapshot = trie
 
-                    if pipelineTraceEnabled {
-                        let cutList = hardCutsSnapshot.sorted().map(String.init).joined(separator: ",")
-                        log("EBS", "before refine spans: \(describe(spans: snapshot)) ; hardCuts=[\(cutList)]")
-                    }
-
                     spansForAttachment = await withCheckedContinuation { continuation in
                         DispatchQueue.global(qos: .userInitiated).async {
                             let localText = textString as NSString
@@ -286,15 +297,10 @@ enum FuriganaAttributedTextBuilder {
                         }
                     }
 
-                    if pipelineTraceEnabled {
-                        log("EBS", "after refine spans: \(describe(spans: spansForAttachment))")
-                    }
+                    structuralNotes.append("EBS refined")
                 } else {
                     spansForAttachment = workingSpans
-
-                    if pipelineTraceEnabled {
-                        log("EBS", "refine skipped; spans: \(describe(spans: spansForAttachment))")
-                    }
+                    structuralNotes.append("EBS skipped")
                 }
 
                 boundariesAuthoritative = true
@@ -310,10 +316,7 @@ enum FuriganaAttributedTextBuilder {
                     )
                 }
 
-                if pipelineTraceEnabled {
-                    log("MIG", "skipped (tokenBoundaryResolution disabled)")
-                    log("EBS", "skipped (tokenBoundaryResolution disabled)")
-                }
+                structuralNotes.append("embedding disabled")
             }
         }
 
@@ -343,14 +346,9 @@ enum FuriganaAttributedTextBuilder {
             // Stage 1.5 snaps spans to MeCab token boundaries. This must run before merge logic
             // (Stage 1.25) so later stages can safely reason about span ranges vs MeCab ranges.
             spansForAttachment = stage15.spans
-
-            if shouldDumpStages {
-                let cutList = stage15.forcedCuts.sorted().map(String.init).joined(separator: ",")
-                log("S1.5", "spans after apply: \(describe(spans: stage15.spans))")
-                log("S1.5", "forcedCuts emitted: [\(cutList)]")
+            if stage15.forcedCuts.isEmpty == false {
+                structuralNotes.append("S1.5 cuts=\(stage15.forcedCuts.count)")
             }
-        } else if pipelineTraceEnabled {
-            log("S1.5", "skipped (baseSpans provided)")
         }
 
         // NOTE:
@@ -360,8 +358,7 @@ enum FuriganaAttributedTextBuilder {
         let combinedHardCuts = tokenBoundaries
 
         if shouldDumpStages {
-            let cutList = combinedHardCuts.sorted().map(String.init).joined(separator: ",")
-            log("S1.5", "combinedHardCuts after Stage 1.5: [\(cutList)]")
+            log("S30", stageLine("BaseSegmentation", describe(spans: spansForAttachment)))
         }
 
         // Stage 1.25: syntactic merge stage (merge-only).
@@ -376,11 +373,9 @@ enum FuriganaAttributedTextBuilder {
                 mecab: mecabAnnotations
             )
             spansForAttachment = stage125.spans
-            if shouldDumpStages {
-                log("S1.25", "after apply merges=\(stage125.merges): \(describe(spans: spansForAttachment))")
+            if stage125.merges > 0 {
+                structuralNotes.append("S1.25 merges=\(stage125.merges)")
             }
-        } else if pipelineTraceEnabled {
-            log("S1.25", "skipped (baseSpans provided)")
         }
 
         // Stage 1.75: Deinflection hard-stop merge (merge-only).
@@ -399,9 +394,7 @@ enum FuriganaAttributedTextBuilder {
             // lexicon word, so Stage 1.75 can later merge dictionary-valid spans.
             if let trie {
                 spansForAttachment = LexiconSuffixSplitter.apply(text: nsText, spans: spansForAttachment, trie: trie)
-                if shouldDumpStages {
-                    log("S1.6", "after apply: \(describe(spans: spansForAttachment))")
-                }
+                structuralNotes.append("S1.6 split")
             }
 
             if let trie, let deinflector = try? await DeinflectorCache.shared.get() {
@@ -413,12 +406,17 @@ enum FuriganaAttributedTextBuilder {
                     deinflector: deinflector
                 )
                 spansForAttachment = merged.spans
-                if shouldDumpStages {
-                    log("S1.75", "after apply locks=\(merged.deinflectionLocks): \(describe(spans: spansForAttachment))")
+                if merged.deinflectionLocks > 0 {
+                    structuralNotes.append("S1.75 locks=\(merged.deinflectionLocks)")
                 }
             }
-        } else if pipelineTraceEnabled {
-            log("S1.75", "skipped (baseSpans provided)")
+        }
+
+        if shouldDumpStages {
+            log("S40", stageLine("StructuralComposition", describe(spans: spansForAttachment)))
+            if structuralNotes.isEmpty == false {
+                log("S40", stageLine("StructuralOps", structuralNotes.joined(separator: ", ")))
+            }
         }
 
         let stage2 = await SpanReadingAttacher().attachReadings(
@@ -434,8 +432,8 @@ enum FuriganaAttributedTextBuilder {
         let resolvedAnnotated = applyReadingOverrides(stage2.annotatedSpans, overrides: readingOverrides)
         let resolvedSemantic = applyReadingOverrides(stage2.semanticSpans, overrides: readingOverrides)
 
-        log("S2", "annotatedSpans: \(describe(annotatedSpans: resolvedAnnotated))")
-        log("S2.5", "semanticSpans: \(describe(semanticSpans: resolvedSemantic))")
+        log("S45", stageLine("ReadingAttachment", describe(annotatedSpans: resolvedAnnotated)))
+        log("S50", stageLine("SemanticGrouping", describe(semanticSpans: resolvedSemantic)))
 
         _ = elapsedMilliseconds(since: attachmentStart)
 

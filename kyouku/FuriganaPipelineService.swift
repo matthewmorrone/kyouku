@@ -117,6 +117,13 @@ struct FuriganaPipelineService {
         func describeSemantic(_ spans: [SemanticSpan]) -> String {
             splitDescription(spans.map(\.surface))
         }
+        func stageLine(_ name: String, _ value: String) -> String {
+            let columnWidth = 26
+            if name.count >= columnWidth {
+                return "\(name) -> \(value)"
+            }
+            return "\(name)\(String(repeating: " ", count: columnWidth - name.count)) -> \(value)"
+        }
 
         func log(_ stage: String, _ message: String) {
             guard pipelineTraceEnabled else { return }
@@ -151,7 +158,7 @@ struct FuriganaPipelineService {
         // Hard invariant: semantic spans must never contain line breaks.
         // Newlines are hard boundaries for selection + dictionary lookup.
         let resolvedSemantic = Self.splitSemanticSpansOnLineBreaks(text: input.text, spans: semantic)
-        log("S2.6", "semantic after linebreak split: \(describeSemantic(resolvedSemantic))")
+        log("S50", stageLine("SemanticGrouping(linebreak)", describeSemantic(resolvedSemantic)))
 
         // Tail-end post pass: attempt to merge adjacent semantic spans into a single
         // lexicon-valid surface form when safe.
@@ -165,7 +172,7 @@ struct FuriganaPipelineService {
             hardCuts: input.hardCuts,
             context: input.context
         )
-        log("S2.tail", "semantic after tail merge: \(describeSemantic(mergedSemantic))")
+        log("S50", stageLine("SemanticGrouping(tail)", describeSemantic(mergedSemantic)))
 
         var attributed: NSAttributedString?
         if input.showFurigana {
@@ -188,10 +195,10 @@ struct FuriganaPipelineService {
                     selectedRange: input.selectedRange
                 )
             }
-            log("S3", "ruby projection semantic basis: \(describeSemantic(mergedSemantic))")
+            log("R10", stageLine("RubyProjection(basis)", describeSemantic(mergedSemantic)))
         } else {
             attributed = nil
-            log("S3", "skipped (showFurigana false)")
+            log("R10", stageLine("RubyProjection", "skipped (showFurigana false)"))
         }
 
         if Self.debugHighlightAllDictionaryEntriesEnabled() {
@@ -212,8 +219,8 @@ struct FuriganaPipelineService {
             }
         }
 
-        log("OUT", "final semantic: \(describeSemantic(mergedSemantic))")
-        log("OUT", "final annotated spans: \(splitDescription(resolvedSpans.map { $0.span.surface }))")
+        log("OUT", stageLine("FinalSemantic", describeSemantic(mergedSemantic)))
+        log("OUT", stageLine("FinalAnnotated", splitDescription(resolvedSpans.map { $0.span.surface })))
 
         return Result(spans: resolvedSpans, semanticSpans: mergedSemantic, attributedString: attributed)
     }
