@@ -80,6 +80,20 @@ final class CustomLogger {
     ) {
         log(message(), level: .error, file: file, line: line, function: function)
     }
+
+    /// Emits a pipeline log line with fixed-width context/stage columns so stages align visually.
+    func pipeline(
+        context: String,
+        stage: String,
+        _ message: @autoclosure () -> String,
+        level: Level = .info,
+        file: StaticString = #fileID,
+        line: UInt = #line,
+        function: StaticString = #function
+    ) {
+        let full = "\(Self.pipelinePrefix(context: context, stage: stage)) \(message())"
+        log(full, level: level, file: file, line: line, function: function)
+    }
     
         /// Always writes to stdout via Swift's `print`, independent of OSLog.
     func print(
@@ -97,6 +111,24 @@ final class CustomLogger {
         ))
     }
 
+    /// Writes the string as-is to stdout (no timestamp/call-site decoration).
+    func raw(_ message: @autoclosure () -> String) {
+        Swift.print(message())
+    }
+
+    /// Best-effort console clear for startup diagnostics.
+    /// Uses ANSI clear/home plus optional blank lines as fallback spacing.
+    func clearConsole(extraBlankLines: Int = 0) {
+        // ANSI escape: clear screen + move cursor to home.
+        let clearSequence = "\u{001B}[2J\u{001B}[H"
+        Swift.print(clearSequence, terminator: "")
+        if extraBlankLines > 0 {
+            for _ in 0..<extraBlankLines {
+                Swift.print("")
+            }
+        }
+    }
+
     // MARK: - Internals
     
     private func currentTimestampString() -> String {
@@ -105,6 +137,19 @@ final class CustomLogger {
     
     private static func render(_ message: String, file: StaticString, line: UInt, function: StaticString, timestamp: String) -> String {
         "[\(timestamp)] [\(file):\(line)] \(function): \(message)"
+    }
+
+    private static func rightPad(_ value: String, minWidth: Int) -> String {
+        guard minWidth > 0 else { return value }
+        let length = value.count
+        guard length < minWidth else { return value }
+        return value + String(repeating: " ", count: minWidth - length)
+    }
+
+    private static func pipelinePrefix(context: String, stage: String) -> String {
+        let contextColumn = rightPad(context, minWidth: 16)
+        let stageColumn = rightPad(stage, minWidth: 8)
+        return "[Pipeline] [\(contextColumn)] [\(stageColumn)]"
     }
     
     private static func emit(_ message: String, level: Level, logger: Logger) {

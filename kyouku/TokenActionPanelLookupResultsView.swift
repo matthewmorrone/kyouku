@@ -465,6 +465,7 @@ struct LookupResultsView: View {
         let tokenSurface = effectiveSelection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let lemmaSurface = (entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
         let surfaceReading = (effectiveSelection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayHeadword = entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? "")
 
         let showSurfaceReading: Bool = {
             guard surfaceReading.isEmpty == false else { return false }
@@ -476,8 +477,14 @@ struct LookupResultsView: View {
         }()
 
         let variants = readingVariants(for: entry, detail: matchingHighlightedEntryDetail)
-        let readingChipText = variants.indices.contains(highlightedReadingIndex) ? variants[highlightedReadingIndex] : (entry.kana ?? "")
-        let readingChipEnabled = canUseReading(entry)
+        let selectedReading = variants.indices.contains(highlightedReadingIndex) ? variants[highlightedReadingIndex] : (entry.kana ?? "")
+        let headerReadingText: String = {
+            if showSurfaceReading {
+                return surfaceReading
+            }
+            return selectedReading.trimmingCharacters(in: .whitespacesAndNewlines)
+        }()
+        let shouldShowHeaderReading = headerReadingText.isEmpty == false && headerReadingText != displayHeadword
 
         let isSaved = isWordSaved?(entry) ?? false
 
@@ -494,33 +501,13 @@ struct LookupResultsView: View {
         }()
 
         return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? ""))
-                        .font(.headline)
-                    if showSurfaceReading {
-                        Text(surfaceReading)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer(minLength: 0)
-                if variants.isEmpty == false {
-                    Button {
-                        if variants.count > 1 {
-                            highlightedReadingIndex = (highlightedReadingIndex + 1) % variants.count
-                        }
-                    } label: {
-                        Text(readingChipText)
-                            .font(.subheadline.weight(.semibold))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(readingChipEnabled ? Color.accentColor : .secondary)
-                    .disabled(readingChipEnabled == false)
-                    .accessibilityLabel("Reading variants")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayHeadword)
+                    .font(.headline)
+                if shouldShowHeaderReading {
+                    Text(headerReadingText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -540,7 +527,7 @@ struct LookupResultsView: View {
                     }
                 }
 
-                inlineIconButton(
+                iconActionButton(
                     systemImage: "speaker.wave.2",
                     tint: .secondary,
                     accessibilityLabel: "Speak"
@@ -673,18 +660,6 @@ struct LookupResultsView: View {
         }
         .buttonStyle(.bordered)
         .tint(tint)
-        .accessibilityLabel(accessibilityLabel)
-    }
-
-    private func inlineIconButton(systemImage: String, tint: Color, accessibilityLabel: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.subheadline)
-                .frame(width: 18, height: 18)
-                .padding(.leading, 2)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(tint)
         .accessibilityLabel(accessibilityLabel)
     }
 

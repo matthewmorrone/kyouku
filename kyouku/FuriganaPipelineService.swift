@@ -73,6 +73,11 @@ struct FuriganaPipelineService {
         /// Kana-folded “known word” surfaces used for adaptive ruby suppression.
         /// When non-empty, ruby annotations are removed for semantic spans that match.
         let knownWordSurfaceKeys: Set<String>
+
+        /// Optional active selection range.
+        /// When present, known-word ruby suppression is skipped for semantic spans that
+        /// intersect this range so the focused token keeps visible furigana.
+        let selectedRange: NSRange?
     }
 
     struct Result {
@@ -84,6 +89,38 @@ struct FuriganaPipelineService {
     func render(_ input: Input) async -> Result {
         guard input.text.isEmpty == false else {
             return Result(spans: nil, semanticSpans: [], attributedString: nil)
+        }
+
+        let pipelineTraceEnabled: Bool = {
+#if DEBUG
+            return true
+#else
+            return ProcessInfo.processInfo.environment["PIPELINE_TRACE"] == "1" || UserDefaults.standard.bool(forKey: "debugPipelineTrace")
+#endif
+        }()
+
+        func splitDescription(_ surfaces: [String], maxChars: Int = 360) -> String {
+            guard surfaces.isEmpty == false else { return "∅" }
+            let joined = surfaces
+                .map {
+                    $0
+                        .replacingOccurrences(of: "\r", with: "\\r")
+                        .replacingOccurrences(of: "\n", with: "\\n")
+                        .replacingOccurrences(of: "\t", with: "\\t")
+                }
+                .joined(separator: " | ")
+            if joined.count <= maxChars { return joined }
+            let idx = joined.index(joined.startIndex, offsetBy: maxChars)
+            return String(joined[..<idx]) + " ..."
+        }
+
+        func describeSemantic(_ spans: [SemanticSpan]) -> String {
+            splitDescription(spans.map(\.surface))
+        }
+
+        func log(_ stage: String, _ message: String) {
+            guard pipelineTraceEnabled else { return }
+            CustomLogger.shared.pipeline(context: input.context, stage: stage, message)
         }
 
         var spans = input.existingSpans
@@ -114,6 +151,7 @@ struct FuriganaPipelineService {
         // Hard invariant: semantic spans must never contain line breaks.
         // Newlines are hard boundaries for selection + dictionary lookup.
         let resolvedSemantic = Self.splitSemanticSpansOnLineBreaks(text: input.text, spans: semantic)
+        log("S2.6", "semantic after linebreak split: \(describeSemantic(resolvedSemantic))")
 
         // Tail-end post pass: attempt to merge adjacent semantic spans into a single
         // lexicon-valid surface form when safe.
@@ -127,6 +165,7 @@ struct FuriganaPipelineService {
             hardCuts: input.hardCuts,
             context: input.context
         )
+        log("S2.tail", "semantic after tail merge: \(describeSemantic(mergedSemantic))")
 
         var attributed: NSAttributedString?
         if input.showFurigana {
@@ -145,11 +184,14 @@ struct FuriganaPipelineService {
                     attributed: projected,
                     semanticSpans: mergedSemantic,
                     stage2Spans: resolvedSpans,
-                    knownSurfaceKeys: input.knownWordSurfaceKeys
+                    knownSurfaceKeys: input.knownWordSurfaceKeys,
+                    selectedRange: input.selectedRange
                 )
             }
+            log("S3", "ruby projection semantic basis: \(describeSemantic(mergedSemantic))")
         } else {
             attributed = nil
+            log("S3", "skipped (showFurigana false)")
         }
 
         if Self.debugHighlightAllDictionaryEntriesEnabled() {
@@ -169,6 +211,9 @@ struct FuriganaPipelineService {
                 }
             }
         }
+
+        log("OUT", "final semantic: \(describeSemantic(mergedSemantic))")
+        log("OUT", "final annotated spans: \(splitDescription(resolvedSpans.map { $0.span.surface }))")
 
         return Result(spans: resolvedSpans, semanticSpans: mergedSemantic, attributedString: attributed)
     }
@@ -667,7 +712,8 @@ struct FuriganaPipelineService {
         attributed: NSAttributedString,
         semanticSpans: [SemanticSpan],
         stage2Spans: [AnnotatedSpan],
-        knownSurfaceKeys: Set<String>
+        knownSurfaceKeys: Set<String>,
+        selectedRange: NSRange?
     ) -> NSAttributedString {
         guard knownSurfaceKeys.isEmpty == false else { return attributed }
         guard semanticSpans.isEmpty == false else { return attributed }
@@ -695,6 +741,12 @@ struct FuriganaPipelineService {
         for semantic in semanticSpans {
             guard semantic.range.location != NSNotFound, semantic.range.length > 0 else { continue }
             guard matchesKnown(for: semantic) else { continue }
+            if let selectedRange,
+               selectedRange.location != NSNotFound,
+               selectedRange.length > 0,
+               NSIntersectionRange(semantic.range, selectedRange).length > 0 {
+                continue
+            }
 
             mutable.removeAttribute(.rubyAnnotation, range: semantic.range)
             mutable.removeAttribute(.rubyReadingText, range: semantic.range)

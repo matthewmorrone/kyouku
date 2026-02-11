@@ -332,6 +332,12 @@ struct FuriganaRenderingHost: View {
                 var alternationIndex = 0
                 for range in coverageRanges {
                     let surface = textStorage.substring(with: range)
+
+                    // Punctuation-only tokens (including Japanese punctuation) should not
+                    // receive either alternate color.
+                    if Self.isPunctuationOrSymbolOnlySurface(surface) {
+                        continue
+                    }
                     let isHardBoundary = Self.isHardBoundaryOnlySurface(surface)
 
                     let color: UIColor
@@ -405,10 +411,23 @@ struct FuriganaRenderingHost: View {
     private static func isHardBoundaryOnlySurface(_ surface: String) -> Bool {
         if surface.isEmpty { return true }
         let hardBoundary = CharacterSet.whitespacesAndNewlines
-            .union(.punctuationCharacters)
-            .union(.symbols)
         for scalar in surface.unicodeScalars {
             if hardBoundary.contains(scalar) == false {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func isPunctuationOrSymbolOnlySurface(_ surface: String) -> Bool {
+        if surface.isEmpty { return false }
+        let cleaned = surface
+            .replacingOccurrences(of: "\u{FFFC}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.isEmpty == false else { return false }
+        let set = CharacterSet.punctuationCharacters.union(.symbols)
+        for scalar in cleaned.unicodeScalars {
+            if set.contains(scalar) == false {
                 return false
             }
         }
@@ -992,4 +1011,3 @@ private struct EditingTextView: UIViewRepresentable {
         }
     }
 }
-

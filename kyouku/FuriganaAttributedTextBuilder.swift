@@ -86,9 +86,7 @@ enum FuriganaAttributedTextBuilder {
         }()
         func log(_ prefix: String, _ message: String) {
             guard shouldDumpStages else { return }
-            let full = "[\(prefix)] \(message)"
-            CustomLogger.shared.info(full)
-            NSLog("%@", full)
+            CustomLogger.shared.pipeline(context: context, stage: prefix, message)
         }
 
         let segmentationStart = CFAbsoluteTimeGetCurrent()
@@ -532,27 +530,30 @@ enum FuriganaAttributedTextBuilder {
     }
 
     private static func describe(spans: [TextSpan]) -> String {
-        spans
-            .map { span in "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»" }
-            .joined(separator: ", ")
+        splitDescription(from: spans.map(\.surface))
     }
 
     private static func describe(annotatedSpans: [AnnotatedSpan]) -> String {
-        annotatedSpans
-            .map { span in
-                let r = span.readingKana.map { " [\($0)]" } ?? ""
-                return "\(span.span.range.location)-\(NSMaxRange(span.span.range)) «\(span.span.surface)»\(r)"
-            }
-            .joined(separator: ", ")
+        splitDescription(from: annotatedSpans.map { $0.span.surface })
     }
 
     private static func describe(semanticSpans: [SemanticSpan]) -> String {
-        semanticSpans
-            .map { span in
-                let r = span.readingKana.map { " [\($0)]" } ?? ""
-                return "\(span.range.location)-\(NSMaxRange(span.range)) «\(span.surface)»\(r)"
+        splitDescription(from: semanticSpans.map(\.surface))
+    }
+
+    private static func splitDescription(from surfaces: [String], maxChars: Int = 360) -> String {
+        guard surfaces.isEmpty == false else { return "∅" }
+        let joined = surfaces
+            .map {
+                $0
+                    .replacingOccurrences(of: "\r", with: "\\r")
+                    .replacingOccurrences(of: "\n", with: "\\n")
+                    .replacingOccurrences(of: "\t", with: "\\t")
             }
-            .joined(separator: ", ")
+            .joined(separator: " | ")
+        if joined.count <= maxChars { return joined }
+        let idx = joined.index(joined.startIndex, offsetBy: maxChars)
+        return String(joined[..<idx]) + " ..."
     }
 }
 

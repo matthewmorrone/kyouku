@@ -578,6 +578,17 @@ struct PasteView: View {
                     }
                 }
                 handleSelectionLookup()
+
+                let knownWordMode = FuriganaKnownWordMode(rawValue: knownWordFuriganaModeRaw) ?? .off
+                if showFurigana, knownWordMode != .off {
+                    // Known-word suppression runs during Stage 3 ruby projection.
+                    // Rebuild attributed text when selection changes so the active token can be
+                    // exempted from suppression and remains readable while focused.
+                    triggerFuriganaRefreshIfNeeded(
+                        reason: "selection changed for known-word ruby suppression",
+                        recomputeSpans: false
+                    )
+                }
             }
             .onChange(of: selectionController.persistentSelectionRange) { _, newRange in
                 guard incrementalLookupEnabled == false else { return }
@@ -2340,6 +2351,7 @@ struct PasteView: View {
         let currentAmendedSpans = tokenBoundaries.spans(for: activeNoteID, text: currentText)
         let currentHardCuts = tokenBoundaries.hardCuts(for: activeNoteID, text: currentText)
         let currentHeadwordSpacingPadding = readingHeadwordSpacingPadding
+        let currentSelectedRange = tokenSelection?.range
 
         let knownWordSurfaceKeys: Set<String> = {
             let mode = FuriganaKnownWordMode(rawValue: knownWordFuriganaModeRaw) ?? .off
@@ -2390,7 +2402,8 @@ struct PasteView: View {
             readingOverrides: currentOverrides,
             context: "PasteView",
             padHeadwordSpacing: currentHeadwordSpacingPadding,
-            knownWordSurfaceKeys: knownWordSurfaceKeys
+            knownWordSurfaceKeys: knownWordSurfaceKeys,
+            selectedRange: currentSelectedRange
         )
         let service = furiganaPipeline
         return {
@@ -2514,4 +2527,3 @@ extension PasteView {
         PasteBufferStore.save("")
     }
 }
-
