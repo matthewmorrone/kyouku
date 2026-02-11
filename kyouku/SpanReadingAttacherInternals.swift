@@ -368,6 +368,9 @@ extension SpanReadingAttacher {
         guard surface.isEmpty == false else { return "" }
         var scalars: [UnicodeScalar] = []
         for scalar in surface.unicodeScalars.reversed() {
+            // Okurigana is hiragana. Do not consume katakana here: katakana following a
+            // kanji is typically a separate lexical unit and should not be treated as
+            // okurigana for removal.
             if isHiragana(scalar) {
                 scalars.append(scalar)
             } else {

@@ -95,7 +95,7 @@ struct RubyText: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = false
         textView.textContainer.maximumNumberOfLines = 0
-        textView.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        textView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         if wrapLines == false {
             // Avoid an initial wrapped layout before SwiftUI's first `sizeThatFits` pass.
             textView.textContainer.size = CGSize(width: RubyTextConstants.noWrapContainerWidth, height: CGFloat.greatestFiniteMagnitude)
@@ -168,7 +168,7 @@ struct RubyText: UIViewRepresentable {
         uiView.horizontalScrollEnabled = horizontalScrollEnabled
         uiView.textContainer.widthTracksTextView = false
         uiView.textContainer.maximumNumberOfLines = 0
-        uiView.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        uiView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         if wrapLines == false, uiView.textContainer.size.width < RubyTextConstants.noWrapContainerWidth {
             uiView.textContainer.size = CGSize(width: RubyTextConstants.noWrapContainerWidth, height: CGFloat.greatestFiniteMagnitude)
         }
