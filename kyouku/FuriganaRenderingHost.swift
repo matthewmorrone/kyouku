@@ -535,7 +535,7 @@ private struct EditingTextView: UIViewRepresentable {
         view.textContainer.widthTracksTextView = wrapLines
         view.textContainer.maximumNumberOfLines = 0
         // Match RubyText's wrapping behavior.
-        view.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        view.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         view.textContainer.lineFragmentPadding = 0
         view.textContainerInset = insets
         view.keyboardDismissMode = .interactive
@@ -560,7 +560,7 @@ private struct EditingTextView: UIViewRepresentable {
         let processed = Self.removingRuby(from: baseAttributed)
         let fullRange = NSRange(location: 0, length: (processed.length))
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         if #available(iOS 14.0, *) {
             // Avoid `.pushOut`: it can push trailing punctuation onto the next line.
             paragraph.lineBreakStrategy = []
@@ -581,7 +581,7 @@ private struct EditingTextView: UIViewRepresentable {
         let initialLength = view.textStorage.length
         if initialLength > 0 {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
             if #available(iOS 14.0, *) {
                 paragraph.lineBreakStrategy = []
             }
@@ -621,7 +621,7 @@ private struct EditingTextView: UIViewRepresentable {
             let processed = Self.removingRuby(from: baseAttributed)
             let fullRange = NSRange(location: 0, length: processed.length)
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
             if #available(iOS 14.0, *) {
                 paragraph.lineBreakStrategy = []
             }
@@ -657,7 +657,7 @@ private struct EditingTextView: UIViewRepresentable {
         uiView.showsHorizontalScrollIndicator = wrapLines == false
         uiView.textContainer.widthTracksTextView = wrapLines
         uiView.textContainer.maximumNumberOfLines = 0
-        uiView.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        uiView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         uiView.textContainer.lineFragmentPadding = 0
 
         if wrapLines {
@@ -688,7 +688,7 @@ private struct EditingTextView: UIViewRepresentable {
         let fullLength = uiView.textStorage.length
         if fullLength > 0 {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
             if #available(iOS 14.0, *) {
                 paragraph.lineBreakStrategy = []
             }
@@ -718,7 +718,7 @@ private struct EditingTextView: UIViewRepresentable {
 
     private func applyTypingAttributes(to textView: UITextView) {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         if #available(iOS 14.0, *) {
             paragraph.lineBreakStrategy = []
         }
