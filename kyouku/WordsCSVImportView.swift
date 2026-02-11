@@ -306,7 +306,7 @@ private enum WordsCSVImportListMode: Hashable {
     case new
 }
 
-private struct WordsCSVImportItem: Identifiable, Hashable {
+struct WordsCSVImportItem: Identifiable, Hashable {
     let id: UUID
     let lineNumber: Int
 
@@ -398,7 +398,7 @@ private struct WordsCSVImportRow: View {
     }
 }
 
-private enum WordsCSVImport {
+enum WordsCSVImport {
     static func parseItems(from text: String) -> [WordsCSVImportItem] {
         guard let firstNonEmptyLine = firstNonEmptyLine(in: text) else { return [] }
         if let delimiter = autoDelimiter(forFirstLine: firstNonEmptyLine) {
