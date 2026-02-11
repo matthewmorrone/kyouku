@@ -33,6 +33,22 @@ enum MeCabTokenBoundaryNormalizer {
             return Result(spans: [], forcedCuts: [])
         }
 
+        // Stage 1.5 should preserve non-covering inputs as-is. The normal pipeline
+        // feeds full-coverage spans here, but tests and edge callers may provide a
+        // prefix/slice; in that case we must not synthesize trailing gap spans.
+        func spansCoverEntireText(_ spans: [TextSpan]) -> Bool {
+            var cursor = 0
+            for span in spans {
+                guard span.range.length > 0 else { return false }
+                guard span.range.location == cursor else { return false }
+                cursor = NSMaxRange(span.range)
+            }
+            return cursor == text.length
+        }
+        guard spansCoverEntireText(spans) else {
+            return Result(spans: spans, forcedCuts: [])
+        }
+
         func isKatakanaLikeScalar(_ scalar: UnicodeScalar) -> Bool {
             // Fullwidth katakana block.
             if (0x30A0...0x30FF).contains(scalar.value) { return true }

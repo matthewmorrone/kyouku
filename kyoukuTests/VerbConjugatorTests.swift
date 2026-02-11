@@ -1,13 +1,13 @@
 import XCTest
 @testable import kyouku
 
-final class JapaneseVerbConjugatorTests: XCTestCase {
-    private func surfaceMap(_ items: [JapaneseVerbConjugation]) -> [String: String] {
+final class VerbConjugatorTests: XCTestCase {
+    private func surfaceMap(_ items: [VerbConjugation]) -> [String: String] {
         Dictionary(uniqueKeysWithValues: items.map { ($0.label, $0.surface) })
     }
 
     func testIchidanCommonConjugations() {
-        let items = JapaneseVerbConjugator.conjugations(for: "食べる", verbClass: .ichidan, set: .all)
+        let items = VerbConjugator.conjugations(for: "食べる", verbClass: .ichidan, set: .all)
         let m = surfaceMap(items)
         XCTAssertEqual(m["Polite (ます)"], "食べます")
         XCTAssertEqual(m["て-form"], "食べて")
@@ -19,7 +19,7 @@ final class JapaneseVerbConjugatorTests: XCTestCase {
     }
 
     func testGodanCommonConjugations() {
-        let items = JapaneseVerbConjugator.conjugations(for: "書く", verbClass: .godan, set: .all)
+        let items = VerbConjugator.conjugations(for: "書く", verbClass: .godan, set: .all)
         let m = surfaceMap(items)
         XCTAssertEqual(m["Polite (ます)"], "書きます")
         XCTAssertEqual(m["て-form"], "書いて")
@@ -32,14 +32,14 @@ final class JapaneseVerbConjugatorTests: XCTestCase {
     }
 
     func testGodanIkuException() {
-        let items = JapaneseVerbConjugator.conjugations(for: "行く", verbClass: .godan, set: .all)
+        let items = VerbConjugator.conjugations(for: "行く", verbClass: .godan, set: .all)
         let m = surfaceMap(items)
         XCTAssertEqual(m["て-form"], "行って")
         XCTAssertEqual(m["Past (た)"], "行った")
     }
 
     func testSuruCompound() {
-        let items = JapaneseVerbConjugator.conjugations(for: "勉強する", verbClass: .suru, set: .all)
+        let items = VerbConjugator.conjugations(for: "勉強する", verbClass: .suru, set: .all)
         let m = surfaceMap(items)
         XCTAssertEqual(m["Polite (ます)"], "勉強します")
         XCTAssertEqual(m["て-form"], "勉強して")
@@ -49,7 +49,7 @@ final class JapaneseVerbConjugatorTests: XCTestCase {
 
     func testKuruKanaAndKanji() {
         do {
-            let items = JapaneseVerbConjugator.conjugations(for: "くる", verbClass: .kuru, set: .all)
+            let items = VerbConjugator.conjugations(for: "くる", verbClass: .kuru, set: .all)
             let m = surfaceMap(items)
             XCTAssertEqual(m["Polite (ます)"], "きます")
             XCTAssertEqual(m["て-form"], "きて")
@@ -57,7 +57,7 @@ final class JapaneseVerbConjugatorTests: XCTestCase {
             XCTAssertEqual(m["Imperative"], "こい")
         }
         do {
-            let items = JapaneseVerbConjugator.conjugations(for: "来る", verbClass: .kuru, set: .all)
+            let items = VerbConjugator.conjugations(for: "来る", verbClass: .kuru, set: .all)
             let m = surfaceMap(items)
             XCTAssertEqual(m["Polite (ます)"], "来ます")
             XCTAssertEqual(m["て-form"], "来て")
