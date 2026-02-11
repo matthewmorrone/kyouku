@@ -512,7 +512,25 @@ enum FuriganaAttributedTextBuilder {
     }
 
     private static func containsKanji(in text: String) -> Bool {
-        text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3400...0x4DBF,
+                 0x4E00...0x9FFF,
+                 0xF900...0xFAFF,
+                 0x20000...0x2A6DF,
+                 0x2A700...0x2B73F,
+                 0x2B740...0x2B81F,
+                 0x2B820...0x2CEAF,
+                 0x2CEB0...0x2EBEF,
+                 0x30000...0x3134F,
+                 0x3005,
+                 0x3006,
+                 0x30F6:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     private static func isValidRubyReading(_ reading: String) -> Bool {
