@@ -20,6 +20,8 @@ SwiftUI tab-based iOS app. App state is owned at the root and injected via `@Env
 
 ### Allowed
 - Non-build shell commands: `ls`, `rg`, `sed`, `awk`, `cat`, `python`
+- Non-destructive git commands: `bisect`, `diff`, `grep`, `log`, `show`, `status`, `branch list`, `fetch`, `pull`
+- Destructive git commands with explicit permission: `branch delete`, `add`, `commit`, `merge`, `rebase`, `switch`, `push`
 - Build-only verification:
   - `xcodebuild build`
   - Preferred:
