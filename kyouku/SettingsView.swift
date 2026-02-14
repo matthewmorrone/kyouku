@@ -340,7 +340,7 @@ struct SettingsView: View {
                     get: { pendingReadingLineSpacing },
                     set: { pendingReadingLineSpacing = $0 }
                 ),
-                in: 1...30,
+                in: 0...30,
                 step: 1,
                 onEditingChanged: { editing in
                     if editing == false { readingLineSpacing = pendingReadingLineSpacing }
