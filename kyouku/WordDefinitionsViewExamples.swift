@@ -31,24 +31,112 @@ extension WordDefinitionsView {
     }
 
     func exampleSentenceRow(_ sentence: ExampleSentence) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            interactiveSentenceLine(
-                sentence.jpText,
-                mode: .japanese,
-                highlightTerms: japaneseHighlightTermsForSentences(),
-                contextSentenceForOpen: sentence.jpText,
-                sentenceIDForPopoverAnchoring: sentence.id
-            )
-            interactiveSentenceLine(
-                sentence.enText,
-                mode: .english,
-                highlightTerms: [],
-                contextSentenceForOpen: sentence.jpText,
-                sentenceIDForPopoverAnchoring: sentence.id
-            )
-            .font(.callout)
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
+                if showExampleSentenceFurigana,
+                   let guide = exampleSentenceReadingGuides[sentence.id],
+                   guide.isEmpty == false {
+                    Text(guide)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                interactiveSentenceLine(
+                    sentence.jpText,
+                    mode: .japanese,
+                    highlightTerms: japaneseHighlightTermsForSentences(),
+                    contextSentenceForOpen: sentence.jpText,
+                    sentenceIDForPopoverAnchoring: sentence.id
+                )
+                interactiveSentenceLine(
+                    sentence.enText,
+                    mode: .english,
+                    highlightTerms: [],
+                    contextSentenceForOpen: sentence.jpText,
+                    sentenceIDForPopoverAnchoring: sentence.id
+                )
+                .font(.callout)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                SpeechManager.shared.speak(text: sentence.jpText, language: "ja-JP")
+            } label: {
+                Image(systemName: "speaker.wave.2")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Speak sentence")
+            .disabled(sentence.jpText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(.vertical, 4)
+        .task(id: "sentence-guide:\(sentence.id):\(showExampleSentenceFurigana)") {
+            guard showExampleSentenceFurigana else { return }
+            await ensureExampleSentenceReadingGuide(sentence)
+        }
+    }
+
+    @MainActor
+    func ensureExampleSentenceReadingGuide(_ sentence: ExampleSentence) async {
+        guard showExampleSentenceFurigana else { return }
+        if exampleSentenceReadingGuides[sentence.id] != nil { return }
+
+        let guide = await buildExampleSentenceReadingGuide(from: sentence.jpText)
+        guard showExampleSentenceFurigana else { return }
+        exampleSentenceReadingGuides[sentence.id] = guide
+    }
+
+    func buildExampleSentenceReadingGuide(from sentence: String) async -> String {
+        let text = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.isEmpty == false else { return sentence }
+
+        do {
+            let stage2 = try await FuriganaAttributedTextBuilder.computeStage2(
+                text: sentence,
+                context: "dictionary-example"
+            )
+            let semantic = stage2.semanticSpans.sorted { lhs, rhs in
+                lhs.range.location < rhs.range.location
+            }
+            guard semantic.isEmpty == false else { return sentence }
+
+            let ns = sentence as NSString
+            var parts: [String] = []
+            parts.reserveCapacity(semantic.count + 2)
+
+            var cursor = 0
+            for span in semantic {
+                let range = span.range
+                guard range.location != NSNotFound, range.length > 0 else { return sentence }
+                guard range.location >= cursor else { return sentence }
+                guard NSMaxRange(range) <= ns.length else { return sentence }
+
+                if range.location > cursor {
+                    let gap = NSRange(location: cursor, length: range.location - cursor)
+                    parts.append(ns.substring(with: gap))
+                }
+
+                let surfaceText = ns.substring(with: range)
+                let reading = (span.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if containsKanji(surfaceText), reading.isEmpty == false {
+                    parts.append(reading)
+                } else {
+                    parts.append(surfaceText)
+                }
+                cursor = NSMaxRange(range)
+            }
+
+            if cursor < ns.length {
+                parts.append(ns.substring(with: NSRange(location: cursor, length: ns.length - cursor)))
+            }
+
+            let guide = parts.joined()
+            return guide.isEmpty ? sentence : guide
+        } catch {
+            return sentence
+        }
     }
 
     @ViewBuilder

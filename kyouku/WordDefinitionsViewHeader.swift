@@ -35,6 +35,91 @@ extension WordDefinitionsView {
         titleText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    struct HeaderMetadataPill: Identifiable, Hashable {
+        enum Tone: Hashable {
+            case accent
+            case subtle
+        }
+
+        let id: String
+        let text: String
+        let tone: Tone
+    }
+
+    var headerMetadataPills: [HeaderMetadataPill] {
+        var pills: [HeaderMetadataPill] = []
+
+        if let frequencyMetadataLabel {
+            let tone: HeaderMetadataPill.Tone = (frequencyMetadataLabel == "Common") ? .accent : .subtle
+            pills.append(HeaderMetadataPill(id: "freq:\(frequencyMetadataLabel)", text: frequencyMetadataLabel, tone: tone))
+        }
+
+        if hasUsuallyKanaUsageTag {
+            pills.append(HeaderMetadataPill(id: "usage:uk", text: "Usually kana", tone: .subtle))
+        }
+
+        let altCount = alternativeFormCount
+        if altCount > 0 {
+            let label = (altCount == 1) ? "1 alt form" : "\(altCount) alt forms"
+            pills.append(HeaderMetadataPill(id: "alt:\(altCount)", text: label, tone: .subtle))
+        }
+
+        return pills
+    }
+
+    @ViewBuilder
+    func headerMetadataPillView(_ pill: HeaderMetadataPill) -> some View {
+        let foreground: Color = (pill.tone == .accent) ? Color.accentColor : Color.secondary
+        let background: Color = (pill.tone == .accent)
+            ? Color.accentColor.opacity(0.14)
+            : Color.secondary.opacity(0.14)
+
+        Text(pill.text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(background, in: Capsule())
+    }
+
+    var frequencyMetadataLabel: String? {
+        if let detail = entryDetails.first {
+            return detail.isCommon ? "Common" : "Uncommon"
+        }
+        if let entry = entries.first {
+            return entry.isCommon ? "Common" : "Uncommon"
+        }
+        return nil
+    }
+
+    var hasUsuallyKanaUsageTag: Bool {
+        for detail in entryDetails {
+            for sense in detail.senses {
+                if sense.miscellaneous.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "uk" }) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    var alternativeFormCount: Int {
+        guard let detail = entryDetails.first else { return 0 }
+
+        let primaryHeadwordText = primaryHeadword(for: detail).trimmingCharacters(in: .whitespacesAndNewlines)
+        let primaryReadingText = (detail.kanaForms.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let kanjiAlternatives = orderedUniqueForms(from: detail.kanjiForms)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false && $0 != primaryHeadwordText }
+
+        let kanaAlternatives = orderedUniqueForms(from: detail.kanaForms)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false && $0 != primaryReadingText }
+
+        return Set(kanjiAlternatives + kanaAlternatives).count
+    }
+
     var isVerbLemma: Bool {
         // Verbs only: gate morphology + lemma-pitch behaviors.
         verbConjugationVerbClass != nil

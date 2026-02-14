@@ -157,6 +157,8 @@ extension WordDefinitionsView {
         guard primaryTerms.isEmpty == false else {
             entries = []
             entryDetails = []
+            exampleSentences = []
+            exampleSentenceReadingGuides = [:]
             return
         }
 
@@ -167,6 +169,7 @@ extension WordDefinitionsView {
         pitchAccentsForTerm = []
         isLoadingPitchAccents = true
         exampleSentences = []
+        exampleSentenceReadingGuides = [:]
         showAllExampleSentences = false
         isLoadingExampleSentences = true
 
@@ -445,6 +448,7 @@ extension WordDefinitionsView {
             pitchAccentsForTerm = []
             isLoadingPitchAccents = false
             exampleSentences = []
+            exampleSentenceReadingGuides = [:]
             isLoadingExampleSentences = false
             isLoading = false
             errorMessage = String(describing: error)

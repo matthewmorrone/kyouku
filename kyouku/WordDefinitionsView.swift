@@ -41,6 +41,8 @@ struct WordDefinitionsView: View {
     @State var exampleSentences: [ExampleSentence] = []
     @State var isLoadingExampleSentences: Bool = false
     @State var showAllExampleSentences: Bool = false
+    @AppStorage("dictionaryShowExampleFurigana") var showExampleSentenceFurigana: Bool = false
+    @State var exampleSentenceReadingGuides: [String: String] = [:]
 
     @State var hasPitchAccentsTable: Bool? = nil
     @State var pitchAccentsForTerm: [PitchAccent] = []
@@ -178,6 +180,15 @@ struct WordDefinitionsView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                if headerMetadataPills.isEmpty == false {
+                    InlineWrapLayout(spacing: 8, lineSpacing: 8) {
+                        ForEach(headerMetadataPills) { pill in
+                            headerMetadataPillView(pill)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
             }
             // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
 
@@ -233,13 +244,15 @@ struct WordDefinitionsView: View {
             }
 
             // Pitch accents render under each resolved dictionary entry (keyed by kana reading).
-            // Keep a single status section for missing/loading/empty states, and fall back to the
-            // old global display only when no entries are available.
+            // Only show the standalone section for loading/data-availability states to keep
+            // "no accents" from taking prime screen space.
             if entryDetails.isEmpty {
-                Section("Pitch Accent") {
-                    pitchAccentGlobalContent
+                if hasPitchAccentsTable == false || isLoadingPitchAccents || pitchAccentsForTerm.isEmpty == false {
+                    Section("Pitch Accent") {
+                        pitchAccentGlobalContent
+                    }
                 }
-            } else if hasPitchAccentsTable == false || isLoadingPitchAccents || pitchAccentsForTerm.isEmpty {
+            } else if hasPitchAccentsTable == false || isLoadingPitchAccents {
                 Section("Pitch Accent") {
                     pitchAccentStatusOnlyContent
                 }
@@ -367,7 +380,7 @@ struct WordDefinitionsView: View {
                 // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
             }
 
-            Section("Example sentences") {
+            Section {
                 if isLoadingExampleSentences {
                     HStack(spacing: 10) {
                         ProgressView()
@@ -393,6 +406,22 @@ struct WordDefinitionsView: View {
                         } label: {
                             Text(showAllExampleSentences ? "Show fewer" : "Show more")
                                 .font(.callout.weight(.semibold))
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            } header: {
+                HStack(spacing: 8) {
+                    Text("Example sentences")
+                    Spacer(minLength: 8)
+                    if exampleSentences.isEmpty == false {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showExampleSentenceFurigana.toggle()
+                            }
+                        } label: {
+                            Text(showExampleSentenceFurigana ? "Hide furigana" : "Show furigana")
+                                .font(.caption.weight(.semibold))
                         }
                         .buttonStyle(.borderless)
                     }
