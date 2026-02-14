@@ -535,7 +535,8 @@ struct PasteView: View {
             .onChange(of: readingHeadwordSpacingPadding) { _, enabled in
                 triggerFuriganaRefreshIfNeeded(
                     reason: enabled ? "headword spacing padding toggled on" : "headword spacing padding toggled off",
-                    recomputeSpans: false
+                    recomputeSpans: false,
+                    skipTailSemanticMerge: true
                 )
             }
             .onChange(of: knownWordFuriganaModeRaw) { _, _ in
@@ -2308,10 +2309,14 @@ struct PasteView: View {
         triggerFuriganaRefreshIfNeeded(reason: reason, recomputeSpans: true)
     }
 
-    func triggerFuriganaRefreshIfNeeded(reason: String = "state change", recomputeSpans: Bool = true) {
+    func triggerFuriganaRefreshIfNeeded(
+        reason: String = "state change",
+        recomputeSpans: Bool = true,
+        skipTailSemanticMerge: Bool = false
+    ) {
         guard inputText.isEmpty == false else { return }
         furiganaRefreshToken &+= 1
-        startFuriganaTask(token: furiganaRefreshToken, recomputeSpans: recomputeSpans)
+        startFuriganaTask(token: furiganaRefreshToken, recomputeSpans: recomputeSpans, skipTailSemanticMerge: skipTailSemanticMerge)
     }
 
     private func assignInputTextFromExternalSource(_ text: String) {
@@ -2320,15 +2325,15 @@ struct PasteView: View {
         inputText = text
     }
 
-    private func startFuriganaTask(token: Int, recomputeSpans: Bool) {
-        guard let taskBody = makeFuriganaTask(token: token, recomputeSpans: recomputeSpans) else { return }
+    private func startFuriganaTask(token: Int, recomputeSpans: Bool, skipTailSemanticMerge: Bool) {
+        guard let taskBody = makeFuriganaTask(token: token, recomputeSpans: recomputeSpans, skipTailSemanticMerge: skipTailSemanticMerge) else { return }
         furiganaTaskHandle?.cancel()
         furiganaTaskHandle = Task {
             await taskBody()
         }
     }
 
-    private func makeFuriganaTask(token: Int, recomputeSpans: Bool) -> (() async -> Void)? {
+    private func makeFuriganaTask(token: Int, recomputeSpans: Bool, skipTailSemanticMerge: Bool) -> (() async -> Void)? {
         guard inputText.isEmpty == false else { return nil }
 
         // INVESTIGATION NOTES (2026-01-04)
@@ -2402,6 +2407,7 @@ struct PasteView: View {
             readingOverrides: currentOverrides,
             context: "PasteView",
             padHeadwordSpacing: currentHeadwordSpacingPadding,
+            skipTailSemanticMerge: skipTailSemanticMerge,
             knownWordSurfaceKeys: knownWordSurfaceKeys
         )
         let service = furiganaPipeline

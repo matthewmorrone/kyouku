@@ -70,9 +70,49 @@ struct FuriganaPipelineService {
         let context: String
         let padHeadwordSpacing: Bool
 
+        /// When true, skips the tail semantic merge pass.
+        ///
+        /// Intended for render-only updates (e.g. headword padding) that should not change
+        /// semantic grouping but do need ruby projection to re-run.
+        let skipTailSemanticMerge: Bool
+
         /// Kana-folded “known word” surfaces used for adaptive ruby suppression.
         /// When non-empty, ruby annotations are removed for semantic spans that match.
         let knownWordSurfaceKeys: Set<String>
+
+        init(
+            text: String,
+            showFurigana: Bool,
+            needsTokenHighlights: Bool,
+            textSize: Double,
+            furiganaSize: Double,
+            recomputeSpans: Bool,
+            existingSpans: [AnnotatedSpan]?,
+            existingSemanticSpans: [SemanticSpan],
+            amendedSpans: [TextSpan]?,
+            hardCuts: [Int],
+            readingOverrides: [ReadingOverride],
+            context: String,
+            padHeadwordSpacing: Bool,
+            skipTailSemanticMerge: Bool = false,
+            knownWordSurfaceKeys: Set<String>
+        ) {
+            self.text = text
+            self.showFurigana = showFurigana
+            self.needsTokenHighlights = needsTokenHighlights
+            self.textSize = textSize
+            self.furiganaSize = furiganaSize
+            self.recomputeSpans = recomputeSpans
+            self.existingSpans = existingSpans
+            self.existingSemanticSpans = existingSemanticSpans
+            self.amendedSpans = amendedSpans
+            self.hardCuts = hardCuts
+            self.readingOverrides = readingOverrides
+            self.context = context
+            self.padHeadwordSpacing = padHeadwordSpacing
+            self.skipTailSemanticMerge = skipTailSemanticMerge
+            self.knownWordSurfaceKeys = knownWordSurfaceKeys
+        }
     }
 
     struct Result {
@@ -161,13 +201,19 @@ struct FuriganaPipelineService {
         // This is intentionally *not* Stage 1 logic; it runs after the current
         // pipeline iteration has produced semantic spans and exists to reduce
         // over-segmentation that can remain even after Stage 2.5 regrouping.
-        let mergedSemantic = await Self.mergeAdjacentSemanticSpansIfValid(
-            text: input.text,
-            spans: resolvedSemantic,
-            hardCuts: input.hardCuts,
-            context: input.context
-        )
-        log("S50", stageLine("SemanticGrouping(tail)", describeSemantic(mergedSemantic)))
+        let mergedSemantic: [SemanticSpan]
+        if input.skipTailSemanticMerge {
+            mergedSemantic = resolvedSemantic
+            log("S50", stageLine("SemanticGrouping(tail)", "skipped"))
+        } else {
+            mergedSemantic = await Self.mergeAdjacentSemanticSpansIfValid(
+                text: input.text,
+                spans: resolvedSemantic,
+                hardCuts: input.hardCuts,
+                context: input.context
+            )
+            log("S50", stageLine("SemanticGrouping(tail)", describeSemantic(mergedSemantic)))
+        }
 
         var attributed: NSAttributedString?
         if input.showFurigana {

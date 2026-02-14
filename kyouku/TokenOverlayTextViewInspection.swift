@@ -356,6 +356,7 @@ extension TokenOverlayTextView {
     }
 
     @objc
+    /// Tap → resolve semantic span (source) → hit-test → highlight its display range.
     func handleInspectionTap(_ recognizer: UITapGestureRecognizer) {
         guard isTapInspectionEnabled, recognizer.state == .ended else { return }
 
@@ -461,6 +462,7 @@ extension TokenOverlayTextView {
         logSpanResolution(for: sourceResolvedIndex)
     }
 
+    /// Composed-character range in the DISPLAY string at a UTF-16 index.
     func composedCharacterRangeInDisplayString(atUTF16Index index: Int) -> NSRange {
         guard let text = attributedText?.string, text.isEmpty == false else { return NSRange(location: NSNotFound, length: 0) }
         let ns = text as NSString
@@ -468,6 +470,7 @@ extension TokenOverlayTextView {
         return ns.rangeOfComposedCharacterSequence(at: index)
     }
 
+    /// Hit-test a DISPLAY range against base glyphs or ruby overlay glyphs.
     func pointHitsDisplayRange(_ range: NSRange, at point: CGPoint) -> Bool {
         guard range.location != NSNotFound, range.length > 0 else { return false }
 
@@ -507,6 +510,7 @@ extension TokenOverlayTextView {
         return false
     }
 
+    /// Hit-test a semantic span's rendered glyphs (base or ruby).
     func pointHitsSemanticSpan(_ selection: RubySpanSelection, at point: CGPoint) -> Bool {
         let range = displayRange(fromSourceRange: selection.highlightRange)
         guard range.location != NSNotFound, range.length > 0 else { return false }
@@ -551,10 +555,7 @@ extension TokenOverlayTextView {
     }
 
     func pointHitsSemanticSpanForSpacing(_ selection: RubySpanSelection, at point: CGPoint) -> Bool {
-        // Spacing drag should feel easier to initiate than token inspection:
-        // - allow taps in the ruby headroom above the base glyphs
-        // - allow taps slightly outside tight selection rects (between tokens)
-        // We still require the point to be inside the visible line band so empty gutter drags don't trigger.
+        // Spacing-pan hit-test: looser than inspection (allows ruby headroom / small outside margins).
 
         let range = displayRange(fromSourceRange: selection.highlightRange)
         guard range.location != NSNotFound, range.length > 0 else { return false }
@@ -601,15 +602,18 @@ extension TokenOverlayTextView {
         return true
     }
 
+    /// Sets the active highlight range (DISPLAY coordinates).
     func applyInspectionHighlight(range: NSRange?) {
         selectionHighlightRange = range
     }
 
+    /// Clears the highlight and emits nil selection.
     func clearInspectionHighlight() {
         applyInspectionHighlight(range: nil)
         notifySpanSelection(nil)
     }
 
+    /// Emits the current span selection to the host.
     func notifySpanSelection(_ selection: RubySpanSelection?) {
         spanSelectionHandler?(selection)
     }
@@ -667,6 +671,7 @@ extension TokenOverlayTextView {
 
     // MARK: - Tap -> index resolution
 
+    /// Tap → UTF-16 index in the DISPLAY string (allows line-band + ruby headroom).
     func utf16IndexForTap(at point: CGPoint) -> Int? {
         guard let attributedLength = attributedText?.length, attributedLength > 0 else { return nil }
 
@@ -689,6 +694,7 @@ extension TokenOverlayTextView {
         return offset
     }
 
+    /// Character-tap mode: only direct base glyph or ruby overlay hits (no whitespace snapping).
     func utf16IndexForCharacterTap(at point: CGPoint) -> Int? {
         guard let attributedLength = attributedText?.length, attributedLength > 0 else { return nil }
 
@@ -730,6 +736,7 @@ extension TokenOverlayTextView {
         return nil
     }
 
+    /// Fallback: nearest `UITextRange` via UITextInput closest-position.
     func textRangeNearPoint(_ point: CGPoint) -> UITextRange? {
         guard let closestPosition = closestPosition(to: point) else { return nil }
         if let next = position(from: closestPosition, offset: 1) {
@@ -741,6 +748,7 @@ extension TokenOverlayTextView {
         return nil
     }
 
+    /// Snap a raw DISPLAY UTF-16 index to a nearby inspectable character (skips spaces/newlines/U+FFFC).
     func resolvedTextIndex(from candidate: Int) -> Int? {
         guard let backingString = attributedText?.string, backingString.isEmpty == false else { return nil }
         let utf16View = backingString.utf16
@@ -769,6 +777,7 @@ extension TokenOverlayTextView {
         return nil
     }
 
+    /// Find an inspectable character to the left on the same line.
     func inspectableIndex(before index: String.Index, in text: String) -> String.Index? {
         var cursor = index
         while cursor > text.startIndex {
@@ -780,6 +789,7 @@ extension TokenOverlayTextView {
         return nil
     }
 
+    /// Find an inspectable character to the right on the same line.
     func inspectableIndex(after index: String.Index, in text: String) -> String.Index? {
         var cursor = index
         while cursor < text.endIndex {
@@ -793,11 +803,13 @@ extension TokenOverlayTextView {
         return nil
     }
 
+    /// UTF-16 code-unit offset for a `String.Index` (app uses UTF-16 `NSRange`).
     func utf16Offset(of index: String.Index, in text: String) -> Int? {
         guard let utf16Position = index.samePosition(in: text.utf16) else { return nil }
         return text.utf16.distance(from: text.utf16.startIndex, to: utf16Position)
     }
 
+    /// Token-inspectable character (not whitespace/newline/U+FFFC spacer).
     func isInspectableCharacter(_ character: Character) -> Bool {
         if character.isNewline { return false }
         if character.isWhitespace { return false }
@@ -805,6 +817,7 @@ extension TokenOverlayTextView {
         return true
     }
 
+    /// SOURCE index → semantic span selection (highlightRange = span.range in SOURCE coords).
     func spanSelectionContext(forUTF16Index index: Int) -> RubySpanSelection? {
         guard let (tokenIndex, span) = semanticSpans.spanContext(containingUTF16Index: index) else { return nil }
         let spanRange = span.range

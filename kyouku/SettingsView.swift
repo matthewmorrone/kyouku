@@ -39,6 +39,7 @@ struct SettingsView: View {
 
     @AppStorage("debugViewMetricsHUD") private var debugViewMetricsHUD: Bool = false
     @AppStorage("rubyDebugRects") private var rubyDebugRects: Bool = false
+    @AppStorage("RubyEnvelopeDebug.selectionEnvelopeRects") private var rubyEnvelopeSelectionEnvelopeRects: Bool = false
     @AppStorage("rubyDebugBisectors") private var rubyDebugBisectors: Bool = false
     @AppStorage("RubyDebug.showHeadwordBisectors") private var rubyDebugHeadwordBisectors: Bool = true
     @AppStorage("RubyDebug.showRubyBisectors") private var rubyDebugRubyBisectors: Bool = true
@@ -520,6 +521,7 @@ struct SettingsView: View {
             Toggle("Pixel ruler overlay", isOn: $debugPixelRulerOverlay)
             Toggle("Headword debug rects", isOn: $rubyHeadwordDebugRects)
             Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
+            Toggle("Token envelope rects", isOn: $rubyEnvelopeSelectionEnvelopeRects)
             Toggle("Bisectors", isOn: $rubyDebugBisectors)
             Toggle("Headword bisectors", isOn: $rubyDebugHeadwordBisectors)
                 .disabled(rubyDebugBisectors == false)

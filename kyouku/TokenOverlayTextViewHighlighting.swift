@@ -14,6 +14,46 @@ extension TokenOverlayTextView {
         return textKit2SegmentRectsInContentCoordinates(for: characterRange)
     }
 
+    /// Like `baseHighlightRectsInContentCoordinates`, but excludes the U+FFFC spacer characters
+    /// inserted for ruby-width padding.
+    ///
+    /// Those spacers are *layout-affecting* and can wrap across lines; including them can make
+    /// a token highlight appear to cover large empty areas (sometimes spanning multiple lines).
+    func baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in characterRange: NSRange) -> [CGRect] {
+        guard let attributedText else { return [] }
+        guard characterRange.location != NSNotFound, characterRange.length > 0 else { return [] }
+        guard NSMaxRange(characterRange) <= attributedText.length else { return [] }
+
+        let s = attributedText.string as NSString
+        let end = NSMaxRange(characterRange)
+        let spacer: unichar = 0xFFFC
+
+        var subranges: [NSRange] = []
+        subranges.reserveCapacity(4)
+
+        var runStart = characterRange.location
+        var i = characterRange.location
+        while i < end {
+            if s.character(at: i) == spacer {
+                if i > runStart {
+                    subranges.append(NSRange(location: runStart, length: i - runStart))
+                }
+                runStart = i + 1
+            }
+            i += 1
+        }
+        if end > runStart {
+            subranges.append(NSRange(location: runStart, length: end - runStart))
+        }
+
+        var rects: [CGRect] = []
+        rects.reserveCapacity(8)
+        for r in subranges {
+            rects.append(contentsOf: baseHighlightRectsInContentCoordinates(in: r))
+        }
+        return rects
+    }
+
     func updateSelectionHighlightPath() {
         guard let range = selectionHighlightRange,
               range.location != NSNotFound,
@@ -30,6 +70,7 @@ extension TokenOverlayTextView {
             return
         }
 
+        // 1) Collect base (headword) highlight rects in content coordinates.
         // Base (headword) highlight uses the FULL selected span range (including okurigana).
         // We clamp vertically to the base glyph line-height so it never covers ruby space.
         // IMPORTANT: Do not rely solely on `selectionRects(for:)` here; it can be stale
@@ -44,7 +85,7 @@ extension TokenOverlayTextView {
         // highlight background matches the *visual* token width (never narrower than furigana).
         let baseRectsInContent: [CGRect] = {
             if #available(iOS 15.0, *) {
-                let rects = baseHighlightRectsInContentCoordinates(in: range)
+                let rects = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: range)
                 if rects.isEmpty == false { return rects }
             }
 
@@ -55,6 +96,7 @@ extension TokenOverlayTextView {
             return rectsInView.map { $0.offsetBy(dx: offset.x, dy: offset.y) }
         }()
 
+        // 2) Union base rects per visual line.
         var highlightRectsInContent = unionRectsByLine(baseRectsInContent)
         let baseRectUnionInContent: CGRect = {
             var u = CGRect.null
@@ -64,6 +106,7 @@ extension TokenOverlayTextView {
             return u
         }()
 
+        // 3) Identify the selected token and fetch ruby rects from the overlay layers.
         let rubyHighlightTokenIndex: Int? = {
             let sourceLoc = sourceIndex(fromDisplayIndex: range.location)
             guard let (tokenIndex, _) = semanticSpans.spanContext(containingUTF16Index: sourceLoc) else { return nil }
@@ -82,6 +125,7 @@ extension TokenOverlayTextView {
             return u
         }()
 
+        // 4) Expand the highlight to enclose ruby + headword ("ruby envelope").
         if rubyRectUnionInContent.isNull == false {
             // Attach ruby bounds to the closest base line below it (or append if no good match).
             let rubyMaxY = rubyRectUnionInContent.maxY
@@ -124,6 +168,7 @@ extension TokenOverlayTextView {
             rubyEnvelopeDebugFinalUnionLayer.frame = highlightOverlayContainerLayer.bounds
         }
 
+        // 5) Apply optional caller-provided insets to the final highlight rects.
         let insets = selectionHighlightInsets
         if insets != .zero {
             highlightRectsInContent = highlightRectsInContent.compactMap { r in
@@ -180,8 +225,9 @@ extension TokenOverlayTextView {
             rubyEnvelopeDebugFinalUnionLayer.path = nil
         }
 
+        // 6) Convert rects into a rounded-rect path and assign to the base highlight layer.
         let highlightPath = CGMutablePath()
-        let highlightOutset: CGFloat = 5
+        let highlightOutset: CGFloat = 1
         for r in highlightRectsInContent {
             let rr = r.insetBy(dx: -highlightOutset, dy: -highlightOutset)
             guard rr.isNull == false, rr.isEmpty == false, rr.width.isFinite, rr.height.isFinite else { continue }
@@ -192,6 +238,92 @@ extension TokenOverlayTextView {
 
         // Envelope highlight already includes ruby bounds.
         rubyHighlightLayer.path = nil
+    }
+
+    /// Debug overlay: draws selection-style envelope rectangles (ruby+headword union)
+    /// for every semantic token.
+    ///
+    /// Controlled by the existing `RubyEnvelopeDebug.selectionEnvelopeRects` toggle.
+    func updateRubyEnvelopeDebugTokenEnvelopesIfNeeded() {
+        guard rubyEnvelopeDebugSelectionEnvelopeRectsEnabled else {
+            rubyEnvelopeDebugSelectionEnvelopeRectsLayer.path = nil
+            rubyEnvelopeDebugSelectionEnvelopeRectsLayer.isHidden = true
+            return
+        }
+
+        guard attributedText != nil, semanticSpans.isEmpty == false else {
+            rubyEnvelopeDebugSelectionEnvelopeRectsLayer.path = nil
+            rubyEnvelopeDebugSelectionEnvelopeRectsLayer.isHidden = false
+            return
+        }
+
+        rubyEnvelopeDebugSelectionEnvelopeRectsLayer.frame = highlightOverlayContainerLayer.bounds
+
+        let path = CGMutablePath()
+        let highlightOutset: CGFloat = 1
+        let maxTokens = min(semanticSpans.count, 1024)
+        let insets = selectionHighlightInsets
+
+        for tokenIndex in 0..<maxTokens {
+            let sourceRange = semanticSpans[tokenIndex].range
+            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
+
+            // Base rects for this token (in display coordinates) in content space.
+            let display = displayRange(fromSourceRange: sourceRange)
+            let baseRectsInContent = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: display)
+            guard baseRectsInContent.isEmpty == false else { continue }
+
+            var tokenRectsInContent = unionRectsByLine(baseRectsInContent)
+
+            // Ruby rect union for this token (from overlay layer frames).
+            let rubyRects = rubyHighlightRectsInContentCoordinates(forTokenIndex: tokenIndex)
+            let rubyUnion: CGRect = {
+                var u = CGRect.null
+                for r in rubyRects {
+                    u = u.isNull ? r : u.union(r)
+                }
+                return u
+            }()
+
+            if rubyUnion.isNull == false {
+                // Attach ruby bounds to the closest base line below it.
+                let rubyMaxY = rubyUnion.maxY
+                let maxSnapDistance = max(8, rubyHighlightHeadroom + 8)
+                if let best = tokenRectsInContent.enumerated().min(by: { a, b in
+                    abs(a.element.minY - rubyMaxY) < abs(b.element.minY - rubyMaxY)
+                }) {
+                    let dy = abs(best.element.minY - rubyMaxY)
+                    if dy <= maxSnapDistance {
+                        tokenRectsInContent[best.offset] = tokenRectsInContent[best.offset].union(rubyUnion)
+                    } else {
+                        tokenRectsInContent.append(rubyUnion)
+                    }
+                } else {
+                    tokenRectsInContent = [rubyUnion]
+                }
+            }
+
+            if insets != .zero {
+                tokenRectsInContent = tokenRectsInContent.compactMap { r in
+                    var rr = r
+                    rr.origin.x += insets.left
+                    rr.origin.y += insets.top
+                    rr.size.width -= (insets.left + insets.right)
+                    rr.size.height -= (insets.top + insets.bottom)
+                    guard rr.isNull == false, rr.isEmpty == false, rr.width > 0, rr.height > 0 else { return nil }
+                    return rr
+                }
+            }
+
+            for r in tokenRectsInContent {
+                let rr = r.insetBy(dx: -highlightOutset, dy: -highlightOutset)
+                guard rr.isNull == false, rr.isEmpty == false, rr.width.isFinite, rr.height.isFinite else { continue }
+                path.addRect(rr)
+            }
+        }
+
+        rubyEnvelopeDebugSelectionEnvelopeRectsLayer.path = path.isEmpty ? nil : path
+        rubyEnvelopeDebugSelectionEnvelopeRectsLayer.isHidden = false
     }
 
     func baseHighlightRects(in characterRange: NSRange) -> [CGRect] {

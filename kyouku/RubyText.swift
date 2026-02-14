@@ -259,6 +259,39 @@ struct RubyText: UIViewRepresentable {
         // Keep selection highlight geometry stable even when we don't reapply attributed text.
         uiView.selectionHighlightInsets = selectionHighlightInsets(for: baseFont)
 
+        // IMPORTANT:
+        // Furigana size is encoded as `.rubyReadingFontSize` attributes. Some code paths
+        // can update those attributes without changing the attributed string's identity.
+        // If `renderKey` only keys on ObjectIdentifier, ruby can get "stuck" at an old size.
+        let rubyFontSizeSignature: Int = {
+            guard attributed.length > 0 else { return 0 }
+            let full = NSRange(location: 0, length: attributed.length)
+            var count = 0
+            var maxSize: CGFloat = 0
+            var minSize: CGFloat = CGFloat.greatestFiniteMagnitude
+            attributed.enumerateAttribute(.rubyReadingFontSize, in: full, options: []) { value, range, _ in
+                guard range.location != NSNotFound, range.length > 0 else { return }
+                let rubySize: CGFloat? = {
+                    if let num = value as? NSNumber { return CGFloat(num.doubleValue) }
+                    if let cg = value as? CGFloat { return cg }
+                    if let dbl = value as? Double { return CGFloat(dbl) }
+                    return nil
+                }()
+                guard let rubySize else { return }
+                count += 1
+                maxSize = max(maxSize, rubySize)
+                minSize = min(minSize, rubySize)
+            }
+            if count == 0 {
+                minSize = 0
+            }
+            let c = count
+            let maxQ = Int((maxSize * 1000).rounded(.toNearestOrEven))
+            let minQ = Int((minSize * 1000).rounded(.toNearestOrEven))
+            // A simple mixed hash to avoid extra allocations.
+            return ((c &* 31) ^ (maxQ &* 131) ^ (minQ &* 17))
+        }()
+
         var renderHasher = Hasher()
         renderHasher.combine(ObjectIdentifier(attributed))
         renderHasher.combine(attributed.length)
@@ -268,6 +301,7 @@ struct RubyText: UIViewRepresentable {
         renderHasher.combine(Int((globalKerning * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((max(0, rubyBaselineGap) * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(Int((rubyHeadroom * 1000).rounded(.toNearestOrEven)))
+        renderHasher.combine(rubyFontSizeSignature)
         renderHasher.combine(rubyMetricsEnabled ? 1 : 0)
         renderHasher.combine(Int((effectiveLineSpacing * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(rubyHorizontalAlignment == .leading ? 1 : 0)

@@ -14,10 +14,13 @@
 - [ ] deduplicate example sentences
 - [ ] if a word belonged to a note and was deleted, when you add it back it's not attached to the note
 - [ ] custom reading popup should be prefilled and set to japanese keyboard
+- [ ] provide meaning of verbs in the form they surface in 
 
 ## Performance / UX issues
 - [ ] Make saving to the words list more responsive 
 - [ ] Clicking the star button doesn’t always trigger bookmarking, but the bookmark button always does
+- [ ] typing freely in english in the paste area is super laggy 
+
 
 ## Ideas
 - [x] add option to change displayed font for Japanese

@@ -149,7 +149,10 @@ extension TokenOverlayTextView {
         let lineRectsInContent = visibleLines.map { $0.typographicRectInContent }
 
         // Fixed left boundary for a line in CONTENT coordinates (independent of any glyphs/spacers).
-        let lineContentMinX = textContainerInset.left + textContainer.lineFragmentPadding
+        // Invariant: leftmost token on a line should start 1 physical pixel to the right of the inset guide.
+        let displayScale = max(1.0, traitCollection.displayScale)
+        let onePixel = 1.0 / displayScale
+        let lineContentMinX = (textContainerInset.left + textContainer.lineFragmentPadding) + onePixel
 
         let mutable = NSMutableAttributedString(attributedString: text)
         let backing = mutable.string as NSString
@@ -157,6 +160,18 @@ extension TokenOverlayTextView {
         func readKern(at index: Int) -> CGFloat {
             guard index >= 0, index < mutable.length else { return 0 }
             let v = mutable.attribute(.kern, at: index, effectiveRange: nil)
+            if let num = v as? NSNumber { return CGFloat(num.doubleValue) }
+            if let cg = v as? CGFloat { return cg }
+            if let dbl = v as? Double { return CGFloat(dbl) }
+            return 0
+        }
+
+        let overlapPadKernKey = NSAttributedString.Key("RubyOverlapPadKern")
+        let lineStartSpacerKey = NSAttributedString.Key("RubyLineStartBoundarySpacer")
+
+        func readOverlapPadKern(at index: Int) -> CGFloat {
+            guard index >= 0, index < mutable.length else { return 0 }
+            let v = mutable.attribute(overlapPadKernKey, at: index, effectiveRange: nil)
             if let num = v as? NSNumber { return CGFloat(num.doubleValue) }
             if let cg = v as? CGFloat { return cg }
             if let dbl = v as? Double { return CGFloat(dbl) }
@@ -171,8 +186,28 @@ extension TokenOverlayTextView {
             guard last >= 0, last < backing.length else { return }
             let composed = backing.rangeOfComposedCharacterSequence(at: last)
             guard composed.location != NSNotFound, composed.length > 0 else { return }
-            let current = readKern(at: composed.location)
-            mutable.addAttribute(.kern, value: current + extra, range: composed)
+
+            // IMPORTANT:
+            // This correction runs post-layout and may be scheduled multiple times while
+            // TextKit settles. If we always add `extra` to the existing `.kern`, we can
+            // accidentally re-apply the *same* shift and create a visibly growing gap.
+            // Track the overlap-padding component separately and update `.kern` idempotently.
+
+            let currentKern = readKern(at: composed.location)
+            let priorPad = readOverlapPadKern(at: composed.location)
+            let baseKern = (currentKern - priorPad).isFinite ? (currentKern - priorPad) : currentKern
+
+            // Heuristic: if the requested `extra` approximately equals the padding we already
+            // applied, treat it as a re-run against stale frames and do not add again.
+            let tol: CGFloat = 0.5
+            let looksLikeDuplicate = priorPad > 0.01 && abs(extra - priorPad) <= tol
+            let newPad = looksLikeDuplicate ? priorPad : (priorPad + extra)
+
+            let newKern = baseKern + newPad
+            if newKern.isFinite {
+                mutable.addAttribute(.kern, value: newKern, range: composed)
+                mutable.addAttribute(overlapPadKernKey, value: newPad, range: composed)
+            }
         }
 
         func isNonRubySpacer(at index: Int) -> Bool {
@@ -187,6 +222,11 @@ extension TokenOverlayTextView {
                 return backing.character(at: index) == 0xFFFC
             }
             return true
+        }
+
+        func isLineStartBoundarySpacer(at index: Int) -> Bool {
+            guard isNonRubySpacer(at: index) else { return false }
+            return mutable.attribute(lineStartSpacerKey, at: index, effectiveRange: nil) != nil
         }
 
         func spacerWidth(at index: Int) -> CGFloat {
@@ -253,6 +293,10 @@ extension TokenOverlayTextView {
                     .font: baseFont
                 ]
             )
+
+            // Tag this spacer so phase-3 can reliably identify and update it without
+            // accidentally touching other run-delegate spacers (e.g. inter-token spacing).
+            insert.addAttribute(lineStartSpacerKey, value: true, range: NSRange(location: 0, length: insert.length))
 
             let idx = max(0, min(mutable.length - 1, displayIndex))
             if idx >= 0, idx < mutable.length {
@@ -389,78 +433,156 @@ extension TokenOverlayTextView {
         var lineInsertions: [LineInsertion] = []
         lineInsertions.reserveCapacity(16)
 
-        for (lineIndex, proposals) in proposalsByLine {
-            guard lineIndex >= 0, lineIndex < visibleLines.count else { continue }
+        func isHardBoundaryGlyph(_ s: String) -> Bool {
+            if s == "\u{FFFC}" { return true }
+            if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+            let set = CharacterSet.punctuationCharacters.union(.symbols)
+            for scalar in s.unicodeScalars {
+                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
+                if set.contains(scalar) == false { return false }
+            }
+            return true
+        }
+
+        func trimmedInkRange(in displayRange: NSRange) -> NSRange? {
+            let doc = NSRange(location: 0, length: mutable.length)
+            let bounded = NSIntersectionRange(displayRange, doc)
+            guard bounded.location != NSNotFound, bounded.length > 0 else { return nil }
+            let upperBound = min(mutable.length, NSMaxRange(bounded))
+            var inkStart = bounded.location
+            var inkEndExclusive = upperBound
+            var foundInkGlyph = false
+
+            if bounded.location < upperBound {
+                var idx = bounded.location
+                while idx < upperBound {
+                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
+                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
+                    let s = backing.substring(with: r)
+                    if isHardBoundaryGlyph(s) {
+                        idx = NSMaxRange(r)
+                        continue
+                    }
+                    foundInkGlyph = true
+                    inkStart = r.location
+                    break
+                }
+                guard foundInkGlyph else { return nil }
+
+                var tail = upperBound - 1
+                while tail >= inkStart {
+                    let r = backing.rangeOfComposedCharacterSequence(at: tail)
+                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
+                    let s = backing.substring(with: r)
+                    if isHardBoundaryGlyph(s) {
+                        if r.location == 0 { break }
+                        tail = r.location - 1
+                        continue
+                    }
+                    inkEndExclusive = NSMaxRange(r)
+                    break
+                }
+            }
+
+            let len = max(0, inkEndExclusive - inkStart)
+            guard inkStart != NSNotFound, len > 0 else { return nil }
+            return NSRange(location: inkStart, length: len)
+        }
+
+        struct FirstTokenOnLine {
+            let tokenIndex: Int
+            let inkStartIndex: Int
+            let baseMinXInContent: CGFloat
+            let envelopeMinXInContent: CGFloat
+        }
+
+        var firstTokenByLineIndex: [Int: FirstTokenOnLine] = [:]
+        firstTokenByLineIndex.reserveCapacity(visibleLines.count)
+
+        for (tokenIndex, span) in semanticSpans.enumerated() {
+            let sourceRange = span.range
+            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
+            let surface = span.surface
+            if surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+
+            let displaySpanRange = displayRange(fromSourceRange: sourceRange)
+            guard displaySpanRange.location != NSNotFound, displaySpanRange.length > 0 else { continue }
+            guard let inkRange = trimmedInkRange(in: displaySpanRange) else { continue }
+
+            let baseRectsInContent = textKit2AnchorRectsInContentCoordinates(for: inkRange, lineRectsInContent: lineRectsInContent)
+            guard baseRectsInContent.isEmpty == false else { continue }
+            let unionsInContent = unionRectsByLine(baseRectsInContent)
+            guard unionsInContent.isEmpty == false else { continue }
+            let baseUnionInContent = unionsInContent[0]
+            guard let lineIndex = bestMatchingLineIndex(for: baseUnionInContent, candidates: lineRectsInContent) else { continue }
+            guard lineIndex >= 0, lineIndex < lineRectsInContent.count else { continue }
+
+            let baseMinX = baseUnionInContent.minX
+            let rubyMinX = (resolvedRubyFramesByRunStart[inkRange.location] ?? adjustedFramesByRunStart[inkRange.location])?.minX
+            let envelopeMinX = min(baseMinX, rubyMinX ?? baseMinX)
+
+            let candidate = FirstTokenOnLine(
+                tokenIndex: tokenIndex,
+                inkStartIndex: inkRange.location,
+                baseMinXInContent: baseMinX,
+                envelopeMinXInContent: envelopeMinX
+            )
+
+            if let existing = firstTokenByLineIndex[lineIndex] {
+                if candidate.baseMinXInContent < (existing.baseMinXInContent - 0.5) {
+                    firstTokenByLineIndex[lineIndex] = candidate
+                }
+            } else {
+                firstTokenByLineIndex[lineIndex] = candidate
+            }
+        }
+
+        for lineIndex in 0..<visibleLines.count {
             let line = visibleLines[lineIndex]
             let startIndex = line.characterRange.location
             guard startIndex != NSNotFound else { continue }
 
-            let lineRect = lineRectsInContent[lineIndex]
+            guard let first = firstTokenByLineIndex[lineIndex] else { continue }
 
-            // Find the authoritative first headword on this line: choose the headword whose BASE
-            // frame has the smallest minX among those that intersect this line fragment.
-            var best: (run: RubyRun, rubyFrame: CGRect, baseFrame: CGRect)? = nil
-            for p in proposals {
-                guard p.baseFrame.intersects(lineRect) else { continue }
-                let rubyFrame = resolvedRubyFramesByRunStart[p.run.inkRange.location]
-                    ?? adjustedFramesByRunStart[p.run.inkRange.location]
-                    ?? p.frame
-                if let cur = best {
-                    if p.baseFrame.minX < (cur.baseFrame.minX - 0.5) {
-                        best = (p.run, rubyFrame, p.baseFrame)
-                    } else if abs(p.baseFrame.minX - cur.baseFrame.minX) <= 0.5 {
-                        // Stable tiebreak: earlier in document wins.
-                        if p.run.inkRange.location < cur.run.inkRange.location {
-                            best = (p.run, rubyFrame, p.baseFrame)
-                        }
-                    }
-                } else {
-                    best = (p.run, rubyFrame, p.baseFrame)
+            let debugDelta = lineContentMinX - first.envelopeMinXInContent
+            print(String(format: "[LineStartBoundary] line=%d firstToken=%d lineContentMinX=%.2f envelopeMinX=%.2f delta=%.2f", lineIndex, first.tokenIndex, lineContentMinX, first.envelopeMinXInContent, debugDelta))
+
+            // Compute how much we need to change this line's leading spacer width to align the
+            // first token envelope to the fixed left boundary.
+            let delta = lineContentMinX - first.envelopeMinXInContent
+            let hasLineSpacer = isLineStartBoundarySpacer(at: startIndex)
+            let existingSpacerWidth: CGFloat = hasLineSpacer ? spacerWidth(at: startIndex) : 0
+            let spacerTargetWidth: CGFloat? = {
+                guard delta.isFinite else { return nil }
+                // If the ruby is left of the boundary, delta is positive => increase spacer.
+                // If the ruby is right of the boundary, delta is negative => shrink spacer.
+                if hasLineSpacer {
+                    return max(0, existingSpacerWidth + delta)
                 }
-            }
-            guard let first = best else { continue }
-
-            let firstTokenIndex: Int = {
-                // Derive a stable token index for logging only.
-                guard semanticSpans.isEmpty == false else { return 0 }
-                let firstSourceRange = sourceRange(fromDisplayRange: first.run.inkRange)
-                let loc = max(0, firstSourceRange.location == NSNotFound ? 0 : firstSourceRange.location)
-
-                // Binary search for the last span whose start <= loc.
-                var low = 0
-                var high = semanticSpans.count
-                while low < high {
-                    let mid = (low + high) / 2
-                    if semanticSpans[mid].range.location <= loc {
-                        low = mid + 1
-                    } else {
-                        high = mid
-                    }
+                // No existing spacer: only insert if we need to shift right.
+                if delta > 0.5 {
+                    return delta
                 }
-                let idx = max(0, min(semanticSpans.count - 1, low - 1))
-                if NSLocationInRange(loc, semanticSpans[idx].range) { return idx }
-                if idx + 1 < semanticSpans.count, NSLocationInRange(loc, semanticSpans[idx + 1].range) { return idx + 1 }
-                return idx
+                return nil
             }()
-            let debugDelta = lineContentMinX - first.rubyFrame.minX
-            print(String(format: "[LineStartBoundary] line=%d firstToken=%d lineContentMinX=%.2f rubyMinX=%.2f delta=%.2f", lineIndex, firstTokenIndex, lineContentMinX, first.rubyFrame.minX, debugDelta))
 
-            if first.rubyFrame.minX < (lineContentMinX - 0.5) {
-                let delta = lineContentMinX - first.rubyFrame.minX
-                guard delta.isFinite, delta > 0.5 else { continue }
-
-                // If a non-ruby spacer already exists at the line start, grow it.
-                if isNonRubySpacer(at: startIndex) {
-                    let existing = spacerWidth(at: startIndex)
-                    setSpacerWidth(existing + delta, at: startIndex)
-                    didChange = true
+            var spacerChange: CGFloat = 0
+            if let spacerTargetWidth {
+                if hasLineSpacer {
+                    if abs(spacerTargetWidth - existingSpacerWidth) > 0.25 {
+                        setSpacerWidth(spacerTargetWidth, at: startIndex)
+                        spacerChange = spacerTargetWidth - existingSpacerWidth
+                        didChange = true
+                    }
                 } else {
-                    // Insert a line-padding spacer at the visual line start.
                     let s = sourceIndex(fromDisplayIndex: startIndex)
-                    lineInsertions.append(.init(displayIndex: startIndex, width: delta, sourceInsertionPosition: s))
+                    lineInsertions.append(.init(displayIndex: startIndex, width: spacerTargetWidth, sourceInsertionPosition: s))
+                    spacerChange = spacerTargetWidth
                     didChange = true
                 }
             }
+
+            _ = spacerChange
         }
 
         if lineInsertions.isEmpty == false {
@@ -477,6 +599,8 @@ extension TokenOverlayTextView {
 
             // Update index map so selection/semantic spans remain in SOURCE coordinates.
             var newPositions = rubyIndexMap.insertionPositions
+            // Duplicates are allowed and required: other padding systems (ruby padding,
+            // inter-token spacing) may also insert at the same SOURCE index.
             newPositions.append(contentsOf: lineInsertions.map { $0.sourceInsertionPosition })
             newPositions.sort()
             let newMap = RubyIndexMap(insertionPositions: newPositions)

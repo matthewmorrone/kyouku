@@ -171,7 +171,61 @@ extension TokenOverlayTextView {
                 return clampToBestLine(chosen)
             }()
 
-            if picked.isNull == false, picked.isEmpty == false {
+            // IMPORTANT: Preserve invariant: segment rects must never span multiple lines.
+            // Split by typographic line rects when possible.
+            if let frag, picked.isNull == false, picked.isEmpty == false {
+                #if DEBUG
+                // If a segment overlaps more than one typographic line, fail fast.
+                // This should never happen after normalization/clamping.
+                let minInterHeight: CGFloat = 0.5
+                var intersectionCount = 0
+                for line in frag.textLineFragments {
+                    let lb = line.typographicBounds
+                    let lineRect = CGRect(
+                        x: lb.origin.x + fragOrigin.x + inset.left - offset.x,
+                        y: lb.origin.y + fragOrigin.y + inset.top - offset.y,
+                        width: lb.size.width,
+                        height: lb.size.height
+                    )
+                    let inter = picked.intersection(lineRect)
+                    if inter.isNull == false, inter.isEmpty == false, inter.height >= minInterHeight {
+                        intersectionCount += 1
+                        if intersectionCount > 1 { break }
+                    }
+                }
+                precondition(intersectionCount == 1, "TextKit2 segment rect crosses line boundary (view coords). picked=\(NSCoder.string(for: picked)) intersections=\(intersectionCount) range=\(NSStringFromRange(characterRange))")
+                #endif
+
+                var didSplit = false
+                for line in frag.textLineFragments {
+                    let lb = line.typographicBounds
+                    let lineRect = CGRect(
+                        x: lb.origin.x + fragOrigin.x + inset.left - offset.x,
+                        y: lb.origin.y + fragOrigin.y + inset.top - offset.y,
+                        width: lb.size.width,
+                        height: lb.size.height
+                    )
+                    let inter = picked.intersection(lineRect)
+                    guard inter.isNull == false, inter.isEmpty == false else { continue }
+                    var out = inter
+                    out.origin.y = lineRect.minY
+                    out.size.height = lineRect.height
+                    guard out.isNull == false, out.isEmpty == false, out.width.isFinite, out.height.isFinite else { continue }
+                    rects.append(out)
+                    didSplit = true
+                }
+
+                #if DEBUG
+                precondition(didSplit, "TextKit2 segment rect did not intersect any typographic line (view coords). picked=\(NSCoder.string(for: picked)) range=\(NSStringFromRange(characterRange))")
+                #endif
+
+                if didSplit == false {
+                    rects.append(picked)
+                }
+            } else if picked.isNull == false, picked.isEmpty == false {
+                #if DEBUG
+                precondition(frag != nil, "TextKit2 segment has no owning layout fragment (view coords). range=\(NSStringFromRange(characterRange)) rect=\(NSCoder.string(for: picked))")
+                #endif
                 rects.append(picked)
             }
             return true
@@ -283,7 +337,61 @@ extension TokenOverlayTextView {
                 return clampToBestLine(chosen)
             }()
 
-            if picked.isNull == false, picked.isEmpty == false {
+            // IMPORTANT: Preserve invariant: segment rects must never span multiple lines.
+            // Split by typographic line rects when possible.
+            if let frag, picked.isNull == false, picked.isEmpty == false {
+                #if DEBUG
+                // If a segment overlaps more than one typographic line, fail fast.
+                // This should never happen after normalization/clamping.
+                let minInterHeight: CGFloat = 0.5
+                var intersectionCount = 0
+                for line in frag.textLineFragments {
+                    let lb = line.typographicBounds
+                    let lineRect = CGRect(
+                        x: lb.origin.x + fragOrigin.x + inset.left,
+                        y: lb.origin.y + fragOrigin.y + inset.top,
+                        width: lb.size.width,
+                        height: lb.size.height
+                    )
+                    let inter = picked.intersection(lineRect)
+                    if inter.isNull == false, inter.isEmpty == false, inter.height >= minInterHeight {
+                        intersectionCount += 1
+                        if intersectionCount > 1 { break }
+                    }
+                }
+                precondition(intersectionCount == 1, "TextKit2 segment rect crosses line boundary (content coords). picked=\(NSCoder.string(for: picked)) intersections=\(intersectionCount) range=\(NSStringFromRange(characterRange))")
+                #endif
+
+                var didSplit = false
+                for line in frag.textLineFragments {
+                    let lb = line.typographicBounds
+                    let lineRect = CGRect(
+                        x: lb.origin.x + fragOrigin.x + inset.left,
+                        y: lb.origin.y + fragOrigin.y + inset.top,
+                        width: lb.size.width,
+                        height: lb.size.height
+                    )
+                    let inter = picked.intersection(lineRect)
+                    guard inter.isNull == false, inter.isEmpty == false else { continue }
+                    var out = inter
+                    out.origin.y = lineRect.minY
+                    out.size.height = lineRect.height
+                    guard out.isNull == false, out.isEmpty == false, out.width.isFinite, out.height.isFinite else { continue }
+                    rects.append(out)
+                    didSplit = true
+                }
+
+                #if DEBUG
+                precondition(didSplit, "TextKit2 segment rect did not intersect any typographic line (content coords). picked=\(NSCoder.string(for: picked)) range=\(NSStringFromRange(characterRange))")
+                #endif
+
+                if didSplit == false {
+                    rects.append(picked)
+                }
+            } else if picked.isNull == false, picked.isEmpty == false {
+                #if DEBUG
+                precondition(frag != nil, "TextKit2 segment has no owning layout fragment (content coords). range=\(NSStringFromRange(characterRange)) rect=\(NSCoder.string(for: picked))")
+                #endif
                 rects.append(picked)
             }
             return true
