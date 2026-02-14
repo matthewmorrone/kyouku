@@ -117,7 +117,6 @@ struct PasteView: View {
     @AppStorage("readingGlobalKerningPixels") private var readingGlobalKerningPixels: Double = 0
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
     @AppStorage("readingShowFurigana") var showFurigana: Bool = true
-    @AppStorage("debugPipelineTrace") private var debugPipelineTrace: Bool = false
     @AppStorage("readingWrapLines") private var wrapLines: Bool = false
     @AppStorage("readingAlternateTokenColors") private var alternateTokenColors: Bool = false
     @AppStorage("readingHighlightUnknownTokens") private var highlightUnknownTokens: Bool = false
@@ -140,7 +139,6 @@ struct PasteView: View {
     @AppStorage("extractPropagateTokenEdits") var propagateTokenEdits: Bool = false
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
-    @AppStorage("debugHighlightAllDictionaryEntries") private var debugHighlightAllDictionaryEntries: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
     @AppStorage("debugPasteDragToMoveWords") private var debugPasteDragToMoveWords: Bool = false
 
@@ -177,7 +175,7 @@ struct PasteView: View {
         return (value / step).rounded() * step
     }
 
-    private func scheduleFuriganaSizeRefresh(reason: String) {
+    private func schedulePinchZoomRefresh(reason: String) {
         pendingFuriganaSizeRefreshTask?.cancel()
         pendingFuriganaSizeRefreshTask = Task { @MainActor in
             do {
@@ -186,7 +184,7 @@ struct PasteView: View {
                 return
             }
             guard Task.isCancelled == false else { return }
-            triggerFuriganaRefreshIfNeeded(reason: reason, recomputeSpans: false)
+            triggerFuriganaRefreshIfNeeded(reason: reason, recomputeSpans: false, skipTailSemanticMerge: true)
         }
     }
 
@@ -218,7 +216,7 @@ struct PasteView: View {
                 pinchZoomBaselineFuriganaSize = nil
                 pendingFuriganaSizeRefreshTask?.cancel()
                 pendingFuriganaSizeRefreshTask = nil
-                triggerFuriganaRefreshIfNeeded(reason: "pinch zoom ended", recomputeSpans: false)
+                triggerFuriganaRefreshIfNeeded(reason: "pinch zoom ended", recomputeSpans: false, skipTailSemanticMerge: true)
             }
     }
     private static let inlineDictionaryPanelEnabledFlag = true
@@ -299,19 +297,6 @@ struct PasteView: View {
         }
         .onPreferenceChange(PasteAreaFramePreferenceKey.self) { newValue in
             pasteAreaFrame = sanitizeGeometryRect(newValue)
-        }
-        .onChange(of: debugPipelineTrace) { _, enabled in
-            guard enabled else { return }
-            guard debugTokenListText.isEmpty == false else {
-                emitTokenListLog("[TokenList] (no cached token list yet)")
-                return
-            }
-            emitTokenListLog("[TokenList]\n\(debugTokenListText)")
-            lastLoggedTokenListText = debugTokenListText
-        }
-        .onChange(of: debugHighlightAllDictionaryEntries) { _, _ in
-            // Ensure toggling the setting immediately updates the rendered text.
-            triggerFuriganaRefreshIfNeeded(reason: "debug highlight all dictionary entries toggled", recomputeSpans: false)
         }
         .sheet(item: $wordDefinitionsRequest, onDismiss: {
             // When the dictionary details sheet is dismissed, also clear the
@@ -524,12 +509,20 @@ struct PasteView: View {
                 )
                 showToast(enabled ? "Highlight unknown words enabled" : "Highlight unknown words disabled")
             }
+            .onChange(of: readingTextSize) {
+                // Text size changes are render-only; they must update attributed text + ruby overlay.
+                if pinchZoomInProgress {
+                    schedulePinchZoomRefresh(reason: "text font size changed (pinch)")
+                } else {
+                    triggerFuriganaRefreshIfNeeded(reason: "text font size changed", recomputeSpans: false, skipTailSemanticMerge: true)
+                }
+            }
             .onChange(of: readingFuriganaSize) {
                 guard showFurigana else { return }
                 if pinchZoomInProgress {
-                    scheduleFuriganaSizeRefresh(reason: "furigana font size changed (pinch)")
+                    schedulePinchZoomRefresh(reason: "furigana font size changed (pinch)")
                 } else {
-                    triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false)
+                    triggerFuriganaRefreshIfNeeded(reason: "furigana font size changed", recomputeSpans: false, skipTailSemanticMerge: true)
                 }
             }
             .onChange(of: readingHeadwordSpacingPadding) { _, enabled in
@@ -830,10 +823,9 @@ struct PasteView: View {
                     debugTokenListText = text
                 }
 
-                // Also emit token list text to logs for debugging.
-                // Keep it behind the in-app toggle; log even if the string hasn't changed
-                // (toggling tracing on shouldn't require a layout/text change to re-emit).
-                if debugPipelineTrace, text != lastLoggedTokenListText {
+                // Always emit token list text to logs for debugging.
+                // Dedupe by string to avoid spamming during scroll/layout.
+                if text != lastLoggedTokenListText {
                     emitTokenListLog("[TokenList]\n\(text)")
                     lastLoggedTokenListText = text
                 }

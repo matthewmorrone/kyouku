@@ -157,4 +157,46 @@ final class FuriganaPipelineServiceTests: XCTestCase {
         let suppressedReading = suppressedAttributed.attribute(key, at: 0, effectiveRange: nil) as? String
         XCTAssertNil(suppressedReading)
     }
+
+    func testRubyDoesNotPropagateToTrailingPunctuationWhenPaddingEnabled() async {
+        let service = FuriganaPipelineService()
+        let text = "星。"
+        let input = FuriganaPipelineService.Input(
+            text: text,
+            showFurigana: true,
+            needsTokenHighlights: false,
+            textSize: 17,
+            furiganaSize: 9,
+            recomputeSpans: true,
+            existingSpans: nil,
+            existingSemanticSpans: [],
+            amendedSpans: nil,
+            hardCuts: [],
+            readingOverrides: [],
+            context: "FuriganaPipelineServiceTests",
+            padHeadwordSpacing: true,
+            knownWordSurfaceKeys: []
+        )
+
+        let result = await service.render(input)
+        guard let attributed = result.attributedString else {
+            return XCTFail("Expected attributed string")
+        }
+
+        XCTAssertEqual(attributed.string, text)
+        XCTAssertEqual(attributed.length, text.utf16.count)
+
+        let key = NSAttributedString.Key("RubyReadingText")
+        let ns = attributed.string as NSString
+        let punctIndex = ns.range(of: "。").location
+        XCTAssertNotEqual(punctIndex, NSNotFound)
+
+        // The headword should have ruby…
+        let headwordReading = attributed.attribute(key, at: 0, effectiveRange: nil) as? String
+        XCTAssertNotNil(headwordReading)
+
+        // …but the trailing punctuation must not.
+        let punctReading = attributed.attribute(key, at: punctIndex, effectiveRange: nil) as? String
+        XCTAssertNil(punctReading)
+    }
 }

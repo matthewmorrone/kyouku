@@ -109,7 +109,6 @@ extension TokenOverlayTextView {
 
         var hasher = Hasher()
         hasher.combine(attributedText.length)
-        hasher.combine(attributedTextRevision)
         hasher.combine(cachedRubyRuns.count)
         hasher.combine(Int((textContainerInset.left * 10).rounded(.toNearestOrEven)))
         hasher.combine(Int((textContainerInset.right * 10).rounded(.toNearestOrEven)))
@@ -550,8 +549,22 @@ extension TokenOverlayTextView {
             // Compute how much we need to change this line's leading spacer width to align the
             // first token envelope to the fixed left boundary.
             let delta = lineContentMinX - first.envelopeMinXInContent
-            let hasLineSpacer = isLineStartBoundarySpacer(at: startIndex)
-            let existingSpacerWidth: CGFloat = hasLineSpacer ? spacerWidth(at: startIndex) : 0
+            // IMPORTANT:
+            // TextKit 2's `line.characterRange.location` can point to the first *glyph-bearing*
+            // character on the line and skip attachment-like runs. Our line-start padding spacer
+            // is an attachment (U+FFFC + CTRunDelegate), so it may live at `startIndex - 1`.
+            // If we only check `startIndex`, we can keep inserting new spacers indefinitely.
+            let spacerIndex: Int? = {
+                if isLineStartBoundarySpacer(at: startIndex) { return startIndex }
+                let prev = startIndex - 1
+                if prev >= 0, isLineStartBoundarySpacer(at: prev) { return prev }
+                return nil
+            }()
+            let hasLineSpacer = (spacerIndex != nil)
+            let existingSpacerWidth: CGFloat = {
+                guard let spacerIndex else { return 0 }
+                return spacerWidth(at: spacerIndex)
+            }()
             let spacerTargetWidth: CGFloat? = {
                 guard delta.isFinite else { return nil }
                 // If the ruby is left of the boundary, delta is positive => increase spacer.
@@ -570,7 +583,8 @@ extension TokenOverlayTextView {
             if let spacerTargetWidth {
                 if hasLineSpacer {
                     if abs(spacerTargetWidth - existingSpacerWidth) > 0.25 {
-                        setSpacerWidth(spacerTargetWidth, at: startIndex)
+                        let idx = spacerIndex ?? startIndex
+                        setSpacerWidth(spacerTargetWidth, at: idx)
                         spacerChange = spacerTargetWidth - existingSpacerWidth
                         didChange = true
                     }

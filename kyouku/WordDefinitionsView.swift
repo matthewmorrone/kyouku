@@ -193,13 +193,9 @@ struct WordDefinitionsView: View {
             // .modifier(dbgRowBG(LayoutDebugColor.DBG_CYAN__SectionHeader))
 
             if let saved = activeSavedWord {
-                Section("Lists") {
-                    let assigned = assignedLists(for: saved)
-
-                    if assigned.isEmpty {
-                        Text("Not in any lists")
-                            .foregroundStyle(.secondary)
-                    } else {
+                let assigned = assignedLists(for: saved)
+                if assigned.isEmpty == false {
+                    Section("Lists") {
                         InlineWrapLayout(spacing: 8, lineSpacing: 8) {
                             ForEach(assigned) { list in
                                 Text(list.name)

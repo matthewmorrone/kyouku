@@ -46,10 +46,10 @@ struct SettingsView: View {
     @AppStorage("rubyHeadwordDebugRects") private var rubyHeadwordDebugRects: Bool = false
     @AppStorage("rubyHeadwordLineBands") private var rubyHeadwordLineBands: Bool = false
     @AppStorage("rubyFuriganaLineBands") private var rubyFuriganaLineBands: Bool = false
-    @AppStorage("RubyDebug.showLineBandLabels") private var rubyDebugShowLineNumbers: Bool = true
-    @AppStorage("debugPipelineTrace") private var debugPipelineTrace: Bool = false
+    @AppStorage("RubyDebug.showHeadwordLineNumbers") private var rubyDebugShowHeadwordLineNumbers: Bool = true
+    @AppStorage("RubyDebug.showRubyLineNumbers") private var rubyDebugShowRubyLineNumbers: Bool = true
+    @AppStorage("RubyDebug.insetGuides") private var rubyDebugInsetGuides: Bool = false
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
-    @AppStorage("debugHighlightAllDictionaryEntries") private var debugHighlightAllDictionaryEntries: Bool = false
     @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
     @AppStorage("debugPixelRulerOverlay") private var debugPixelRulerOverlay: Bool = false
     @AppStorage("debugPasteDragToMoveWords") private var debugPasteDragToMoveWords: Bool = false
@@ -99,6 +99,25 @@ struct SettingsView: View {
         }
         if defaults.object(forKey: "RubyDebug.showRubyBisectors") == nil {
             defaults.set(true, forKey: "RubyDebug.showRubyBisectors")
+        }
+
+        // Line band labels used to be controlled by a single toggle. Split into per-type toggles
+        // (Headword/Ruby) while preserving the user's previous preference.
+        let legacyLineNumbersKey = "RubyDebug.showLineBandLabels"
+        let headwordLineNumbersKey = "RubyDebug.showHeadwordLineNumbers"
+        let rubyLineNumbersKey = "RubyDebug.showRubyLineNumbers"
+        if defaults.object(forKey: headwordLineNumbersKey) == nil,
+           defaults.object(forKey: rubyLineNumbersKey) == nil,
+           defaults.object(forKey: legacyLineNumbersKey) != nil {
+            let legacy = defaults.bool(forKey: legacyLineNumbersKey)
+            defaults.set(legacy, forKey: headwordLineNumbersKey)
+            defaults.set(legacy, forKey: rubyLineNumbersKey)
+        }
+        if defaults.object(forKey: headwordLineNumbersKey) == nil {
+            defaults.set(true, forKey: headwordLineNumbersKey)
+        }
+        if defaults.object(forKey: rubyLineNumbersKey) == nil {
+            defaults.set(true, forKey: rubyLineNumbersKey)
         }
 
         // Migrate the old "adjustment" style setting to an absolute gap.
@@ -274,6 +293,7 @@ struct SettingsView: View {
                 globalKerning: CGFloat(readingGlobalKerningPixels),
                 padHeadwordSpacing: readingHeadwordSpacingPadding,
                 rubyHorizontalAlignment: .center,
+                semanticSpans: previewSemanticSpans ?? [],
                 enableTapInspection: false,
                 distinctKanaKanjiFonts: readingDistinctKanaKanjiFonts
             )
@@ -512,26 +532,115 @@ struct SettingsView: View {
 
     private var debugSection: some View {
         Section("Debug") {
-            Toggle("Disable dictionary popup on tap", isOn: $debugDisableDictionaryPopup)
-            Toggle("Pipeline trace (token lists)", isOn: $debugPipelineTrace)
-            Toggle("Highlight all dictionary entries (overlaps)", isOn: $debugHighlightAllDictionaryEntries)
-            Toggle("Paste: drag words to move them", isOn: $debugPasteDragToMoveWords)
+            Toggle("Disable dictionary popup", isOn: $debugDisableDictionaryPopup)
+            Toggle("Drag words to move them", isOn: $debugPasteDragToMoveWords)
             Toggle("View metrics", isOn: $debugViewMetricsHUD)
             Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
             Toggle("Pixel ruler overlay", isOn: $debugPixelRulerOverlay)
-            Toggle("Headword debug rects", isOn: $rubyHeadwordDebugRects)
-            Toggle("Ruby Debug Rects", isOn: $rubyDebugRects)
-            Toggle("Token envelope rects", isOn: $rubyEnvelopeSelectionEnvelopeRects)
-            Toggle("Bisectors", isOn: $rubyDebugBisectors)
-            Toggle("Headword bisectors", isOn: $rubyDebugHeadwordBisectors)
-                .disabled(rubyDebugBisectors == false)
-            Toggle("Ruby bisectors", isOn: $rubyDebugRubyBisectors)
-                .disabled(rubyDebugBisectors == false)
-            Toggle("Headword line bands", isOn: $rubyHeadwordLineBands)
-            Toggle("Ruby line bands", isOn: $rubyFuriganaLineBands)
-            Toggle("Line numbers", isOn: $rubyDebugShowLineNumbers)
-                .disabled((rubyHeadwordLineBands || rubyFuriganaLineBands) == false)
+            Toggle("Inset guides", isOn: $rubyDebugInsetGuides)
+
+            debugTableRow(
+                "Boundaries",
+                headword: $rubyHeadwordDebugRects,
+                ruby: $rubyDebugRects
+            )
+            debugTableRow(
+                "Bisectors",
+                headword: bisectorHeadwordBinding,
+                ruby: bisectorRubyBinding
+            )
+            debugTableRow(
+                "Line Bands",
+                headword: $rubyHeadwordLineBands,
+                ruby: $rubyFuriganaLineBands
+            )
+            debugTableRow(
+                "Line Numbers",
+                headword: $rubyDebugShowHeadwordLineNumbers,
+                ruby: $rubyDebugShowRubyLineNumbers
+            )
         }
+    }
+
+    private func debugGroupHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.top, 2)
+    }
+
+    private var debugTableHeaderRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("Setting")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text("Headword")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 84, alignment: .trailing)
+
+            Text("Ruby")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 64, alignment: .trailing)
+        }
+        .padding(.top, 2)
+    }
+
+    private func debugTableRow(
+        _ title: String,
+        headword: Binding<Bool>,
+        ruby: Binding<Bool>,
+        headwordDisabled: Bool = false,
+        rubyDisabled: Bool = false
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(title)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Toggle("", isOn: headword)
+                .labelsHidden()
+                .tint(Color.appAccent)
+                .disabled(headwordDisabled)
+                .frame(width: 84, alignment: .trailing)
+
+            Toggle("", isOn: ruby)
+                .labelsHidden()
+                .tint(Color.appAccent)
+                .disabled(rubyDisabled)
+                .frame(width: 64, alignment: .trailing)
+        }
+    }
+
+    private var bisectorHeadwordBinding: Binding<Bool> {
+        Binding(
+            get: { rubyDebugBisectors && rubyDebugHeadwordBisectors },
+            set: { newValue in
+                rubyDebugHeadwordBisectors = newValue
+                let wantsAny = newValue || rubyDebugRubyBisectors
+                rubyDebugBisectors = wantsAny
+                if wantsAny == false {
+                    // When disabled entirely, keep sub-toggles consistent so future enables are explicit.
+                    rubyDebugRubyBisectors = false
+                }
+            }
+        )
+    }
+
+    private var bisectorRubyBinding: Binding<Bool> {
+        Binding(
+            get: { rubyDebugBisectors && rubyDebugRubyBisectors },
+            set: { newValue in
+                rubyDebugRubyBisectors = newValue
+                let wantsAny = newValue || rubyDebugHeadwordBisectors
+                rubyDebugBisectors = wantsAny
+                if wantsAny == false {
+                    rubyDebugHeadwordBisectors = false
+                }
+            }
+        )
     }
 
     private var commonParticlesBinding: Binding<[String]> {

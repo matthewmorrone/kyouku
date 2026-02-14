@@ -402,16 +402,22 @@ def resolve_default_paths(repo_root: Path, script_dir: Path):
     ]
 
     json_path = next((p for p in json_candidates if p.exists()), json_candidates[0])
+
+    jmnedict_candidates = [
+        data_dir / "jmnedict-all-3.6.2.json",
+        Path.cwd() / "jmnedict-all-3.6.2.json",
+    ]
+    jmnedict_path = next((p for p in jmnedict_candidates if p.exists()), None)
     # Default output should be safe and local to the generator script, to avoid
     # accidentally overwriting the app-bundled DB.
     db_path = script_dir / "dictionary.sqlite3"
-    return json_path, db_path, json_candidates
+    return json_path, jmnedict_path, db_path, json_candidates
 
 
 def main(argv: list[str]) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     script_dir = Path(__file__).resolve().parent
-    default_json, default_db, json_candidates = resolve_default_paths(repo_root, script_dir)
+    default_json, default_jmnedict, default_db, json_candidates = resolve_default_paths(repo_root, script_dir)
     data_dir = (repo_root / "data").resolve()
     default_sentences_tsv = (data_dir / "sentence-pairs.tsv").resolve()
     if not default_sentences_tsv.exists():
@@ -424,10 +430,15 @@ def main(argv: list[str]) -> int:
     default_pitch_tsv = (data_dir / "pitch_accent.tsv").resolve()
 
     parser = argparse.ArgumentParser(
-        description="Build dictionary.sqlite3 from JMdict JSON",
+        description="Build dictionary.sqlite3 from JMdict JSON (optionally with JMnedict names)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--jmdict-json", default=str(default_json), help="Path to JMdict JSON")
+    parser.add_argument(
+        "--jmnedict-json",
+        default=str(default_jmnedict) if default_jmnedict else None,
+        help="Optional path to JMnedict JSON (names / proper nouns)",
+    )
     parser.add_argument(
         "--output",
         default=str(default_db),
@@ -485,7 +496,37 @@ def main(argv: list[str]) -> int:
         default=1000,
         help="Print progress every N entries",
     )
+
+    parser.add_argument(
+        "--no-english-index",
+        action="store_true",
+        help="Disable populating english_index (kept for parity with the currently bundled DB; increases size)",
+    )
+    parser.add_argument(
+        "--jmnedict-english-index",
+        action="store_true",
+        help="Also index JMnedict glosses into english_index (usually unnecessary; increases DB size)",
+    )
+    parser.add_argument(
+        "--jmnedict-in-fts",
+        action="store_true",
+        help="Include JMnedict glosses in glosses_fts so names can be found via English search (increases DB size)",
+    )
+    parser.add_argument(
+        "--jmnedict-max-translations",
+        type=int,
+        default=0,
+        help="Max JMnedict translation blocks per entry (0 = unlimited). Lowering this reduces DB size.",
+    )
+    parser.add_argument(
+        "--jmnedict-max-glosses",
+        type=int,
+        default=0,
+        help="Max JMnedict glosses per translation block (0 = unlimited). Lowering this reduces DB size.",
+    )
     args = parser.parse_args(argv)
+
+    english_index_enabled = not args.no_english_index
 
     if args.no_sentences:
         args.sentences_tsv = None
@@ -497,6 +538,12 @@ def main(argv: list[str]) -> int:
     json_path = Path(args.jmdict_json)
     if not json_path.is_absolute():
         json_path = (repo_root / json_path).resolve()
+
+    jmnedict_path = None
+    if args.jmnedict_json:
+        jmnedict_path = Path(args.jmnedict_json)
+        if not jmnedict_path.is_absolute():
+            jmnedict_path = (repo_root / jmnedict_path).resolve()
 
     output_path = Path(args.output)
     if args.output_next_to_script:
@@ -522,10 +569,17 @@ def main(argv: list[str]) -> int:
         print("\nTip: pass an explicit path via --jmdict-json, e.g. --jmdict-json scripts/jmdict-eng-3.6.2.json")
         return 1
 
+    if jmnedict_path is not None and not jmnedict_path.exists():
+        print(f"JMnedict JSON file not found: {jmnedict_path}")
+        print("Pass a valid path via --jmnedict-json, or omit the flag to skip names ingestion.")
+        return 1
+
     if tmp_path.exists():
         tmp_path.unlink()
 
     print(f"Building DB from: {json_path}")
+    if jmnedict_path is not None:
+        print(f"Including names from: {jmnedict_path}")
     print(f"Temp output DB:  {tmp_path}")
     print(f"Final output DB: {output_path}")
 
@@ -541,18 +595,30 @@ def main(argv: list[str]) -> int:
         print("Creating schema...")
         create_schema(cur)
 
-        print("Loading JSON...")
+        print("Loading JMdict JSON...")
         with json_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
 
         words = data.get("words", [])
         total = len(words)
-        print(f"Words found: {total}")
+        print(f"JMdict words found: {total}")
+
+        jmnedict_words = []
+        if jmnedict_path is not None:
+            print("Loading JMnedict JSON...")
+            with jmnedict_path.open("r", encoding="utf-8") as f:
+                names_data = json.load(f)
+            jmnedict_words = names_data.get("words", [])
+            print(f"JMnedict words found: {len(jmnedict_words)}")
+
+        combined_total = total + len(jmnedict_words)
 
         print("Beginning insert...")
         conn.execute("BEGIN;")
 
-        for i, w in enumerate(words, 1):
+        processed = 0
+        for w in words:
+            processed += 1
             j_id = str(w.get("id"))
 
             kanji_list = w.get("kanji", [])
@@ -638,18 +704,116 @@ def main(argv: list[str]) -> int:
                         "INSERT INTO glosses_fts(rowid, text, entry_id) VALUES (?, ?, ?)",
                         (gloss_id, text, entry_id),
                     )
-                    for token in tokenize_english(text):
-                        cur.execute(
-                            "INSERT OR IGNORE INTO english_index (token, entry_id) VALUES (?, ?)",
-                            (token, entry_id),
-                        )
+                    if english_index_enabled:
+                        for token in tokenize_english(text):
+                            cur.execute(
+                                "INSERT OR IGNORE INTO english_index (token, entry_id) VALUES (?, ?)",
+                                (token, entry_id),
+                            )
 
-            if args.progress_every and (i % args.progress_every == 0):
+            if args.progress_every and (processed % args.progress_every == 0):
                 conn.commit()
                 conn.execute("BEGIN;")
                 elapsed = time.time() - t0
-                pct = (i / total) * 100 if total else 100
-                print(f"Processed {i}/{total} entries ({pct:.1f}%) — {elapsed:.1f}s elapsed")
+                pct = (processed / combined_total) * 100 if combined_total else 100
+                print(f"Processed {processed}/{combined_total} entries ({pct:.1f}%) — {elapsed:.1f}s elapsed")
+
+        if jmnedict_words:
+            print("Beginning JMnedict insert...")
+            for w in jmnedict_words:
+                processed += 1
+                n_id = str(w.get("id"))
+
+                kanji_list = w.get("kanji", [])
+                kana_list = w.get("kana", [])
+                translation_list = w.get("translation", [])
+
+                # JMnedict JSON export doesn't include a stable 'common' marker.
+                is_common = 0
+
+                cur.execute(
+                    "INSERT INTO entries (source, source_id, is_common) VALUES (?, ?, ?)",
+                    ("jmnedict", n_id, is_common),
+                )
+                entry_id = cur.lastrowid
+
+                # Insert kanji
+                for k in kanji_list or []:
+                    if not isinstance(k, dict):
+                        continue
+                    text = k.get("text")
+                    if not text:
+                        continue
+                    tags = k.get("tags") or []
+                    cur.execute(
+                        "INSERT INTO kanji (entry_id, text, is_common, tags) VALUES (?, ?, ?, ?)",
+                        (entry_id, text, 0, join_or_none(tags)),
+                    )
+
+                # Insert kana forms
+                for k in kana_list or []:
+                    if not isinstance(k, dict):
+                        continue
+                    text = k.get("text")
+                    if not text:
+                        continue
+                    tags = k.get("tags") or []
+                    cur.execute(
+                        "INSERT INTO kana_forms (entry_id, text, is_common, tags) VALUES (?, ?, ?, ?)",
+                        (entry_id, text, 0, join_or_none(tags)),
+                    )
+
+                # Insert "translation" blocks as senses + glosses.
+                # Store name types in `misc` so the UI can show them as notes.
+                translation_blocks = translation_list or []
+                if args.jmnedict_max_translations and args.jmnedict_max_translations > 0:
+                    translation_blocks = translation_blocks[: args.jmnedict_max_translations]
+
+                for t_idx, t in enumerate(translation_blocks):
+                    if not isinstance(t, dict):
+                        continue
+                    name_types = t.get("type") or []
+                    misc = join_or_none(name_types)
+                    cur.execute(
+                        "INSERT INTO senses (entry_id, order_index, pos, misc, field, dialect) VALUES (?, ?, ?, ?, ?, ?)",
+                        (entry_id, t_idx, None, misc, None, None),
+                    )
+                    sense_id = cur.lastrowid
+
+                    gloss_list = t.get("translation") or []
+                    if args.jmnedict_max_glosses and args.jmnedict_max_glosses > 0:
+                        gloss_list = gloss_list[: args.jmnedict_max_glosses]
+
+                    for g_idx, g in enumerate(gloss_list):
+                        if not isinstance(g, dict):
+                            continue
+                        text = g.get("text")
+                        if not text:
+                            continue
+                        lang = g.get("lang") or "eng"
+                        cur.execute(
+                            "INSERT INTO glosses (sense_id, entry_id, order_index, lang, text) VALUES (?, ?, ?, ?, ?)",
+                            (sense_id, entry_id, g_idx, lang, text),
+                        )
+                        gloss_id = cur.lastrowid
+                        if args.jmnedict_in_fts:
+                            cur.execute(
+                                "INSERT INTO glosses_fts(rowid, text, entry_id) VALUES (?, ?, ?)",
+                                (gloss_id, text, entry_id),
+                            )
+                        if english_index_enabled and args.jmnedict_english_index:
+                            for token in tokenize_english(text):
+                                cur.execute(
+                                    "INSERT OR IGNORE INTO english_index (token, entry_id) VALUES (?, ?)",
+                                    (token, entry_id),
+                                )
+
+                if args.progress_every and (processed % args.progress_every == 0):
+                    conn.commit()
+                    conn.execute("BEGIN;")
+                    elapsed = time.time() - t0
+                    pct = (processed / combined_total) * 100 if combined_total else 100
+                    print(f"Processed {processed}/{combined_total} entries ({pct:.1f}%) — {elapsed:.1f}s elapsed")
 
         conn.commit()
 

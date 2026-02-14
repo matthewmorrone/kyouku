@@ -4,23 +4,6 @@ import UIKit
 struct FuriganaPipelineService {
     private static let tailMergeDeinflectionCache = DeinflectionCache()
 
-    #if DEBUG
-    // Debug-only: helps verify whether overlap coverage counts (>1) are ever produced.
-    // Dedupes logging to avoid spamming while typing/scrolling.
-    private static var lastDebugDictionaryCoverageLogFingerprint: Int?
-    #endif
-
-    private static let debugHighlightAllDictionaryEntriesDefaultsKey = "debugHighlightAllDictionaryEntries"
-
-    private static func debugHighlightAllDictionaryEntriesEnabled() -> Bool {
-    #if DEBUG
-        if ProcessInfo.processInfo.environment["DEBUG_HIGHLIGHT_ALL_DICT_ENTRIES"] == "1" { return true }
-        return UserDefaults.standard.bool(forKey: debugHighlightAllDictionaryEntriesDefaultsKey)
-    #else
-        return false
-    #endif
-    }
-
     private static func foldKanaToHiragana(_ value: String) -> String {
         value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
     }
@@ -126,13 +109,7 @@ struct FuriganaPipelineService {
             return Result(spans: nil, semanticSpans: [], attributedString: nil)
         }
 
-        let pipelineTraceEnabled: Bool = {
-#if DEBUG
-            return true
-#else
-            return ProcessInfo.processInfo.environment["PIPELINE_TRACE"] == "1" || UserDefaults.standard.bool(forKey: "debugPipelineTrace")
-#endif
-        }()
+        let pipelineTraceEnabled = true
 
         func splitDescription(_ surfaces: [String], maxChars: Int = 360) -> String {
             guard surfaces.isEmpty == false else { return "∅" }
@@ -241,178 +218,10 @@ struct FuriganaPipelineService {
             log("R10", stageLine("RubyProjection", "skipped (showFurigana false)"))
         }
 
-        if Self.debugHighlightAllDictionaryEntriesEnabled() {
-            if attributed == nil {
-                attributed = NSAttributedString(string: input.text)
-            }
-            if let base = attributed {
-                let cachedTrie = await SegmentationService.shared.cachedTrieIfAvailable()
-                let trie: LexiconTrie?
-                if let cachedTrie {
-                    trie = cachedTrie
-                } else {
-                    trie = await SegmentationService.shared.ensureTrieLoaded()
-                }
-                if let trie {
-                    attributed = Self.applyDebugDictionaryEntryHighlights(text: input.text, to: base, trie: trie)
-                }
-            }
-        }
-
         log("OUT", stageLine("FinalSemantic", describeSemantic(mergedSemantic)))
         log("OUT", stageLine("FinalAnnotated", splitDescription(resolvedSpans.map { $0.span.surface })))
 
         return Result(spans: resolvedSpans, semanticSpans: mergedSemantic, attributedString: attributed)
-    }
-
-    private static func applyDebugDictionaryEntryHighlights(
-        text: String,
-        to base: NSAttributedString,
-        trie: LexiconTrie
-    ) -> NSAttributedString {
-        let nsText = text as NSString
-        guard nsText.length > 0 else { return base }
-
-        let mutable = NSMutableAttributedString(attributedString: base)
-
-        var globalMaxCoverage = 0
-        var globalOverlapUnits = 0
-        var firstOverlapExampleRange: NSRange?
-
-        // Assume words never cross line boundaries: scan each line independently.
-        let fullRange = NSRange(location: 0, length: nsText.length)
-        nsText.enumerateSubstrings(in: fullRange, options: [.byLines, .substringNotRequired]) { _, lineRange, _, _ in
-            let lineStart = lineRange.location
-            let lineEnd = NSMaxRange(lineRange)
-            let lineLen = lineEnd - lineStart
-            guard lineLen > 0 else { return }
-
-            var coverage: [Int] = Array(repeating: 0, count: lineLen)
-            coverage.reserveCapacity(lineLen)
-
-            func bumpCoverage(localStart: Int, localEnd: Int) {
-                guard localStart >= 0, localEnd <= lineLen, localEnd > localStart else { return }
-                for idx in localStart..<localEnd {
-                    coverage[idx] += 1
-                }
-            }
-
-            // Iterate by composed character sequences to avoid starting inside surrogate pairs.
-            var cursor = lineStart
-            while cursor < lineEnd {
-                let r = nsText.rangeOfComposedCharacterSequence(at: cursor)
-                if r.length == 0 { break }
-                let start = r.location
-
-                // Skip obvious whitespace (within line).
-                let ch = nsText.substring(with: r)
-                if ch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    cursor = NSMaxRange(r)
-                    continue
-                }
-
-                let ends = trie.allMatchEnds(in: nsText, from: start, requireKanji: false)
-                for end in ends {
-                    guard end <= lineEnd else { continue }
-                    bumpCoverage(localStart: start - lineStart, localEnd: end - lineStart)
-                }
-
-                cursor = NSMaxRange(r)
-            }
-
-            if let lineMax = coverage.max() {
-                globalMaxCoverage = max(globalMaxCoverage, lineMax)
-            }
-            for v in coverage {
-                if v >= 2 { globalOverlapUnits += 1 }
-            }
-
-            if firstOverlapExampleRange == nil {
-                var i = 0
-                while i < coverage.count {
-                    if coverage[i] >= 2 {
-                        var j = i + 1
-                        while j < coverage.count, coverage[j] >= 2 {
-                            j += 1
-                        }
-                        firstOverlapExampleRange = NSRange(location: lineStart + i, length: j - i)
-                        break
-                    }
-                    i += 1
-                }
-            }
-
-            func maxCoverage(in utf16Range: NSRange) -> Int {
-                let localStart = max(0, utf16Range.location - lineStart)
-                let localEnd = min(lineLen, NSMaxRange(utf16Range) - lineStart)
-                guard localEnd > localStart else { return 0 }
-                var m = 0
-                for idx in localStart..<localEnd {
-                    m = max(m, coverage[idx])
-                }
-                return m
-            }
-
-            // Apply underline segments, grouped by composed character boundaries.
-            var segCursor = lineStart
-            var segStart = lineStart
-            var segCount = 0
-            var first = true
-
-            while segCursor < lineEnd {
-                let r = nsText.rangeOfComposedCharacterSequence(at: segCursor)
-                if r.length == 0 { break }
-                let c = maxCoverage(in: r)
-
-                if first {
-                    segStart = r.location
-                    segCount = c
-                    first = false
-                } else if c != segCount {
-                    if segCount > 0 {
-                        let range = NSRange(location: segStart, length: segCursor - segStart)
-                        if range.length > 0, NSMaxRange(range) <= mutable.length {
-                            // Store coverage as an attribute and let the renderer decide
-                            // how to visualize it (e.g. circled/outlined spans).
-                            mutable.addAttribute(DebugDictionaryHighlighting.coverageLevelAttribute, value: segCount, range: range)
-                        }
-                    }
-                    segStart = r.location
-                    segCount = c
-                }
-
-                segCursor = NSMaxRange(r)
-            }
-
-            if first == false, segCount > 0 {
-                let range = NSRange(location: segStart, length: lineEnd - segStart)
-                if range.length > 0, NSMaxRange(range) <= mutable.length {
-                    mutable.addAttribute(DebugDictionaryHighlighting.coverageLevelAttribute, value: segCount, range: range)
-                }
-            }
-        }
-
-        #if DEBUG
-        // Print a short summary so we can confirm whether overlaps are being produced at all.
-        // This is intentionally very low-noise and deduped.
-        let fingerprint = text.hashValue ^ (globalMaxCoverage << 8) ^ globalOverlapUnits
-        if lastDebugDictionaryCoverageLogFingerprint != fingerprint {
-            lastDebugDictionaryCoverageLogFingerprint = fingerprint
-            if globalMaxCoverage <= 1 {
-                print("DebugDictionaryHighlighting: maxCoverage=1 (no overlaps detected), overlapUnits=0")
-            } else {
-                if let r = firstOverlapExampleRange, r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= nsText.length {
-                    let raw = nsText.substring(with: r)
-                    let sample = raw.count > 24 ? String(raw.prefix(24)) + "…" : raw
-                    print("DebugDictionaryHighlighting: maxCoverage=\(globalMaxCoverage), overlapUnits=\(globalOverlapUnits), example=\(sample) r=\(r.location)-\(NSMaxRange(r))")
-                } else {
-                    print("DebugDictionaryHighlighting: maxCoverage=\(globalMaxCoverage), overlapUnits=\(globalOverlapUnits)")
-                }
-            }
-        }
-        #endif
-
-        return mutable
     }
 
     private static func mergeAdjacentSemanticSpansIfValid(
@@ -423,13 +232,7 @@ struct FuriganaPipelineService {
     ) async -> [SemanticSpan] {
         guard spans.count >= 2 else { return spans }
 
-        let traceEnabled: Bool = {
-    #if DEBUG
-            return true
-    #else
-            return ProcessInfo.processInfo.environment["PIPELINE_TRACE"] == "1" || UserDefaults.standard.bool(forKey: "debugPipelineTrace")
-    #endif
-        }()
+        let traceEnabled = true
 
         // Only attempt lexicon validation if the in-memory trie is already warm.
         // This must not trigger bootstrap work or touch SQLite.

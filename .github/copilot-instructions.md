@@ -37,6 +37,12 @@ SwiftUI tab-based iOS app. App state is owned at the root and injected via `@Env
 - Changing signing or provisioning settings
 - Long-lived simulator or device sessions
 
+## Change policy (NO legacy by default)
+- When removing, renaming, or upgrading features/settings, do **not** add backwards compatibility layers.
+- Avoid migrations, legacy fallbacks, version-gated behavior, deprecated aliases, or “keep old keys working” glue.
+- Prefer a clean break: update call sites and delete old code/keys.
+- Only implement compatibility/versioning if the user explicitly requests it.
+
 ## References (read only when relevant)
 - Furigana pipeline details: `docs/FuriganaPipeline.md`
 - Token panel geometry rules: `docs/TokenActionPanelGeometry.md`

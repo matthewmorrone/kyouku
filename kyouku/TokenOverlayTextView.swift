@@ -644,7 +644,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
     private static let headwordDebugRectsDefaultsKey = "rubyHeadwordDebugRects"
     private static let headwordLineBandsDefaultsKey = "rubyHeadwordLineBands"
     private static let rubyLineBandsDefaultsKey = "rubyFuriganaLineBands"
+    private static let debugInsetGuidesDefaultsKey = "RubyDebug.insetGuides"
+    // Legacy toggle (pre-split): controlled labels for both headword + ruby bands.
     private static let rubyDebugShowLineNumbersDefaultsKey = "RubyDebug.showLineBandLabels"
+    // New per-type toggles.
+    private static let rubyDebugShowHeadwordLineNumbersDefaultsKey = "RubyDebug.showHeadwordLineNumbers"
+    private static let rubyDebugShowRubyLineNumbersDefaultsKey = "RubyDebug.showRubyLineNumbers"
     private static let rubyEnvelopeDebugSelectionEnvelopeRectsDefaultsKey = "RubyEnvelopeDebug.selectionEnvelopeRects"
     private static let rubyEnvelopeDebugAllTokenEnvelopeRectsDefaultsKey = "RubyEnvelopeDebug.allTokenEnvelopeRects"
 
@@ -660,8 +665,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         UserDefaults.standard.bool(forKey: Self.rubyDebugRectsDefaultsKey)
     }
 
+    // In "Boundaries" debug mode, if BOTH headword + ruby are enabled, prefer showing
+    // token envelopes (ruby+headword union) instead of separate boundary layers.
+    private var boundariesPreferEnvelopesEnabled: Bool {
+        headwordDebugRectsEnabled && rubyDebugRectsEnabled && semanticSpans.isEmpty == false
+    }
+
     var rubyEnvelopeDebugSelectionEnvelopeRectsEnabled: Bool {
-        UserDefaults.standard.bool(forKey: Self.rubyEnvelopeDebugSelectionEnvelopeRectsDefaultsKey)
+        boundariesPreferEnvelopesEnabled
+            || UserDefaults.standard.bool(forKey: Self.rubyEnvelopeDebugSelectionEnvelopeRectsDefaultsKey)
     }
 
     var rubyEnvelopeDebugAllTokenEnvelopeRectsEnabled: Bool {
@@ -685,12 +697,37 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         UserDefaults.standard.bool(forKey: Self.rubyDebugShowRubyBisectorsDefaultsKey)
     }
 
-    var rubyDebugShowLineNumbersEnabled: Bool {
+    private func boolDefaultTrue(_ key: String) -> Bool {
         let defaults = UserDefaults.standard
-        if defaults.object(forKey: Self.rubyDebugShowLineNumbersDefaultsKey) != nil {
-            return defaults.bool(forKey: Self.rubyDebugShowLineNumbersDefaultsKey)
+        if defaults.object(forKey: key) != nil {
+            return defaults.bool(forKey: key)
         }
         return true
+    }
+
+    private var legacyLineBandLabelsEnabled: Bool {
+        boolDefaultTrue(Self.rubyDebugShowLineNumbersDefaultsKey)
+    }
+
+    private var rubyDebugShowHeadwordLineNumbersEnabled: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: Self.rubyDebugShowHeadwordLineNumbersDefaultsKey) != nil {
+            return defaults.bool(forKey: Self.rubyDebugShowHeadwordLineNumbersDefaultsKey)
+        }
+        return legacyLineBandLabelsEnabled
+    }
+
+    private var rubyDebugShowRubyLineNumbersEnabled: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: Self.rubyDebugShowRubyLineNumbersDefaultsKey) != nil {
+            return defaults.bool(forKey: Self.rubyDebugShowRubyLineNumbersDefaultsKey)
+        }
+        return legacyLineBandLabelsEnabled
+    }
+
+    // Used by debug token list and any callers that only care about an overall “show line numbers” intent.
+    var rubyDebugShowLineNumbersEnabled: Bool {
+        rubyDebugShowHeadwordLineNumbersEnabled || rubyDebugShowRubyLineNumbersEnabled
     }
 
     private var headwordDebugRectsEnabled: Bool {
@@ -703,6 +740,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
     private var rubyLineBandsEnabled: Bool {
         UserDefaults.standard.bool(forKey: Self.rubyLineBandsDefaultsKey)
+    }
+
+    private var debugInsetGuidesEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.debugInsetGuidesDefaultsKey)
     }
 
     private lazy var viewMetricsHUDLabel: UILabel = {
@@ -870,6 +911,38 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         ]
         layer.isHidden = true
         layer.zPosition = 44
+        return layer
+    }()
+
+    private let debugInsetGuidesContainerLayer: CALayer = {
+        let layer = CALayer()
+        layer.masksToBounds = false
+        layer.actions = [
+            "sublayers": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        return layer
+    }()
+
+    private let debugInsetGuidesLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = UIColor.white.withAlphaComponent(0.30).cgColor
+        layer.lineWidth = 1.0
+        layer.lineDashPattern = [4, 3]
+        layer.actions = [
+            "path": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "opacity": NSNull(),
+            "hidden": NSNull()
+        ]
+        layer.isHidden = true
+        layer.zPosition = 6
         return layer
     }()
 
@@ -1271,7 +1344,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             if self.headwordLineBandsEnabled || self.rubyLineBandsEnabled {
                 self.updateRubyDebugLineBands()
             }
-            if self.rubyDebugRectsEnabled {
+            if self.rubyDebugRectsEnabled, self.boundariesPreferEnvelopesEnabled == false {
                 self.updateRubyDebugRects()
                 self.updateRubyDebugGlyphBounds()
                 self.updateRubyHeadwordBisectors()
@@ -1303,10 +1376,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         updateStabilityRectAppearance()
 
-        if headwordDebugRectsEnabled {
+        if headwordDebugRectsEnabled, boundariesPreferEnvelopesEnabled == false {
             updateHeadwordDebugRects()
         }
-        if rubyDebugRectsEnabled {
+        if rubyDebugRectsEnabled, boundariesPreferEnvelopesEnabled == false {
             updateRubyDebugGlyphBounds()
             updateRubyHeadwordBisectors()
         }
@@ -1636,6 +1709,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
             // Always-on in DEBUG: logs only when overflow is detected (throttled).
             logTokenLeftOverflowIfNeeded()
+
+            // Always-on in DEBUG: logs when a token spans multiple lines (throttled).
+            logTokenWordSplitAcrossLinesIfNeeded()
         }
         #endif
 
@@ -1677,7 +1753,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         } else {
             viewMetricsHUDLabel.isHidden = true
         }
-        if rubyDebugRectsEnabled {
+        if rubyDebugRectsEnabled, boundariesPreferEnvelopesEnabled == false {
             if rubyDebugRectsLayer.superlayer == nil {
                 rubyDebugRectsLayer.contentsScale = traitCollection.displayScale
                 rubyDebugRectsLayer.zPosition = 50
@@ -1700,7 +1776,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             resetRubyBisectorDebugLayers()
         }
 
-        if headwordDebugRectsEnabled {
+        if headwordDebugRectsEnabled, boundariesPreferEnvelopesEnabled == false {
             installHeadwordDebugContainerIfNeeded()
             updateHeadwordDebugRects()
         } else {
@@ -1731,6 +1807,44 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             rubyDebugLineBandsContainerLayer.isHidden = true
         }
 
+        if debugInsetGuidesEnabled {
+            if debugInsetGuidesContainerLayer.superlayer == nil {
+                debugInsetGuidesContainerLayer.contentsScale = traitCollection.displayScale
+                debugInsetGuidesContainerLayer.zPosition = 6
+                debugInsetGuidesContainerLayer.addSublayer(debugInsetGuidesLayer)
+                layer.addSublayer(debugInsetGuidesContainerLayer)
+            }
+            updateDebugInsetGuides()
+            debugInsetGuidesContainerLayer.isHidden = false
+            debugInsetGuidesLayer.isHidden = false
+        } else {
+            debugInsetGuidesLayer.path = nil
+            debugInsetGuidesContainerLayer.isHidden = true
+            debugInsetGuidesLayer.isHidden = true
+        }
+
+    }
+
+    private func updateDebugInsetGuides() {
+        let inset = textContainerInset
+        let leftX = inset.left + textContainer.lineFragmentPadding
+        let rightX = inset.left + (textContainer.size.width - textContainer.lineFragmentPadding)
+        let height = max(contentSize.height, bounds.height)
+        guard leftX.isFinite, rightX.isFinite, height.isFinite, height > 0 else {
+            debugInsetGuidesLayer.path = nil
+            return
+        }
+
+        debugInsetGuidesContainerLayer.frame = CGRect(origin: .zero, size: CGSize(width: max(contentSize.width, bounds.width), height: height))
+        debugInsetGuidesLayer.frame = debugInsetGuidesContainerLayer.bounds
+
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: leftX, y: 0))
+        path.addLine(to: CGPoint(x: leftX, y: height))
+        path.move(to: CGPoint(x: rightX, y: 0))
+        path.addLine(to: CGPoint(x: rightX, y: height))
+
+        debugInsetGuidesLayer.path = path
     }
 
     #if DEBUG
@@ -1742,6 +1856,11 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
     private enum TokenLeftOverflowAssociatedKeys {
         static var lastSignature: UInt8 = 0
         static var lastRevision: UInt8 = 0
+        static var loggedKeys: UInt8 = 0
+    }
+
+    private enum TokenWordSplitAssociatedKeys {
+        static var lastSignature: UInt8 = 0
         static var loggedKeys: UInt8 = 0
     }
 
@@ -1764,6 +1883,22 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         }
         let s = NSMutableSet()
         objc_setAssociatedObject(self, &TokenLeftOverflowAssociatedKeys.loggedKeys, s, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return s
+    }
+
+    @available(iOS 15.0, *)
+    private var lastTokenWordSplitLogSignature: Int {
+        get { objc_getAssociatedObject(self, &TokenWordSplitAssociatedKeys.lastSignature) as? Int ?? 0 }
+        set { objc_setAssociatedObject(self, &TokenWordSplitAssociatedKeys.lastSignature, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
+    }
+
+    @available(iOS 15.0, *)
+    private var tokenWordSplitLoggedKeys: NSMutableSet {
+        if let s = objc_getAssociatedObject(self, &TokenWordSplitAssociatedKeys.loggedKeys) as? NSMutableSet {
+            return s
+        }
+        let s = NSMutableSet()
+        objc_setAssociatedObject(self, &TokenWordSplitAssociatedKeys.loggedKeys, s, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         return s
     }
 
@@ -2088,6 +2223,163 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     sortedLines.count,
                     violations
                 )
+            )
+        }
+    }
+
+    @available(iOS 15.0, *)
+    private func logTokenWordSplitAcrossLinesIfNeeded() {
+        guard wrapLines else { return }
+        guard let attributedText, attributedText.length > 0 else { return }
+        guard semanticSpans.isEmpty == false else { return }
+
+        // Throttle: avoid spamming logs on repeated layout passes at the same scroll position.
+        var hasher = Hasher()
+        hasher.combine(attributedTextRevision)
+        hasher.combine(attributedText.length)
+        hasher.combine(semanticSpans.count)
+        hasher.combine(Int((contentOffset.x * 2).rounded(.toNearestOrEven)))
+        hasher.combine(Int((contentOffset.y * 2).rounded(.toNearestOrEven)))
+        hasher.combine(Int((bounds.width * 2).rounded(.toNearestOrEven)))
+        hasher.combine(Int((bounds.height * 2).rounded(.toNearestOrEven)))
+        let signature = hasher.finalize()
+        guard signature != lastTokenWordSplitLogSignature else { return }
+        lastTokenWordSplitLogSignature = signature
+
+        let lineRectsInContent = textKit2LineTypographicRectsInContentCoordinates(visibleOnly: true)
+        guard lineRectsInContent.isEmpty == false else { return }
+
+        // Visible band in content coordinates.
+        let extraY = max(16, rubyHighlightHeadroom + 12)
+        let visibleRectInContent = CGRect(origin: contentOffset, size: bounds.size)
+            .insetBy(dx: -4, dy: -extraY)
+
+        let backing = attributedText.string as NSString
+
+        func isHardBoundaryGlyph(_ s: String) -> Bool {
+            if s == "\u{FFFC}" { return true }
+            if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+            let set = CharacterSet.punctuationCharacters.union(.symbols)
+            for scalar in s.unicodeScalars {
+                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
+                if set.contains(scalar) == false { return false }
+            }
+            return true
+        }
+
+        func trimmedInkRange(in displayRange: NSRange) -> NSRange? {
+            let doc = NSRange(location: 0, length: attributedText.length)
+            let bounded = NSIntersectionRange(displayRange, doc)
+            guard bounded.location != NSNotFound, bounded.length > 0 else { return nil }
+            let upperBound = min(attributedText.length, NSMaxRange(bounded))
+            var inkStart = bounded.location
+            var inkEndExclusive = upperBound
+            var foundInkGlyph = false
+
+            if bounded.location < upperBound {
+                var idx = bounded.location
+                while idx < upperBound {
+                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
+                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
+                    let s = backing.substring(with: r)
+                    if isHardBoundaryGlyph(s) {
+                        idx = NSMaxRange(r)
+                        continue
+                    }
+                    foundInkGlyph = true
+                    inkStart = r.location
+                    break
+                }
+                guard foundInkGlyph else { return nil }
+
+                var tail = upperBound - 1
+                while tail >= inkStart {
+                    let r = backing.rangeOfComposedCharacterSequence(at: tail)
+                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
+                    let s = backing.substring(with: r)
+                    if isHardBoundaryGlyph(s) {
+                        if r.location == 0 { break }
+                        tail = r.location - 1
+                        continue
+                    }
+                    inkEndExclusive = NSMaxRange(r)
+                    break
+                }
+            }
+
+            let len = max(0, inkEndExclusive - inkStart)
+            guard inkStart != NSNotFound, len > 0 else { return nil }
+            return NSRange(location: inkStart, length: len)
+        }
+
+        var logged = 0
+        let maxLogsPerPass = 24
+        let maxTokens = min(semanticSpans.count, 1024)
+        var violations = 0
+
+        for tokenIndex in 0..<maxTokens {
+            if logged >= maxLogsPerPass { break }
+
+            let span = semanticSpans[tokenIndex]
+            let sourceRange = span.range
+            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
+            if span.surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+
+            let displayRange = displayRange(fromSourceRange: sourceRange)
+            guard displayRange.location != NSNotFound, displayRange.length > 0 else { continue }
+            guard let inkRange = trimmedInkRange(in: displayRange) else { continue }
+
+            let baseRectsInContent = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: inkRange)
+            guard baseRectsInContent.isEmpty == false else { continue }
+
+            let unions = unionRectsByLine(baseRectsInContent)
+            if unions.count <= 1 { continue }
+
+            // Visible-only.
+            var isVisible = false
+            for u in unions {
+                if u.intersects(visibleRectInContent) {
+                    isVisible = true
+                    break
+                }
+            }
+            if isVisible == false { continue }
+
+            // Determine which line indices are involved (best-effort).
+            var lineIndices: [Int] = []
+            lineIndices.reserveCapacity(unions.count)
+            for u in unions {
+                if let idx = bestMatchingLineIndex(for: u, candidates: lineRectsInContent) {
+                    lineIndices.append(idx)
+                }
+            }
+            let uniqueLineIndices = Array(Set(lineIndices)).sorted()
+            if uniqueLineIndices.count <= 1 { continue }
+
+            var keyHasher = Hasher()
+            keyHasher.combine(attributedTextRevision)
+            keyHasher.combine(tokenIndex)
+            keyHasher.combine(inkRange.location)
+            keyHasher.combine(inkRange.length)
+            keyHasher.combine(uniqueLineIndices.count)
+            for i in uniqueLineIndices.prefix(6) { keyHasher.combine(i) }
+            let key = keyHasher.finalize()
+            if tokenWordSplitLoggedKeys.contains(key) { continue }
+            tokenWordSplitLoggedKeys.add(key)
+
+            violations += 1
+            let snippetRange = NSRange(location: inkRange.location, length: min(12, inkRange.length))
+            let snippet = backing.substring(with: snippetRange)
+            let linesStr = uniqueLineIndices.map(String.init).joined(separator: ",")
+            CustomLogger.shared.print(
+                "[WordSplit] token=\(tokenIndex) start=\(inkRange.location) len=\(inkRange.length) lines=\(linesStr) unions=\(unions.count) snippet=\(snippet)"
+            )
+            logged += 1
+        }
+
+        if logged > 0 {
+            CustomLogger.shared.print(
+                "[WordSplitSummary] logged=\(logged) violations=\(violations)"
             )
         }
     }
@@ -2707,7 +2999,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         // TextKit 2 layout is frequently viewport-lazy; compute VISIBLE lines in view coords and
         // translate to content coords so the bands keep up with scrolling.
         // Labels (L#/R#) are useful during debugging, but should be separately toggleable.
-        let showLineBandLabels: Bool = (headwordLineBandsEnabled || rubyLineBandsEnabled) && rubyDebugShowLineNumbersEnabled
+        let showHeadwordLineBandLabels: Bool = headwordLineBandsEnabled && rubyDebugShowHeadwordLineNumbersEnabled
+        let showRubyLineBandLabels: Bool = rubyLineBandsEnabled && rubyDebugShowRubyLineNumbersEnabled
+        let showAnyLineBandLabels: Bool = showHeadwordLineBandLabels || showRubyLineBandLabels
         // NOTE: Historically we computed visible lines in view coordinates and then added
         // `contentOffset` to translate back to content coordinates. That works when the helper
         // truly returns view-space rects, but can appear visually offset if any upstream rects
@@ -2757,7 +3051,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         // Replace labels each update (visible lines only, so this is cheap).
         rubyDebugLineBandsLabelsLayer.sublayers = nil
         var labelLayers: [CALayer] = []
-        if showLineBandLabels {
+        if showAnyLineBandLabels {
             let estimatedLabelCount = lines.count * ((drawBaseBands ? 1 : 0) + (drawRubyBands ? 1 : 0))
             if estimatedLabelCount > 0 {
                 labelLayers.reserveCapacity(min(estimatedLabelCount, 96))
@@ -2829,7 +3123,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     baseOdd.addRect(baseRect)
                 }
 
-                if showLineBandLabels {
+                if showHeadwordLineBandLabels {
                     let baseLabel = CATextLayer()
                     baseLabel.contentsScale = traitCollection.displayScale
                     baseLabel.string = "L\(absoluteIndex)"
@@ -2861,7 +3155,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     rubyOdd.addRect(rubyRect)
                 }
 
-                if showLineBandLabels {
+                if showRubyLineBandLabels {
                     let rubyLabel = CATextLayer()
                     rubyLabel.contentsScale = traitCollection.displayScale
                     rubyLabel.string = "R\(absoluteIndex)"
@@ -2902,7 +3196,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             rubyBandEvenLayer.path = nil
             rubyBandOddLayer.path = nil
         }
-        rubyDebugLineBandsLabelsLayer.sublayers = showLineBandLabels ? labelLayers : nil
+        rubyDebugLineBandsLabelsLayer.sublayers = showAnyLineBandLabels ? labelLayers : nil
     }
 
     private func updateRubyDebugGlyphBounds() {

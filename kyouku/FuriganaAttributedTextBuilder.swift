@@ -55,14 +55,7 @@ enum FuriganaAttributedTextBuilder {
         // TEMP DIAGNOSTICS (2026-02-02)
         // Goal: concise dumps at each stage, without requiring toggles.
         // Guardrail: dedupe by input so we don't spam logs on rerenders.
-        let pipelineTraceEnabled: Bool = {
-    #if DEBUG
-            return true
-    #else
-            let env = ProcessInfo.processInfo.environment
-            return env["PIPELINE_TRACE"] == "1" || env["STAGE15_TRACE"] == "1" || env["STAGE2_TRACE"] == "1" || UserDefaults.standard.bool(forKey: "debugPipelineTrace")
-    #endif
-        }()
+        let pipelineTraceEnabled = true
 
         let shouldDumpStages: Bool = {
             guard pipelineTraceEnabled else { return false }

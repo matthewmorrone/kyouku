@@ -290,38 +290,10 @@ enum RubyTextProcessing {
         let backing = mutable.string as NSString
         let length = mutable.length
 
-        // Expand ruby-bearing runs forward over immediate trailing punctuation.
-        // (We intentionally do NOT include whitespace/newlines.)
-        if canPadRuby {
-            for run in rubyRuns {
-                let start = run.range.location
-                let originalEnd = NSMaxRange(run.range)
-                guard start != NSNotFound, originalEnd <= length else { continue }
-
-                var end = originalEnd
-                var cursor = end
-                while cursor < length {
-                    let r = backing.rangeOfComposedCharacterSequence(at: cursor)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= length else { break }
-                    let s = backing.substring(with: r)
-                    if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        break
-                    }
-                    if isPunctuationOrSymbolOnly(s) == false {
-                        break
-                    }
-                    // Do not steal punctuation already claimed by another ruby run.
-                    if mutable.attribute(.rubyReadingText, at: r.location, effectiveRange: nil) != nil {
-                        break
-                    }
-                    mutable.addAttribute(.rubyReadingText, value: run.reading, range: r)
-                    mutable.addAttribute(.rubyReadingFontSize, value: run.rubyFontSize, range: r)
-                    end = NSMaxRange(r)
-                    cursor = end
-                }
-                _ = end
-            }
-        }
+        // NOTE:
+        // We intentionally do NOT propagate ruby-bearing attributes onto punctuation/symbols.
+        // Those glyphs are hard boundaries for token/headword identity and must not become part
+        // of a ruby-bearing “word” span, even if they visually follow the headword.
 
         if canPadRuby {
             for run in rubyRuns {

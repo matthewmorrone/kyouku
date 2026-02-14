@@ -44,6 +44,7 @@ Goals:
 - Preferred generator: `scripts/generate-db.py`.
   - Input: a JMdict JSON file (expected names include `jmdict-eng-3.6.1.json`, `jmdict-eng-3.6.2.json`).
   - Optional inputs:
+    - `--jmnedict-json`: JMnedict JSON (names / proper nouns; expected names include `jmnedict-all-3.6.2.json`)
     - `--sentences-tsv`: TSV containing `jp_id<TAB>jp_text<TAB>en_id<TAB>en_text`
     - `--embeddings-bin`: binary embeddings file (script default name: `cc.ja.300.pruned.f32`)
   - Output: a `dictionary.sqlite3` with the schema above.
@@ -53,6 +54,10 @@ Goals:
   - Source: Electronic Dictionary Research and Development Group (EDRDG)
   - Project/info: http://www.edrdg.org/jmdict/j_jmdict.html
   - Attribution expectation: JMdict/EDICT-style credit to EDRDG (exact wording depends on your UI/legal preference).
+- **JMnedict** (names / proper nouns)
+  - Source: Electronic Dictionary Research and Development Group (EDRDG)
+  - Project/info: http://www.edrdg.org/enamdict/enamdict_doc.html
+  - Attribution expectation: JMnedict/ENAMDICT-style credit to EDRDG.
 - **Example sentence pairs** (`sentence_pairs` table)
   - The ID ranges + formatting strongly resemble the **Tatoeba Project** sentence corpus.
   - Project: https://tatoeba.org/

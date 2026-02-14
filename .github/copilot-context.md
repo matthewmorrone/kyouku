@@ -12,6 +12,20 @@
 - Ruby projection/rendering: `FuriganaAttributedTextBuilder` + `FuriganaRubyProjector` + `RubyText` using `NSAttributedString.Key.rubyAnnotation`
   (`kyouku/FuriganaAttributedTextBuilder.swift`, `kyouku/FuriganaRubyProjector.swift`, `kyouku/RubyText.swift`).
 
+## Text layout + spacing invariants (ruby/headword)
+- IMPORTANT (non-negotiable):
+  - Headwords and ruby must always be aligned.
+  - Segments must never be split across visual lines (avoid duplicating ruby/headword across wraps).
+  - With headword padding enabled, headwords and ruby must not overflow across the left/right inset guides.
+- All ranges are **source UTF-16 `NSRange`**; any display-only padding must not invalidate source indexing.
+- Headword padding (when enabled) is implemented via **display-only** width spacers (U+FFFC) so ruby/headword alignment stays stable.
+  - Do not treat U+FFFC as real source text; prefer “ink ranges” (visible glyph bounds) for geometry.
+- Ruby readings must stay anchored to the **ink-only** headword bounds (not whitespace/punctuation/spacers).
+- Punctuation/symbols are hard boundaries for “word identity”:
+  - Do not propagate ruby attributes onto trailing punctuation.
+  - Avoid merging/expanding headword spans across punctuation/symbol-only glyphs.
+- `TokenOverlayTextView` renders ruby as persistent **content-space** overlay layers; debug overlays should also be content-space.
+
 ## Dictionary + persistence
 - Dictionary lookups: `DictionaryLookupViewModel.load(...)` → `DictionarySQLiteStore.shared.lookup(...)` (actor)
   (`kyouku/DictionaryLookupViewModel.swift`, `kyouku/DictionaryEntry.swift`).
