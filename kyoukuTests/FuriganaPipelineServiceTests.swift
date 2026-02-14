@@ -110,4 +110,51 @@ final class FuriganaPipelineServiceTests: XCTestCase {
         let reading = attributed.attribute(key, at: 0, effectiveRange: nil) as? String
         XCTAssertNil(reading)
     }
+
+    func testKnownWordRubySuppressionUsesLemmaCandidates() async {
+        let service = FuriganaPipelineService()
+        let text = "星"
+        let spanRange = NSRange(location: 0, length: 1)
+        let stage2Span = AnnotatedSpan(
+            span: TextSpan(range: spanRange, surface: text),
+            readingKana: "ほし",
+            lemmaCandidates: ["ほし"]
+        )
+        let semanticSpan = SemanticSpan(
+            range: spanRange,
+            surface: text,
+            sourceSpanIndices: 0..<1,
+            readingKana: "ほし"
+        )
+
+        let baselineInput = makeInput(
+            text: text,
+            showFurigana: true,
+            recomputeSpans: false,
+            existingSpans: [stage2Span],
+            existingSemanticSpans: [semanticSpan]
+        )
+        let baselineResult = await service.render(baselineInput)
+        guard let baselineAttributed = baselineResult.attributedString else {
+            return XCTFail("Expected attributed string")
+        }
+        let key = NSAttributedString.Key("RubyReadingText")
+        let baselineReading = baselineAttributed.attribute(key, at: 0, effectiveRange: nil) as? String
+        XCTAssertEqual(baselineReading, "ほし")
+
+        let suppressionInput = makeInput(
+            text: text,
+            showFurigana: true,
+            recomputeSpans: false,
+            existingSpans: [stage2Span],
+            existingSemanticSpans: [semanticSpan],
+            knownWordSurfaceKeys: ["ほし"]
+        )
+        let suppressedResult = await service.render(suppressionInput)
+        guard let suppressedAttributed = suppressedResult.attributedString else {
+            return XCTFail("Expected attributed string")
+        }
+        let suppressedReading = suppressedAttributed.attribute(key, at: 0, effectiveRange: nil) as? String
+        XCTAssertNil(suppressedReading)
+    }
 }
