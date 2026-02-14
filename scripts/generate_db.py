@@ -414,6 +414,17 @@ def resolve_default_paths(repo_root: Path, script_dir: Path):
     return json_path, jmnedict_path, db_path, json_candidates
 
 
+def parse_csv_set(raw: str | None) -> set[str]:
+    if raw is None:
+        return set()
+    out: set[str] = set()
+    for chunk in raw.split(","):
+        value = chunk.strip().lower()
+        if value:
+            out.add(value)
+    return out
+
+
 def main(argv: list[str]) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     script_dir = Path(__file__).resolve().parent
@@ -524,9 +535,21 @@ def main(argv: list[str]) -> int:
         default=0,
         help="Max JMnedict glosses per translation block (0 = unlimited). Lowering this reduces DB size.",
     )
+    parser.add_argument(
+        "--jmnedict-include-types",
+        default=None,
+        help="Optional comma-separated JMnedict translation.type allowlist (e.g. place,surname,given).",
+    )
+    parser.add_argument(
+        "--jmnedict-exclude-types",
+        default=None,
+        help="Optional comma-separated JMnedict translation.type denylist.",
+    )
     args = parser.parse_args(argv)
 
     english_index_enabled = not args.no_english_index
+    jmnedict_include_types = parse_csv_set(args.jmnedict_include_types)
+    jmnedict_exclude_types = parse_csv_set(args.jmnedict_exclude_types)
 
     if args.no_sentences:
         args.sentences_tsv = None
@@ -728,6 +751,20 @@ def main(argv: list[str]) -> int:
                 kana_list = w.get("kana", [])
                 translation_list = w.get("translation", [])
 
+                filtered_translation_list = []
+                for t in translation_list or []:
+                    if not isinstance(t, dict):
+                        continue
+                    block_types = {str(x).strip().lower() for x in (t.get("type") or []) if str(x).strip()}
+                    if jmnedict_include_types and block_types.isdisjoint(jmnedict_include_types):
+                        continue
+                    if jmnedict_exclude_types and block_types and not block_types.isdisjoint(jmnedict_exclude_types):
+                        continue
+                    filtered_translation_list.append(t)
+
+                if not filtered_translation_list:
+                    continue
+
                 # JMnedict JSON export doesn't include a stable 'common' marker.
                 is_common = 0
 
@@ -765,7 +802,7 @@ def main(argv: list[str]) -> int:
 
                 # Insert "translation" blocks as senses + glosses.
                 # Store name types in `misc` so the UI can show them as notes.
-                translation_blocks = translation_list or []
+                translation_blocks = filtered_translation_list
                 if args.jmnedict_max_translations and args.jmnedict_max_translations > 0:
                     translation_blocks = translation_blocks[: args.jmnedict_max_translations]
 
