@@ -13,4 +13,6 @@ struct Note: Identifiable, Codable, Hashable {
     var title: String?
     var text: String
     var createdAt: Date
+    var karaokeAudioFileName: String? = nil
+    var karaokeAlignment: KaraokeAlignment? = nil
 }
