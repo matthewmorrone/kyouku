@@ -139,8 +139,6 @@ extension WordDefinitionsView {
         let createdAt = isSaved ? savedWordCreatedAt(surface: row.headword, kana: normalizedReading) : nil
 
         let primaryGloss = row.pages.first?.gloss ?? ""
-        let extraCount = max(0, row.pages.count - 1)
-        let isExpanded = expandedDefinitionRowIDs.contains(row.id)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -201,32 +199,6 @@ extension WordDefinitionsView {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
-            }
-
-            if isExpanded, row.pages.count > 1 {
-                ForEach(Array(row.pages.dropFirst().prefix(12))) { page in
-                    Text(page.gloss)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                }
-            }
-
-            if extraCount > 0 {
-                Button {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
-                        if isExpanded {
-                            expandedDefinitionRowIDs.remove(row.id)
-                        } else {
-                            expandedDefinitionRowIDs.insert(row.id)
-                        }
-                    }
-                } label: {
-                    Text(isExpanded ? "Hide" : "+\(extraCount) more")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
             }
         }
         .padding(.vertical, 4)

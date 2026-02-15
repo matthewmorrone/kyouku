@@ -4,49 +4,55 @@ import NaturalLanguage
 extension WordDefinitionsView {
     // MARK: Full Entries
     func entryDetailView(_ detail: DictionaryEntryDetail) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            entryDetailHeader(detail)
-
-            if let pitchBlock = entryPitchAccentBlock(detail) {
-                Divider()
-                    .padding(.vertical, 2)
-                pitchBlock
+        VStack(alignment: .leading, spacing: 14) {
+            entryDetailSection("Entry") {
+                entryDetailHeader(detail)
             }
 
-            if detail.senses.isEmpty == false {
-                Divider()
-                    .padding(.vertical, 2)
+            if let formsBlock = entryFormsBlock(detail) {
+                entryDetailSection("Forms") {
+                    formsBlock
+                }
+            }
 
-                let senses = orderedSensesForDisplay(detail)
-                let showSenseNumbers = senses.count > 1
-                ForEach(Array(senses.enumerated()), id: \.element.id) { index, sense in
-                    senseView(sense, index: index + 1, showIndex: showSenseNumbers)
-                    if index < senses.count - 1 {
-                        Divider()
-                            .padding(.vertical, 6)
+            if let pitchBlock = entryPitchAccentBlock(detail) {
+                entryDetailSection("Pitch Accent") {
+                    pitchBlock
+                }
+            }
+
+            let senses = orderedSensesForDisplay(detail)
+            if senses.isEmpty == false {
+                entryDetailSection("Senses") {
+                    let showSenseNumbers = senses.count > 1
+                    ForEach(Array(senses.enumerated()), id: \.element.id) { index, sense in
+                        senseView(sense, index: index + 1, showIndex: showSenseNumbers)
+                        if index < senses.count - 1 {
+                            Divider()
+                                .padding(.vertical, 6)
+                        }
                     }
                 }
             }
         }
-        .padding(14)
-        .background(
-            .thinMaterial,
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
-        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
+        .padding(.vertical, 8)
+        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+    }
+
+    @ViewBuilder
+    func entryDetailSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
     }
 
     func entryDetailHeader(_ detail: DictionaryEntryDetail) -> some View {
         let headword = primaryHeadword(for: detail)
         let primaryReading = detail.kanaForms.first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let extraKanjiForms = orderedUniqueForms(from: detail.kanjiForms).filter { $0 != headword }
-        let extraKanaForms = orderedUniqueForms(from: detail.kanaForms).filter { $0 != (primaryReading ?? "") }
+        let posLine = entryPrimaryPartOfSpeechLine(detail)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -70,18 +76,70 @@ extension WordDefinitionsView {
                     .foregroundStyle(.secondary)
             }
 
-            if extraKanjiForms.isEmpty == false {
-                Text("Kanji: \(extraKanjiForms.joined(separator: "、"))")
+            if let posLine {
+                Text(posLine)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            if extraKanaForms.isEmpty == false {
-                Text("Kana: \(extraKanaForms.joined(separator: "、"))")
+            if detail.isCommon == false {
+                Text("Uncommon")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    func entryFormsBlock(_ detail: DictionaryEntryDetail) -> AnyView? {
+        let headword = primaryHeadword(for: detail)
+        let primaryReading = detail.kanaForms.first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lookedUpSurface = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extraKanjiForms = orderedUniqueForms(from: detail.kanjiForms).filter {
+            let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return false }
+            return trimmed != headword && trimmed != lookedUpSurface
+        }
+        let extraKanaForms = orderedUniqueForms(from: detail.kanaForms).filter { $0 != (primaryReading ?? "") }
+
+        guard extraKanjiForms.isEmpty == false || extraKanaForms.isEmpty == false else { return nil }
+
+        return AnyView(
+            VStack(alignment: .leading, spacing: 4) {
+                if extraKanjiForms.isEmpty == false {
+                    Text(extraKanjiForms.joined(separator: "、"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
+                if extraKanaForms.isEmpty == false {
+                    Text(extraKanaForms.joined(separator: "、"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        )
+    }
+
+    func entryPrimaryPartOfSpeechLine(_ detail: DictionaryEntryDetail) -> String? {
+        var seen: Set<String> = []
+        var labels: [String] = []
+
+        for sense in detail.senses {
+            for tag in sense.partsOfSpeech {
+                let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.isEmpty == false else { continue }
+                let expanded = expandPartOfSpeechTag(trimmed)
+                let key = expanded.lowercased()
+                if seen.insert(key).inserted {
+                    labels.append(expanded)
+                }
+                if labels.count >= 4 { break }
+            }
+            if labels.count >= 4 { break }
+        }
+
+        guard labels.isEmpty == false else { return nil }
+        return "\(labels.joined(separator: " · "))"
     }
 
     @ViewBuilder
@@ -185,7 +243,6 @@ extension WordDefinitionsView {
         guard isLoadingPitchAccents == false else { return nil }
         guard pitchAccentsForTerm.isEmpty == false else { return nil }
 
-        let headword = primaryHeadword(for: detail).trimmingCharacters(in: .whitespacesAndNewlines)
         let readings = orderedUniqueForms(from: detail.kanaForms)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.isEmpty == false }
@@ -201,13 +258,9 @@ extension WordDefinitionsView {
 
         return AnyView(
             VStack(alignment: .leading, spacing: 8) {
-                Text("Pitch Accent")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, item in
                     PitchAccentSection(
-                        headword: headword,
+                        headword: "",
                         reading: item.reading,
                         accents: item.accents,
                         showsTitle: false,

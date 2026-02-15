@@ -22,6 +22,7 @@ struct SettingsView: View {
     @AppStorage("readingFontName") private var readingFontName: String = ""
     @AppStorage("readingDistinctKanaKanjiFonts") private var readingDistinctKanaKanjiFonts: Bool = false
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
+    @AppStorage("readingHeadwordSpacingAmount") private var readingHeadwordSpacingAmount: Double = 1.0
     @AppStorage("readingAlternateTokenColorA") private var alternateTokenColorAHex: String = "#0A84FF"
     @AppStorage("readingAlternateTokenColorB") private var alternateTokenColorBHex: String = "#FF2D55"
     @AppStorage(FuriganaKnownWordSettings.modeKey) private var knownWordFuriganaModeRaw: String = FuriganaKnownWordSettings.defaultModeRawValue
@@ -50,7 +51,6 @@ struct SettingsView: View {
     @AppStorage("RubyDebug.showRubyLineNumbers") private var rubyDebugShowRubyLineNumbers: Bool = true
     @AppStorage("RubyDebug.insetGuides") private var rubyDebugInsetGuides: Bool = false
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
-    @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
     @AppStorage("debugPixelRulerOverlay") private var debugPixelRulerOverlay: Bool = false
     @AppStorage("debugPasteDragToMoveWords") private var debugPasteDragToMoveWords: Bool = false
 
@@ -238,6 +238,7 @@ struct SettingsView: View {
             .onChange(of: readingFuriganaSize) { _, newValue in syncPendingFuriganaSize(to: newValue) }
             .onChange(of: readingLineSpacing) { _, newValue in syncPendingLineSpacing(to: newValue) }
             .onChange(of: readingHeadwordSpacingPadding) { _, _ in schedulePreviewRebuild() }
+            .onChange(of: readingHeadwordSpacingAmount) { _, _ in schedulePreviewRebuild() }
             .onDisappear { previewRebuildTask?.cancel() }
             .onChange(of: wotdEnabled) { _, _ in Task { await rescheduleWordOfTheDay() } }
             .onChange(of: wotdHour) { _, _ in Task { await rescheduleWordOfTheDay() } }
@@ -298,7 +299,7 @@ struct SettingsView: View {
                 distinctKanaKanjiFonts: readingDistinctKanaKanjiFonts
             )
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 140, alignment: .leading)
+            .frame(height: 140, alignment: .topLeading)
             .padding(.vertical, 8)
 
             Toggle("Distinct kana/kanji fonts", isOn: $readingDistinctKanaKanjiFonts)
@@ -392,6 +393,23 @@ struct SettingsView: View {
 
             Toggle("Pad headwords", isOn: $readingHeadwordSpacingPadding)
                 .toggleStyle(.switch)
+
+            HStack {
+                Text("Headword Pad Amount")
+                Spacer()
+                Text(String(format: "%.2f×", readingHeadwordSpacingAmount))
+                    .foregroundStyle(.secondary)
+            }
+            Slider(
+                value: $readingHeadwordSpacingAmount,
+                in: 0.0...2.0,
+                step: 0.05
+            )
+            .disabled(readingHeadwordSpacingPadding == false)
+
+            Text("Controls extra spacing added inside multi-kanji headwords. 0 adds no extra spacing.")
+                .font(.caption)
+                .foregroundStyle(Color.appTextSecondary)
 
         }
     }
@@ -535,7 +553,6 @@ struct SettingsView: View {
             Toggle("Disable dictionary popup", isOn: $debugDisableDictionaryPopup)
             Toggle("Drag words to move them", isOn: $debugPasteDragToMoveWords)
             Toggle("View metrics", isOn: $debugViewMetricsHUD)
-            Toggle("Token geometry overlay", isOn: $debugTokenGeometryOverlay)
             Toggle("Pixel ruler overlay", isOn: $debugPixelRulerOverlay)
             Toggle("Inset guides", isOn: $rubyDebugInsetGuides)
 
@@ -762,6 +779,7 @@ struct SettingsView: View {
         let textSize = pendingReadingTextSize
         let furiganaSize = pendingReadingFuriganaSize
         let spacingEnabled = readingHeadwordSpacingPadding
+        let spacingAmount = readingHeadwordSpacingAmount
 
         previewRebuildTask?.cancel()
         previewRebuildTask = Task {
@@ -769,7 +787,8 @@ struct SettingsView: View {
                 text: text,
                 textSize: textSize,
                 furiganaSize: furiganaSize,
-                padHeadwordSpacing: spacingEnabled
+                padHeadwordSpacing: spacingEnabled,
+                headwordSpacingAmount: spacingAmount
             )
         }
     }
@@ -833,7 +852,8 @@ struct SettingsView: View {
         text: String,
         textSize: Double,
         furiganaSize: Double,
-        padHeadwordSpacing: Bool
+        padHeadwordSpacing: Bool,
+        headwordSpacingAmount: Double
     ) async {
         let stage2 = await ensurePreviewStage2(for: text)
         if Task.isCancelled { return }
@@ -843,7 +863,8 @@ struct SettingsView: View {
             textSize: textSize,
             furiganaSize: furiganaSize,
             context: "SettingsPreview",
-            padHeadwordSpacing: padHeadwordSpacing
+            padHeadwordSpacing: padHeadwordSpacing,
+            headwordSpacingAmount: CGFloat(headwordSpacingAmount)
         )
         if Task.isCancelled { return }
         await MainActor.run {

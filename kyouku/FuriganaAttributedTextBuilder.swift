@@ -445,7 +445,8 @@ enum FuriganaAttributedTextBuilder {
         textSize: Double,
         furiganaSize: Double,
         context _: String = "general",
-        padHeadwordSpacing: Bool = false
+        padHeadwordSpacing: Bool = false,
+        headwordSpacingAmount: CGFloat = 1.0
     ) -> NSAttributedString {
         guard text.isEmpty == false else { return NSAttributedString(string: text) }
 
@@ -487,7 +488,8 @@ enum FuriganaAttributedTextBuilder {
                         reading: segment.reading,
                         text: nsText,
                         baseFont: baseFont,
-                        rubyFont: rubyFont
+                        rubyFont: rubyFont,
+                        amount: headwordSpacingAmount
                     )
                     mergeHeadwordSpacingAdjustments(adjustments, into: &kerningTargets)
                 }
@@ -693,7 +695,8 @@ private extension FuriganaAttributedTextBuilder {
         reading: String,
         text: NSString,
         baseFont: UIFont,
-        rubyFont: UIFont
+        rubyFont: UIFont,
+        amount: CGFloat
     ) -> [HeadwordSpacingAdjustment] {
         guard headwordRange.location != NSNotFound, headwordRange.length > 0 else { return [] }
         guard NSMaxRange(headwordRange) <= text.length else { return [] }
@@ -711,7 +714,8 @@ private extension FuriganaAttributedTextBuilder {
         let epsilon: CGFloat = 0.01
         guard overhang > epsilon else { return [] }
 
-        let totalPad = overhang
+        let scale = max(0, amount)
+        let totalPad = overhang * scale
         guard totalPad > 0 else { return [] }
 
         var adjustments: [HeadwordSpacingAdjustment] = []

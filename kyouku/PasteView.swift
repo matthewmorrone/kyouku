@@ -116,6 +116,7 @@ struct PasteView: View {
     @AppStorage("readingLineSpacing") private var readingLineSpacing: Double = 4
     @AppStorage("readingGlobalKerningPixels") private var readingGlobalKerningPixels: Double = 0
     @AppStorage("readingHeadwordSpacingPadding") private var readingHeadwordSpacingPadding: Bool = false
+    @AppStorage("readingHeadwordSpacingAmount") private var readingHeadwordSpacingAmount: Double = 1.0
     @AppStorage("readingShowFurigana") var showFurigana: Bool = true
     @AppStorage("readingWrapLines") private var wrapLines: Bool = false
     @AppStorage("readingAlternateTokenColors") private var alternateTokenColors: Bool = false
@@ -139,7 +140,6 @@ struct PasteView: View {
     @AppStorage("extractPropagateTokenEdits") var propagateTokenEdits: Bool = false
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
-    @AppStorage("debugTokenGeometryOverlay") private var debugTokenGeometryOverlay: Bool = false
     @AppStorage("debugPasteDragToMoveWords") private var debugPasteDragToMoveWords: Bool = false
 
     private var scratchNoteID: UUID {
@@ -532,6 +532,13 @@ struct PasteView: View {
                     skipTailSemanticMerge: true
                 )
             }
+            .onChange(of: readingHeadwordSpacingAmount) { _, _ in
+                triggerFuriganaRefreshIfNeeded(
+                    reason: "headword spacing amount changed",
+                    recomputeSpans: false,
+                    skipTailSemanticMerge: true
+                )
+            }
             .onChange(of: knownWordFuriganaModeRaw) { _, _ in
                 triggerFuriganaRefreshIfNeeded(reason: "known-word furigana mode changed", recomputeSpans: false)
             }
@@ -669,9 +676,6 @@ struct PasteView: View {
         ZStack(alignment: .bottom) {
             editorColumn
             inlineDictionaryOverlay
-            if debugTokenGeometryOverlay {
-                tokenGeometryDebugOverlay
-            }
         }
         // Slide in/out ONLY when the panel is shown/hidden.
         // Switching to a new word updates `presented.requestID` but keeps `presented != nil`,
@@ -2349,6 +2353,7 @@ struct PasteView: View {
         let currentAmendedSpans = tokenBoundaries.spans(for: activeNoteID, text: currentText)
         let currentHardCuts = tokenBoundaries.hardCuts(for: activeNoteID, text: currentText)
         let currentHeadwordSpacingPadding = readingHeadwordSpacingPadding
+        let currentHeadwordSpacingAmount = readingHeadwordSpacingAmount
 
         let knownWordSurfaceKeys: Set<String> = {
             let mode = FuriganaKnownWordMode(rawValue: knownWordFuriganaModeRaw) ?? .off
@@ -2399,6 +2404,7 @@ struct PasteView: View {
             readingOverrides: currentOverrides,
             context: "PasteView",
             padHeadwordSpacing: currentHeadwordSpacingPadding,
+            headwordSpacingAmount: currentHeadwordSpacingAmount,
             skipTailSemanticMerge: skipTailSemanticMerge,
             knownWordSurfaceKeys: knownWordSurfaceKeys
         )

@@ -584,12 +584,12 @@ extension WordDefinitionsView {
         }()
 
         if posTags.isEmpty == false {
-            return "Part of speech: \(posTags.joined(separator: " · "))"
+            return "\(posTags.joined(separator: " · "))"
         }
 
         let mecab = (tokenPartOfSpeech ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if mecab.isEmpty == false {
-            return "Part of speech: \(mecab)"
+            return "\(mecab)"
         }
         return nil
     }

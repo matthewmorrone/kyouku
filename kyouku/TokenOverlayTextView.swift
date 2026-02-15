@@ -2371,16 +2371,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let snippetRange = NSRange(location: inkRange.location, length: min(12, inkRange.length))
             let snippet = backing.substring(with: snippetRange)
             let linesStr = uniqueLineIndices.map(String.init).joined(separator: ",")
-            CustomLogger.shared.print(
-                "[WordSplit] token=\(tokenIndex) start=\(inkRange.location) len=\(inkRange.length) lines=\(linesStr) unions=\(unions.count) snippet=\(snippet)"
-            )
+            // CustomLogger.shared.print("[WordSplit] token=\(tokenIndex) start=\(inkRange.location) len=\(inkRange.length) lines=\(linesStr) unions=\(unions.count) snippet=\(snippet)")
             logged += 1
         }
 
         if logged > 0 {
-            CustomLogger.shared.print(
-                "[WordSplitSummary] logged=\(logged) violations=\(violations)"
-            )
+            // CustomLogger.shared.print("[WordSplitSummary] logged=\(logged) violations=\(violations)")
         }
     }
 

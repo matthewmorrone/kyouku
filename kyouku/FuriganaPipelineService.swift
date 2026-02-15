@@ -52,6 +52,7 @@ struct FuriganaPipelineService {
         let readingOverrides: [ReadingOverride]
         let context: String
         let padHeadwordSpacing: Bool
+        let headwordSpacingAmount: Double
 
         /// When true, skips the tail semantic merge pass.
         ///
@@ -77,6 +78,7 @@ struct FuriganaPipelineService {
             readingOverrides: [ReadingOverride],
             context: String,
             padHeadwordSpacing: Bool,
+            headwordSpacingAmount: Double,
             skipTailSemanticMerge: Bool = false,
             knownWordSurfaceKeys: Set<String>
         ) {
@@ -93,6 +95,7 @@ struct FuriganaPipelineService {
             self.readingOverrides = readingOverrides
             self.context = context
             self.padHeadwordSpacing = padHeadwordSpacing
+            self.headwordSpacingAmount = headwordSpacingAmount
             self.skipTailSemanticMerge = skipTailSemanticMerge
             self.knownWordSurfaceKeys = knownWordSurfaceKeys
         }
@@ -200,7 +203,8 @@ struct FuriganaPipelineService {
                 textSize: input.textSize,
                 furiganaSize: input.furiganaSize,
                 context: input.context,
-                padHeadwordSpacing: input.padHeadwordSpacing
+                padHeadwordSpacing: input.padHeadwordSpacing,
+                headwordSpacingAmount: CGFloat(input.headwordSpacingAmount)
             )
             if input.knownWordSurfaceKeys.isEmpty {
                 attributed = projected
