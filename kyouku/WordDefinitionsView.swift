@@ -110,32 +110,74 @@ struct WordDefinitionsView: View {
 
     var body: some View {
         List {
-            // Header (note → title)
-            Section {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(titleText)
-                        .font(.title2.weight(.semibold))
-                        .padding(.vertical, 2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            let headerSurface = resolvedSurfaceText
+            let headerReading = headerDisplayReading
+            let headerSurfacePitchRows: [PitchAccent] = {
+                guard let reading = headerReading else { return [] }
+                return surfacePitchAccents(surface: headerSurface, reading: reading)
+            }()
 
+            Section {
+                Text(titleText)
+                    .font(.largeTitle.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .multilineTextAlignment(.center)
+
+                if let headerReading {
+                    Text(headerReading)
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .multilineTextAlignment(.center)
+                }
+
+                if isLoadingPitchAccents {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Loading intonation…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                } else if headerSurfacePitchRows.isEmpty == false, let headerReading {
+                    PitchAccentSection(
+                        headword: headerSurface,
+                        reading: headerReading,
+                        accents: headerSurfacePitchRows,
+                        showsTitle: false,
+                        visualScale: 2.2
+                    )
+                } else if hasPitchAccentsTable == true, isVerbLemma {
+                    Text("Surface-form intonation unavailable for this exact form.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .multilineTextAlignment(.center)
+                }
+
+                HStack(spacing: 12) {
+                    Spacer(minLength: 0)
                     Button {
                         let trimmedKana = kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                         let trimmedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
                         let speechText = trimmedKana.isEmpty == false ? trimmedKana : trimmedSurface
                         SpeechManager.shared.speak(text: speechText, language: "ja-JP")
                     } label: {
-                        Image(systemName: "speaker.wave.2")
-                            .font(.body.weight(.semibold))
+                        Label("Speak", systemImage: "speaker.wave.2")
+                            .font(.callout.weight(.semibold))
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Speak")
                     .disabled(surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Spacer(minLength: 0)
                 }
 
                 if let headerLemmaLine {
                     Text(headerLemmaLine)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -143,6 +185,8 @@ struct WordDefinitionsView: View {
                     Text(headerFormLine)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -150,6 +194,8 @@ struct WordDefinitionsView: View {
                     Text(posLine)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -160,6 +206,129 @@ struct WordDefinitionsView: View {
                         }
                     }
                     .padding(.top, 2)
+                }
+            }
+
+            Section("Definitions") {
+                if isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading…")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let errorMessage, errorMessage.isEmpty == false {
+                    Text(errorMessage)
+                        .foregroundStyle(.secondary)
+                } else if entryDetails.isEmpty {
+                    Text("No dictionary entries found.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(entryDetails) { detail in
+                        entryDetailView(detail)
+                    }
+                }
+            }
+
+            Section("Example sentences") {
+                if isLoadingExampleSentences {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading…")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if exampleSentences.isEmpty {
+                    Text("No example sentences found.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    let maxVisible = 3
+                    let visible = showAllExampleSentences ? exampleSentences : Array(exampleSentences.prefix(maxVisible))
+
+                    ForEach(visible) { sentence in
+                        exampleSentenceRow(sentence)
+                    }
+
+                    if exampleSentences.count > maxVisible {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showAllExampleSentences.toggle()
+                            }
+                        } label: {
+                            Text(showAllExampleSentences ? "Show fewer" : "Show more")
+                                .font(.callout.weight(.semibold))
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                if exampleSentences.isEmpty == false {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showExampleSentenceFurigana.toggle()
+                        }
+                    } label: {
+                        Text(showExampleSentenceFurigana ? "Hide furigana" : "Show furigana")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if shouldShowVerbConjugations {
+                let visible = verbConjugations(set: .common)
+                let allConjugations = verbConjugations(set: .all)
+                let hasMoreConjugations = allConjugations.count > visible.count
+
+                Section("Conjugations") {
+                    if let verbConjugationHeaderLine {
+                        Text(verbConjugationHeaderLine)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    ForEach(Array(visible.enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(item.label)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 140, alignment: .leading)
+
+                            Text(item.surface)
+                                .font(.body.weight(.semibold))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .textSelection(.enabled)
+                    }
+
+                    if showAllConjugations {
+                        Divider()
+                            .padding(.vertical, 4)
+
+                        let commonLabelSet = Set(visible.map(\.label))
+                        let all = allConjugations.filter { commonLabelSet.contains($0.label) == false }
+                        ForEach(Array(all.enumerated()), id: \.offset) { _, item in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text(item.label)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 140, alignment: .leading)
+
+                                Text(item.surface)
+                                    .font(.body)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .textSelection(.enabled)
+                        }
+                    }
+
+                    if hasMoreConjugations {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showAllConjugations.toggle()
+                            }
+                        } label: {
+                            Text(showAllConjugations ? "Show fewer" : "Show all conjugations")
+                                .font(.callout.weight(.semibold))
+                        }
+                        .buttonStyle(.borderless)
+                    }
                 }
             }
 
@@ -195,74 +364,18 @@ struct WordDefinitionsView: View {
                 .padding(.vertical, 2)
             }
 
-            // Pitch accents render under each resolved dictionary entry (keyed by kana reading).
-            // Only show the standalone section for loading/data-availability states to keep
-            // "no accents" from taking prime screen space.
-            if entryDetails.isEmpty {
-                if hasPitchAccentsTable == false || isLoadingPitchAccents || pitchAccentsForTerm.isEmpty == false {
-                    Section("Intonation") {
-                        pitchAccentGlobalContent
-                    }
-                }
-            } else if hasPitchAccentsTable == false || isLoadingPitchAccents {
-                Section("Intonation") {
+            Section("Intonation") {
+                if entryDetails.isEmpty {
+                    pitchAccentGlobalContent
+                } else if hasPitchAccentsTable == false || isLoadingPitchAccents {
                     pitchAccentStatusOnlyContent
-                }
-            }
-
-            Section("Conjugations") {
-                if let verbConjugationHeaderLine {
-                    Text(verbConjugationHeaderLine)
+                } else {
+                    Text("Detailed intonation is shown inside each dictionary entry below.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-
-                let visible = verbConjugations(set: .common)
-                ForEach(Array(visible.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(item.label)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 140, alignment: .leading)
-
-                        Text(item.surface)
-                            .font(.body.weight(.semibold))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .textSelection(.enabled)
-                }
-
-                if showAllConjugations {
-                    Divider()
-                        .padding(.vertical, 4)
-
-                    let commonLabelSet = Set(visible.map(\.label))
-                    let all = verbConjugations(set: .all).filter { commonLabelSet.contains($0.label) == false }
-                    ForEach(Array(all.enumerated()), id: \.offset) { _, item in
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text(item.label)
-                                .foregroundStyle(.secondary)
-                                .frame(width: 140, alignment: .leading)
-
-                            Text(item.surface)
-                                .font(.body)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .textSelection(.enabled)
-                    }
-                }
-
-                Button {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        showAllConjugations.toggle()
-                    }
-                } label: {
-                    Text(showAllConjugations ? "Show fewer" : "Show all conjugations")
-                        .font(.callout.weight(.semibold))
-                }
-                .buttonStyle(.borderless)
             }
-
 
             if detectedGrammar.isEmpty == false {
                 Section("Grammar (in context)") {
@@ -293,90 +406,24 @@ struct WordDefinitionsView: View {
                 }
             }
 
-            Section("Dictionary Entries") {
-                if isLoading {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Loading…")
-                            .foregroundStyle(.secondary)
-                    }
-                } else if let errorMessage, errorMessage.isEmpty == false {
-                    Text(errorMessage)
-                        .foregroundStyle(.secondary)
-                } else if entryDetails.isEmpty {
-                    Text("No dictionary entries found.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(entryDetails) { detail in
-                        entryDetailView(detail)
-                    }
-                }
-            }
             if let noteID = sourceNoteID, let note = notesStore.notes.first(where: { $0.id == noteID }) {
-                HStack(spacing: 10) {
-                    Image(systemName: "book")
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text((note.title?.isEmpty == false ? note.title : nil) ?? "Untitled")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button {
-                        router.noteToOpen = note
-                        router.selectedTab = .paste
-                        // This view is presented inside a sheet; switching tabs alone does not
-                        // reveal the paste view while the sheet is still covering the UI.
-                        dismiss()
-                    } label: {
-                        Image(systemName: "arrowshape.turn.up.right")
-                            .font(.body.weight(.semibold))
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            Section {
-                if isLoadingExampleSentences {
+                Section("Source") {
                     HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Loading…")
+                        Image(systemName: "book")
                             .foregroundStyle(.secondary)
-                    }
-                } else if exampleSentences.isEmpty {
-                    Text("No example sentences found.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    let maxVisible = 3
-                    let visible = showAllExampleSentences ? exampleSentences : Array(exampleSentences.prefix(maxVisible))
-
-                    ForEach(visible) { sentence in
-                        exampleSentenceRow(sentence)
-                    }
-
-                    if exampleSentences.count > maxVisible {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                showAllExampleSentences.toggle()
-                            }
-                        } label: {
-                            Text(showAllExampleSentences ? "Show fewer" : "Show more")
-                                .font(.callout.weight(.semibold))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text((note.title?.isEmpty == false ? note.title : nil) ?? "Untitled")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.borderless)
-                    }
-                }
-            } header: {
-                HStack(spacing: 8) {
-                    Text("Example sentences")
-                    Spacer(minLength: 8)
-                    if exampleSentences.isEmpty == false {
+                        Spacer()
                         Button {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                showExampleSentenceFurigana.toggle()
-                            }
+                            router.noteToOpen = note
+                            router.selectedTab = .paste
+                            dismiss()
                         } label: {
-                            Text(showExampleSentenceFurigana ? "Hide furigana" : "Show furigana")
-                                .font(.caption.weight(.semibold))
+                            Image(systemName: "arrowshape.turn.up.right")
+                                .font(.body.weight(.semibold))
                         }
                         .buttonStyle(.borderless)
                     }

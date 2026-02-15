@@ -16,6 +16,7 @@ struct PasteEditorTextArea: View {
     let lineSpacing: CGFloat
     let globalKerningPixels: CGFloat
     let padHeadwordSpacing: Bool
+    let headwordSpacingAmount: Double
     let wrapLines: Bool
 
     let alternateTokenColors: Bool
@@ -63,6 +64,7 @@ struct PasteEditorTextArea: View {
             lineSpacing: lineSpacing,
             globalKerningPixels: globalKerningPixels,
             padHeadwordSpacing: padHeadwordSpacing,
+            headwordSpacingAmount: headwordSpacingAmount,
             wrapLines: wrapLines,
             alternateTokenColors: alternateTokenColors,
             highlightUnknownTokens: highlightUnknownTokens,

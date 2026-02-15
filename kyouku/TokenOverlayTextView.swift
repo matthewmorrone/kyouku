@@ -1920,9 +1920,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let inset = textContainerInset
 
             // IMPORTANT: Do not assume `bounds.origin == contentOffset`.
-            // In some UIKit/SwiftUI configurations we observed `bounds.origin` staying at zero
-            // even while `contentOffset` changes. Use `contentOffset` explicitly to define the
-            // visible band in content coordinates.
+            // In some UIKit/SwiftUI configurations we observed `bounds.origin` staying at zero even while `contentOffset` changes. Use `contentOffset` explicitly to define the visible band in content coordinates.
             let extraY = max(16, rubyHighlightHeadroom + 12)
             let visibleRectInContent = CGRect(origin: contentOffset, size: bounds.size)
                 .insetBy(dx: -4, dy: -extraY)
@@ -1969,20 +1967,22 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             lastTokenLeftOverflowLoggedRevision = attributedTextRevision
         }
 
-        // Throttle: avoid spamming logs on repeated layout passes at the same scroll position.
+        // Throttle by spacing-calculation state (not scroll position).
+        // This mirrors the correction scheduler inputs so logs fire when spacing math changes.
         var hasher = Hasher()
-        hasher.combine(attributedTextRevision)
         hasher.combine(attributedText.length)
-        hasher.combine(Int((contentOffset.x * 2).rounded(.toNearestOrEven)))
-        hasher.combine(Int((contentOffset.y * 2).rounded(.toNearestOrEven)))
-        hasher.combine(Int((bounds.width * 2).rounded(.toNearestOrEven)))
-        hasher.combine(Int((bounds.height * 2).rounded(.toNearestOrEven)))
+        hasher.combine(cachedRubyRuns.count)
+        hasher.combine(Int((textContainerInset.left * 10).rounded(.toNearestOrEven)))
+        hasher.combine(Int((textContainerInset.right * 10).rounded(.toNearestOrEven)))
+        hasher.combine(Int((textContainer.size.width * 10).rounded(.toNearestOrEven)))
+        hasher.combine(Int((textContainer.lineFragmentPadding * 10).rounded(.toNearestOrEven)))
+        hasher.combine(rubyIndexMap.insertionPositions.count)
         let signature = hasher.finalize()
         guard signature != lastTokenLeftOverflowLogSignature else { return }
         lastTokenLeftOverflowLogSignature = signature
 
         let scale = max(1.0, traitCollection.displayScale)
-        let leftGuideXPoints = textContainerInset.left + textContainer.lineFragmentPadding
+        let leftGuideXPoints = TokenSpacingInvariantSource.leftGuideX(in: self)
         let leftGuideXPixels = leftGuideXPoints * scale
         guard leftGuideXPixels.isFinite else { return }
 
@@ -2106,6 +2106,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let tokenIndex: Int
             let displayStart: Int
             let baseMinXInView: CGFloat
+            let envelopeMinXInView: CGFloat
             let lineIndex: Int
             let inkRange: NSRange
             let baseUnionInContent: CGRect
@@ -2129,46 +2130,48 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             checkedTokens += 1
 
             guard let inkRange = trimmedInkRange(in: displayRange) else { continue }
-            guard let lineIndex = lineIndex(containingDisplayIndex: inkRange.location) else { continue }
 
             // Base envelope: use the same rect source as the on-screen token envelopes.
             let baseRectsInContent = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: inkRange)
             guard baseRectsInContent.isEmpty == false else { continue }
             let baseUnionsInContent = unionRectsByLine(baseRectsInContent)
             guard baseUnionsInContent.isEmpty == false else { continue }
-            // Prefer the union whose vertical center is closest to the line fragment.
-            let lineMidY = visibleLines[lineIndex].typographicRectInContent.midY
-            let baseUnionInContent = baseUnionsInContent.min(by: { abs($0.midY - lineMidY) < abs($1.midY - lineMidY) })!
-
-            // Rough visible filter.
-            let yView = (baseUnionInContent.midY - contentOffset.y)
-            if yView < visibleMinY || yView > visibleMaxY { continue }
-
-            let baseMinXInView = baseUnionInContent.minX - contentOffset.x
             let snippetRange = NSRange(location: inkRange.location, length: min(8, inkRange.length))
             let snippet = backing.substring(with: snippetRange)
 
-            let candidate = LineCandidate(
-                tokenIndex: tokenIndex,
-                displayStart: inkRange.location,
-                baseMinXInView: baseMinXInView,
-                lineIndex: lineIndex,
-                inkRange: inkRange,
-                baseUnionInContent: baseUnionInContent,
-                snippet: snippet
-            )
+            for baseUnionInContent in baseUnionsInContent {
+                guard let lineIndex = bestMatchingLineIndex(for: baseUnionInContent, candidates: visibleLines.map(\ .typographicRectInContent)) else { continue }
 
-            if let existing = firstByLine[lineIndex] {
-                // First token on a line = earliest ink start; tie-break by base minX.
-                if candidate.displayStart < existing.displayStart {
-                    firstByLine[lineIndex] = candidate
-                } else if candidate.displayStart == existing.displayStart {
-                    if candidate.baseMinXInView < (existing.baseMinXInView - 0.5) {
+                // Rough visible filter.
+                let yView = (baseUnionInContent.midY - contentOffset.y)
+                if yView < visibleMinY || yView > visibleMaxY { continue }
+
+                let baseMinXInView = baseUnionInContent.minX - contentOffset.x
+                let envelopeMinXInView = tokenEnvelopeMinXInViewPoints(tokenIndex: tokenIndex, baseUnionInContent: baseUnionInContent) ?? baseMinXInView
+
+                let candidate = LineCandidate(
+                    tokenIndex: tokenIndex,
+                    displayStart: inkRange.location,
+                    baseMinXInView: baseMinXInView,
+                    envelopeMinXInView: envelopeMinXInView,
+                    lineIndex: lineIndex,
+                    inkRange: inkRange,
+                    baseUnionInContent: baseUnionInContent,
+                    snippet: snippet
+                )
+
+                if let existing = firstByLine[lineIndex] {
+                    // Beginning-of-line token for diagnostics = visually leftmost envelope on that line.
+                    // This correctly reports wrapped continuations that can appear at line start.
+                    if candidate.envelopeMinXInView < (existing.envelopeMinXInView - 0.5) {
+                        firstByLine[lineIndex] = candidate
+                    } else if abs(candidate.envelopeMinXInView - existing.envelopeMinXInView) <= 0.5,
+                              candidate.displayStart < existing.displayStart {
                         firstByLine[lineIndex] = candidate
                     }
+                } else {
+                    firstByLine[lineIndex] = candidate
                 }
-            } else {
-                firstByLine[lineIndex] = candidate
             }
         }
 
@@ -2177,40 +2180,45 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         for lineIndex in sortedLines {
             guard let c = firstByLine[lineIndex] else { continue }
 
-            guard let envelopeMinXInView = tokenEnvelopeMinXInViewPoints(tokenIndex: c.tokenIndex, baseUnionInContent: c.baseUnionInContent) else { continue }
-
-            let tokenLeftXPixels = envelopeMinXInView * scale
+            // Primary diagnostic uses ruby-envelope edge (authoritative for boundary alignment).
+            // Base-ink edge is logged as secondary context.
+            let tokenLeftXPixels = c.envelopeMinXInView * scale
+            let baseLeftXPixels = c.baseMinXInView * scale
             let deltaPixels = tokenLeftXPixels - leftGuideXPixels
+            let isLeftCrossing = deltaPixels < TokenSpacingInvariantSource.leftCrossingThreshold(in: self)
 
             // De-dupe per line + guide + quantized delta so it only re-logs when the value changes.
             let deltaKey = Int((deltaPixels * 2.0).rounded(.toNearestOrEven))
-            let key = (lineIndex & 0x3FFFFF) ^ (leftGuideKey << 1) ^ (deltaKey << 2)
+            let stableLineKey = (c.tokenIndex & 0x3FFFFF) ^ ((c.displayStart & 0x3FFFFF) << 1)
+            let key = stableLineKey ^ (leftGuideKey << 2) ^ (deltaKey << 3)
             if tokenLeftOverflowLoggedKeys.contains(key) {
                 continue
             }
             tokenLeftOverflowLoggedKeys.add(key)
 
             let direction: String = {
-                if abs(deltaPixels) <= 1.0 { return "OK" }
+                if abs(deltaPixels) <= TokenSpacingInvariantSource.alignedThreshold(in: self) { return "OK" }
                 return (deltaPixels < 0) ? "LEFT" : "RIGHT"
             }()
-            if abs(deltaPixels) > 1.0 {
+            if TokenSpacingInvariantSource.checkEnabled(.leftBoundary),
+               abs(deltaPixels) > TokenSpacingInvariantSource.alignedThreshold(in: self) {
                 violations += 1
             }
-
-            CustomLogger.shared.print(
-                String(
-                    format: "[LeftGuideLine] lineIndex=%d status=%@ token=%d start=%d leftGuidePx=%.2f tokenLeftPx=%.2f deltaPx=%.2f snippet=%@",
-                    lineIndex,
-                    direction,
-                    c.tokenIndex,
-                    c.displayStart,
-                    leftGuideXPixels,
-                    tokenLeftXPixels,
-                    deltaPixels,
-                    c.snippet
+            if isLeftCrossing {
+                CustomLogger.shared.print(
+                    String(
+                        format: "[LeftInsetBoundaryCrossing] lineIndex=%d token=%d start=%d leftGuidePx=%.2f tokenLeftPx=%.2f baseLeftPx=%.2f deltaPx=%.2f snippet=%@",
+                        lineIndex,
+                        c.tokenIndex,
+                        c.displayStart,
+                        leftGuideXPixels,
+                        tokenLeftXPixels,
+                        baseLeftXPixels,
+                        deltaPixels,
+                        c.snippet
+                    )
                 )
-            )
+            }
             logged += 1
         }
 
@@ -2390,11 +2398,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         let lineRectsInContent = textKit2LineTypographicRectsInContentCoordinates(visibleOnly: true)
         guard lineRectsInContent.isEmpty == false else { return }
 
-        let displayScale = max(1.0, traitCollection.displayScale)
-        let onePixel = 1.0 / displayScale
-        let leftInsetGuideX = textContainerInset.left + textContainer.lineFragmentPadding
-        let rightInsetGuideX = textContainerInset.left + (textContainer.size.width - textContainer.lineFragmentPadding)
-        let targetLeftStartX = leftInsetGuideX + onePixel
+        let leftInsetGuideX = TokenSpacingInvariantSource.leftGuideX(in: self)
+        let rightInsetGuideX = TokenSpacingInvariantSource.rightGuideX(in: self)
+        let targetLeftStartX = TokenSpacingInvariantSource.leftGuideX(in: self)
 
         struct TokenBoundary {
             let tokenIndex: Int
@@ -2527,10 +2533,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             )
         }
 
-        let overlapTol = max(onePixel * 1.5, 0.75)
-        let kernGapTol = max(onePixel * 2.0, 1.25)
-        let leftTol = max(onePixel * 2.0, 1.25)
-        let rightTol = max(onePixel * 2.0, 1.25)
+        let overlapTol = TokenSpacingInvariantSource.overlapTolerance(in: self)
+        let kernGapTol = TokenSpacingInvariantSource.kernGapTolerance(in: self)
+        let leftTol = TokenSpacingInvariantSource.leftBoundaryTolerance(in: self)
+        let rightTol = TokenSpacingInvariantSource.rightBoundaryTolerance(in: self)
 
         @inline(__always)
         func reportFailure(_ message: String) {
@@ -2554,22 +2560,26 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             guard starts.isEmpty == false else { continue }
 
             // A) Left boundary: enforce for the leftmost token that STARTS on this line.
-            if let leftmost = starts.min(by: { a, b in
-                if abs(a.startX - b.startX) > 0.5 { return a.startX < b.startX }
-                return a.tokenIndex < b.tokenIndex
-            }) {
-                let dx = leftmost.startX - targetLeftStartX
-                if abs(dx) > leftTol {
-                    reportFailure(String(format: "[HeadwordPadding invariant] line %d leftmost headword startX %.2f must equal leftGuide+1px %.2f (dx=%.2f)", lineIndex, leftmost.startX, targetLeftStartX, dx))
+            if TokenSpacingInvariantSource.checkEnabled(.leftBoundary) {
+                if let leftmost = starts.min(by: { a, b in
+                    if abs(a.startX - b.startX) > 0.5 { return a.startX < b.startX }
+                    return a.tokenIndex < b.tokenIndex
+                }) {
+                    let dx = leftmost.startX - targetLeftStartX
+                    if abs(dx) > leftTol {
+                        reportFailure(String(format: "[HeadwordPadding invariant] line %d leftmost headword startX %.2f must equal leftGuide %.2f (dx=%.2f)", lineIndex, leftmost.startX, targetLeftStartX, dx))
+                    }
                 }
             }
 
             // B) Right boundary: enforce for tokens that END on this line.
-            if let ends = tokensEndingOnLine[lineIndex] {
-                for r in ends {
-                    let overflow = r.endX - rightInsetGuideX
-                    if overflow > rightTol {
-                        reportFailure(String(format: "[HeadwordPadding invariant] line %d token %d exceeds right wrap guide. endX=%.2f rightGuide=%.2f overflow=%.2f", lineIndex, r.tokenIndex, r.endX, rightInsetGuideX, overflow))
+            if TokenSpacingInvariantSource.checkEnabled(.rightBoundary) {
+                if let ends = tokensEndingOnLine[lineIndex] {
+                    for r in ends {
+                        let overflow = r.endX - rightInsetGuideX
+                        if overflow > rightTol {
+                            reportFailure(String(format: "[HeadwordPadding invariant] line %d token %d exceeds right wrap guide. endX=%.2f rightGuide=%.2f overflow=%.2f", lineIndex, r.tokenIndex, r.endX, rightInsetGuideX, overflow))
+                        }
                     }
                 }
             }
@@ -2590,12 +2600,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 // Right boundary of the previous token, excluding its trailing `.kern`.
                 let prevRightExclKern = prev.endX - prev.trailingKern
                 let gap = cur.startX - prevRightExclKern
-                if gap < -overlapTol {
+                if TokenSpacingInvariantSource.checkEnabled(.nonOverlap), gap < -overlapTol {
                     reportFailure(String(format: "[HeadwordPadding invariant] overlap on line %d. prev=%d endX=%.2f kern=%.2f next=%d startX=%.2f gap=%.2f", lineIndex, prev.tokenIndex, prev.endX, prev.trailingKern, cur.tokenIndex, cur.startX, gap))
                 }
 
                 let expected = prev.trailingKern
-                if abs(gap - expected) > kernGapTol {
+                if TokenSpacingInvariantSource.checkEnabled(.gapMatchesKern),
+                   abs(gap - expected) > kernGapTol {
                     reportFailure(String(format: "[HeadwordPadding invariant] gap != kern between consecutive headwords on line %d. prev=%d next=%d gap=%.2f expectedKern=%.2f prevEndX=%.2f nextStartX=%.2f", lineIndex, prev.tokenIndex, cur.tokenIndex, gap, expected, prev.endX, cur.startX))
                 }
             }

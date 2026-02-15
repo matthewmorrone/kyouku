@@ -284,7 +284,7 @@ struct PasteView: View {
     }
 
     private func emitTokenListLog(_ message: String) {
-        CustomLogger.shared.print(message)
+        // CustomLogger.shared.print(message)
         NSLog("%@", message)
     }
 
@@ -776,6 +776,7 @@ struct PasteView: View {
             alternateTokenColors: $alternateTokenColors,
             highlightUnknownTokens: $highlightUnknownTokens,
             padHeadwordSpacing: $readingHeadwordSpacingPadding,
+            headwordSpacingAmount: readingHeadwordSpacingAmount,
             incrementalLookupEnabled: incrementalLookupEnabled,
             lineSpacing: readingLineSpacing,
             globalKerningPixels: readingGlobalKerningPixels,
@@ -830,7 +831,7 @@ struct PasteView: View {
                 // Always emit token list text to logs for debugging.
                 // Dedupe by string to avoid spamming during scroll/layout.
                 if text != lastLoggedTokenListText {
-                    emitTokenListLog("[TokenList]\n\(text)")
+                    // emitTokenListLog("[TokenList]\n\(text)")
                     lastLoggedTokenListText = text
                 }
             },
@@ -1270,6 +1271,16 @@ struct PasteView: View {
             incrementalPopupHits = []
             recomputeSavedWordOverlays()
         }
+
+        PasteRenderTimingTrace.begin(
+            noteID: currentNote?.id,
+            textLength: (inputText as NSString).length,
+            reason: "first note appearance"
+        )
+        PasteRenderTimingTrace.checkpoint(
+            "APPEAR",
+            "showFurigana=\(showFurigana) altColors=\(alternateTokenColors) unknown=\(highlightUnknownTokens)"
+        )
 
         ensureInitialFuriganaReady(reason: "onAppear initialization")
     }
@@ -2311,6 +2322,10 @@ struct PasteView: View {
         skipTailSemanticMerge: Bool = false
     ) {
         guard inputText.isEmpty == false else { return }
+        PasteRenderTimingTrace.checkpoint(
+            "REFRESH",
+            "reason=\(reason) recompute=\(recomputeSpans) skipTail=\(skipTailSemanticMerge)"
+        )
         furiganaRefreshToken &+= 1
         startFuriganaTask(token: furiganaRefreshToken, recomputeSpans: recomputeSpans, skipTailSemanticMerge: skipTailSemanticMerge)
     }
@@ -2322,6 +2337,10 @@ struct PasteView: View {
     }
 
     private func startFuriganaTask(token: Int, recomputeSpans: Bool, skipTailSemanticMerge: Bool) {
+        PasteRenderTimingTrace.checkpoint(
+            "TASK",
+            "start token=\(token) recompute=\(recomputeSpans)"
+        )
         guard let taskBody = makeFuriganaTask(token: token, recomputeSpans: recomputeSpans, skipTailSemanticMerge: skipTailSemanticMerge) else { return }
         furiganaTaskHandle?.cancel()
         furiganaTaskHandle = Task {
@@ -2410,15 +2429,20 @@ struct PasteView: View {
         )
         let service = furiganaPipeline
         return {
+            PasteRenderTimingTrace.checkpoint("PIPE", "render begin")
             let result = await service.render(pipelineInput)
+            PasteRenderTimingTrace.checkpoint("PIPE", "render end semantic=\(result.semanticSpans.count)")
             await MainActor.run {
                 guard Task.isCancelled == false else {
+                    PasteRenderTimingTrace.checkpoint("APPLY", "cancelled")
                     return
                 }
                 guard token == furiganaRefreshToken else {
+                    PasteRenderTimingTrace.checkpoint("APPLY", "stale token=\(token) latest=\(furiganaRefreshToken)")
                     return
                 }
                 guard inputText == currentText else {
+                    PasteRenderTimingTrace.checkpoint("APPLY", "input changed")
                     return
                 }
                 furiganaSpans = result.spans
@@ -2432,6 +2456,10 @@ struct PasteView: View {
                     furiganaAttributedTextBase = base
                     furiganaAttributedText = base
                 }
+                PasteRenderTimingTrace.checkpoint(
+                    "APPLY",
+                    "attributed=\(furiganaAttributedText?.length ?? 0) showFurigana=\(showFurigana) altColors=\(alternateTokenColors)"
+                )
                 restoreSelectionIfNeeded()
             }
         }

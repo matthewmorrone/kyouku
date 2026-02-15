@@ -108,6 +108,12 @@ struct FuriganaPipelineService {
     }
 
     func render(_ input: Input) async -> Result {
+        if input.context == "PasteView" {
+            PasteRenderTimingTrace.checkpoint(
+                "R-IN",
+                "showFurigana=\(input.showFurigana) needsHighlights=\(input.needsTokenHighlights)"
+            )
+        }
         guard input.text.isEmpty == false else {
             return Result(spans: nil, semanticSpans: [], attributedString: nil)
         }
@@ -220,6 +226,13 @@ struct FuriganaPipelineService {
         } else {
             attributed = nil
             log("R10", stageLine("RubyProjection", "skipped (showFurigana false)"))
+        }
+
+        if input.context == "PasteView" {
+            PasteRenderTimingTrace.checkpoint(
+                "R-OUT",
+                "annotated=\(resolvedSpans.count) semantic=\(mergedSemantic.count) attributed=\(attributed?.length ?? 0)"
+            )
         }
 
         log("OUT", stageLine("FinalSemantic", describeSemantic(mergedSemantic)))

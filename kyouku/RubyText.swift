@@ -29,6 +29,7 @@ struct RubyText: UIViewRepresentable {
     var allowSystemTextSelection: Bool = true
     var globalKerning: CGFloat = 0
     var padHeadwordSpacing: Bool = false
+    var headwordSpacingAmount: CGFloat = 1.0
     var rubyHorizontalAlignment: RubyHorizontalAlignment = .center
     var wrapLines: Bool = true
     var horizontalScrollEnabled: Bool = false
@@ -306,6 +307,7 @@ struct RubyText: UIViewRepresentable {
         renderHasher.combine(Int((effectiveLineSpacing * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(rubyHorizontalAlignment == .leading ? 1 : 0)
         renderHasher.combine(padHeadwordSpacing ? 1 : 0)
+        renderHasher.combine(Int((max(0, headwordSpacingAmount) * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(wrapLines ? 1 : 0)
         // Ruby visibility affects layout, because we may reserve different vertical headroom
         // (paragraph spacing + top inset) depending on whether ruby should be shown.
@@ -405,7 +407,12 @@ struct RubyText: UIViewRepresentable {
             }
 
             if tokenOverlays.isEmpty == false {
+                PasteRenderTimingTrace.checkpoint("CLR", "apply begin overlays=\(tokenOverlays.count)")
                 RubyTextProcessing.applyTokenColors(tokenOverlays, to: mutable)
+                PasteRenderTimingTrace.checkpoint("CLR", "apply end")
+                if alternateTokenColorsEnabled {
+                    PasteRenderTimingTrace.end("alternate token colors rendered")
+                }
             }
 
             if customizedRanges.isEmpty == false {
@@ -419,6 +426,7 @@ struct RubyText: UIViewRepresentable {
                 baseFont: baseFont,
                 defaultRubyFontSize: defaultRubyFontSize,
                 enabled: padHeadwordSpacing && annotationVisibility != .removed,
+                headwordSpacingAmount: headwordSpacingAmount,
                 interTokenSpacing: interTokenSpacing
             )
             uiView.rubyIndexMap = indexMap

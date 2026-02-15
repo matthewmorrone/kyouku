@@ -18,6 +18,7 @@ struct PasteEditorColumnBody: View {
     @Binding var alternateTokenColors: Bool
     @Binding var highlightUnknownTokens: Bool
     @Binding var padHeadwordSpacing: Bool
+    let headwordSpacingAmount: Double
 
     let incrementalLookupEnabled: Bool
 
@@ -88,6 +89,7 @@ struct PasteEditorColumnBody: View {
                 lineSpacing: lineSpacing,
                 globalKerningPixels: globalKerningPixels,
                 padHeadwordSpacing: padHeadwordSpacing,
+                headwordSpacingAmount: headwordSpacingAmount,
                 wrapLines: wrapLines,
                 alternateTokenColors: effectiveAlternateTokenColors,
                 highlightUnknownTokens: effectiveHighlightUnknownTokens,

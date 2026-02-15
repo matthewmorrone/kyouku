@@ -20,6 +20,7 @@ struct FuriganaRenderingHost: View {
     var lineSpacing: Double
     var globalKerningPixels: Double = 0
     var padHeadwordSpacing: Bool = false
+    var headwordSpacingAmount: Double = 1.0
     var wrapLines: Bool = false
     var alternateTokenColors: Bool
     var highlightUnknownTokens: Bool
@@ -268,6 +269,7 @@ struct FuriganaRenderingHost: View {
             allowSystemTextSelection: false,
             globalKerning: CGFloat(globalKerningPixels),
             padHeadwordSpacing: padHeadwordSpacing,
+            headwordSpacingAmount: CGFloat(max(0, headwordSpacingAmount)),
             rubyHorizontalAlignment: .center,
             wrapLines: (onTokenSpacingChanged != nil) ? true : wrapLines,
             horizontalScrollEnabled: ((onTokenSpacingChanged != nil) ? true : wrapLines) == false,
@@ -319,6 +321,10 @@ struct FuriganaRenderingHost: View {
         if wantsTokenColors == false {
             return extraTokenOverlays
         }
+        PasteRenderTimingTrace.checkpoint(
+            "OVR",
+            "build begin alt=\(alternateTokenColors) unknown=\(highlightUnknownTokens) semantic=\(semanticSpans.count)"
+        )
         guard semanticSpans.isEmpty == false else { return extraTokenOverlays }
         let backingString = furiganaText?.string ?? text
         let textStorage = backingString as NSString
@@ -362,6 +368,7 @@ struct FuriganaRenderingHost: View {
         if extraTokenOverlays.isEmpty == false {
             overlays.append(contentsOf: extraTokenOverlays)
         }
+        PasteRenderTimingTrace.checkpoint("OVR", "build end overlays=\(overlays.count)")
         return overlays
     }
 

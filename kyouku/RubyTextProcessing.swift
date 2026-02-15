@@ -220,6 +220,7 @@ enum RubyTextProcessing {
         baseFont: UIFont,
         defaultRubyFontSize: CGFloat,
         enabled: Bool,
+        headwordSpacingAmount: CGFloat = 1.0,
         interTokenSpacing: [Int: CGFloat] = [:]
     ) -> (NSAttributedString, TokenOverlayTextView.RubyIndexMap) {
         let canPadRuby = enabled
@@ -467,10 +468,11 @@ enum RubyTextProcessing {
                 let shouldDistributeInside = kanjiCount >= 2 && gapCount >= 1
 
                 if shouldDistributeInside {
+                    let requestedPerGap = max(0, headwordSpacingAmount)
                     let idealPerGap = extra / CGFloat(gapCount)
                     // Avoid excessively large inter-kanji gaps; spill remainder to edge padding.
                     let maxPerGap = max(1.0, baseFont.pointSize * 0.6)
-                    let perGap = min(maxPerGap, max(0, idealPerGap))
+                    let perGap = min(maxPerGap, max(0, idealPerGap), requestedPerGap)
 
                     if perGap > 0.01 {
                         for i in kanjiGapIndices {
@@ -497,6 +499,22 @@ enum RubyTextProcessing {
                     let remaining = extra - internalApplied
                     appendEdgeRubyPadding(totalExtraWidth: remaining)
                 } else {
+                    // Single-kanji runs (often kanji + okurigana words like 占う) should not
+                    // receive symmetric edge spacers: that can create visible left jut and a
+                    // fake gap between kanji and following okurigana. Use leading-only padding
+                    // to pull the ruby block right without opening a gap before okurigana.
+                    if kanjiCount == 1 {
+                        if extra > 0.01 {
+                            insertions.append(
+                                .init(
+                                    insertAtSourceIndex: inkStart,
+                                    width: extra,
+                                    kind: .rubyPadding(reading: reading, rubyFontSize: rubyFontSize)
+                                )
+                            )
+                            continue
+                        }
+                    }
                     appendEdgeRubyPadding(totalExtraWidth: extra)
                 }
             }

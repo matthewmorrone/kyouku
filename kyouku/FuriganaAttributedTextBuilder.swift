@@ -739,43 +739,26 @@ private extension FuriganaAttributedTextBuilder {
             cursor = NSMaxRange(r)
         }
 
-        if glyphRanges.count >= 2 {
-            // Bias-free distribution:
-            // - Keep spacing *inside* the headword (avoid trailing padding that creates a visible
-            //   gap to the next character and looks right-shifted).
-            // - Cap per-gap kern so 2-glyph headwords don't get one giant internal gap.
-            // - Use `.expansion` on the run to absorb remaining width without introducing gaps.
-            let internalGapCount = max(1, glyphRanges.count - 1)
-            let perGapRaw = totalPad / CGFloat(internalGapCount)
-            let maxPerGap = max(0.0, baseFont.pointSize * 0.22)
-            let perGap = min(perGapRaw, maxPerGap)
+        let kanjiRanges = glyphRanges.filter { containsKanji(in: text.substring(with: $0)) }
 
-            if let first = glyphRanges.first, let last = glyphRanges.last {
-                let kernRangeLength = max(0, last.location - first.location)
-                if kernRangeLength > 0, perGap > 0.001 {
-                    let kernRange = NSRange(location: first.location, length: kernRangeLength)
-                    adjustments.append(HeadwordSpacingAdjustment(range: kernRange, kern: perGap))
-                }
-            }
+        // Headword pad amount is intentionally scoped to inter-kanji spacing only.
+        // - applies only when there are 2+ kanji in the headword
+        // - 0 => no additional gap between kanji
+        // - >0 => distribute added spacing evenly after each kanji (except the last)
+        guard kanjiRanges.count >= 2 else { return [] }
 
-            let appliedByKern = perGap * CGFloat(internalGapCount)
-            let remaining = max(0.0, totalPad - appliedByKern)
-            if remaining > epsilon, baseWidth > 0.01 {
-                // Approximate: treat expansion as a fractional increase over the run width.
-                // Clamp to avoid visibly stretched glyphs.
-                let expansion = min(0.20, remaining / baseWidth)
-                if expansion > 0.0005 {
-                    adjustments.append(HeadwordSpacingAdjustment(range: headwordRange, expansion: expansion))
-                }
-            }
-        } else if let only = glyphRanges.first {
-            // Single glyph: use expansion instead of trailing padding.
-            if baseWidth > 0.01 {
-                let expansion = min(0.20, totalPad / baseWidth)
-                if expansion > 0.0005 {
-                    adjustments.append(HeadwordSpacingAdjustment(range: only, expansion: expansion))
-                }
-            }
+        let internalGapCount = kanjiRanges.count - 1
+        guard internalGapCount > 0 else { return [] }
+
+        let perGapRaw = totalPad / CGFloat(internalGapCount)
+        let maxPerGap = max(0.0, baseFont.pointSize * 0.22)
+        let requestedPerGap = max(0, amount)
+        let perGap = min(perGapRaw, maxPerGap, requestedPerGap)
+        guard perGap > epsilon else { return [] }
+
+        for idx in 0..<(kanjiRanges.count - 1) {
+            let current = kanjiRanges[idx]
+            adjustments.append(HeadwordSpacingAdjustment(range: current, kern: perGap))
         }
 
         return adjustments

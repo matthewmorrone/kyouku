@@ -312,16 +312,6 @@ extension WordDefinitionsView {
                     let trimmedSurface = surface.trimmingCharacters(in: .whitespacesAndNewlines)
                     let trimmedKana = (kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-                    // If this is an inflected verb lookup, pitch accent must be associated with the lemma.
-                    // Do not attempt to derive pitch from the surface form.
-                    let lemmaForPitch = (resolvedLemmaForLookup ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let isInflectedVerbForPitch: Bool = {
-                        guard isVerbLemma else { return false }
-                        guard lemmaForPitch.isEmpty == false else { return false }
-                        guard trimmedSurface.isEmpty == false else { return false }
-                        return lemmaForPitch != trimmedSurface
-                    }()
-
                     var pairs: [(String, String)] = []
                     func add(_ s: String, _ r: String) {
                         let s2 = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -330,16 +320,15 @@ extension WordDefinitionsView {
                         pairs.append((s2, r2))
                     }
 
-                    if isInflectedVerbForPitch == false {
-                        if trimmedSurface.isEmpty == false, trimmedKana.isEmpty == false {
-                            add(trimmedSurface, trimmedKana)
-                        }
-                        if trimmedSurface.isEmpty == false {
-                            add(trimmedSurface, trimmedSurface)
-                        }
-                        if trimmedKana.isEmpty == false {
-                            add(trimmedKana, trimmedKana)
-                        }
+                    // Surface-form candidates first (best effort for inflected forms like ～て).
+                    if trimmedSurface.isEmpty == false, trimmedKana.isEmpty == false {
+                        add(trimmedSurface, trimmedKana)
+                    }
+                    if trimmedSurface.isEmpty == false {
+                        add(trimmedSurface, trimmedSurface)
+                    }
+                    if trimmedKana.isEmpty == false {
+                        add(trimmedKana, trimmedKana)
                     }
 
                     // Always prefer lemma entry spellings/readings from JMdict details.

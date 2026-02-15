@@ -101,6 +101,7 @@ extension TokenOverlayTextView {
     @available(iOS 15.0, *)
     func scheduleLineStartBoundaryCorrectionIfNeeded() {
         guard padHeadwordSpacing else { return }
+        guard TokenSpacingInvariantSource.fixEnabled(.leftBoundary) else { return }
         guard wrapLines else { return }
         guard lineStartBoundaryCorrectionScheduled == false else { return }
         guard let attributedText, attributedText.length > 0 else { return }
@@ -147,11 +148,8 @@ extension TokenOverlayTextView {
 
         let lineRectsInContent = visibleLines.map { $0.typographicRectInContent }
 
-        // Fixed left boundary for a line in CONTENT coordinates (independent of any glyphs/spacers).
-        // Invariant: leftmost token on a line should start 1 physical pixel to the right of the inset guide.
-        let displayScale = max(1.0, traitCollection.displayScale)
-        let onePixel = 1.0 / displayScale
-        let lineContentMinX = (textContainerInset.left + textContainer.lineFragmentPadding) + onePixel
+        // Fixed left boundary for a line in CONTENT coordinates (single source of truth).
+        let lineContentMinX = TokenSpacingInvariantSource.leftGuideX(in: self)
 
         let mutable = NSMutableAttributedString(attributedString: text)
         let backing = mutable.string as NSString
@@ -377,9 +375,16 @@ extension TokenOverlayTextView {
         var adjustedFramesByRunStart: [Int: CGRect] = [:]
         adjustedFramesByRunStart.reserveCapacity(256)
 
-        let minGap: CGFloat = 0.5
+        let minGap: CGFloat = TokenSpacingInvariantSource.rubyOverlapMinimumGap
 
         for (lineIndex, proposals) in proposalsByLine {
+            guard TokenSpacingInvariantSource.fixEnabled(.rubyOverlapResolution) else {
+                for p in proposals {
+                    adjustedFramesByRunStart[p.run.inkRange.location] = p.frame
+                }
+                _ = lineIndex
+                continue
+            }
             let sorted = proposals.sorted { a, b in
                 if abs(a.frame.minX - b.frame.minX) > 0.5 { return a.frame.minX < b.frame.minX }
                 return a.run.inkRange.location < b.run.inkRange.location
@@ -528,7 +533,12 @@ extension TokenOverlayTextView {
             )
 
             if let existing = firstTokenByLineIndex[lineIndex] {
-                if candidate.baseMinXInContent < (existing.baseMinXInContent - 0.5) {
+                // For envelope-boundary correction, the representative line-start token is
+                // the visually leftmost envelope on that line.
+                if candidate.envelopeMinXInContent < (existing.envelopeMinXInContent - 0.5) {
+                    firstTokenByLineIndex[lineIndex] = candidate
+                } else if abs(candidate.envelopeMinXInContent - existing.envelopeMinXInContent) <= 0.5,
+                          candidate.inkStartIndex < existing.inkStartIndex {
                     firstTokenByLineIndex[lineIndex] = candidate
                 }
             } else {
@@ -573,7 +583,7 @@ extension TokenOverlayTextView {
                     return max(0, existingSpacerWidth + delta)
                 }
                 // No existing spacer: only insert if we need to shift right.
-                if delta > 0.5 {
+                if delta > TokenSpacingInvariantSource.lineSpacerInsertionThreshold {
                     return delta
                 }
                 return nil
@@ -582,7 +592,7 @@ extension TokenOverlayTextView {
             var spacerChange: CGFloat = 0
             if let spacerTargetWidth {
                 if hasLineSpacer {
-                    if abs(spacerTargetWidth - existingSpacerWidth) > 0.25 {
+                    if abs(spacerTargetWidth - existingSpacerWidth) > TokenSpacingInvariantSource.lineSpacerResizeThreshold {
                         let idx = spacerIndex ?? startIndex
                         setSpacerWidth(spacerTargetWidth, at: idx)
                         spacerChange = spacerTargetWidth - existingSpacerWidth

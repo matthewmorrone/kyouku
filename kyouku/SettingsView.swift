@@ -293,6 +293,7 @@ struct SettingsView: View {
                 isScrollEnabled: true,
                 globalKerning: CGFloat(readingGlobalKerningPixels),
                 padHeadwordSpacing: readingHeadwordSpacingPadding,
+                headwordSpacingAmount: CGFloat(max(0, readingHeadwordSpacingAmount)),
                 rubyHorizontalAlignment: .center,
                 semanticSpans: previewSemanticSpans ?? [],
                 enableTapInspection: false,
@@ -302,18 +303,20 @@ struct SettingsView: View {
             .frame(height: 140, alignment: .topLeading)
             .padding(.vertical, 8)
 
-            Toggle("Distinct kana/kanji fonts", isOn: $readingDistinctKanaKanjiFonts)
-                .tint(Color.appAccent)
+            Toggle("Pad multi-kanji headwords", isOn: $readingHeadwordSpacingPadding)
+                .toggleStyle(.switch)
 
-            Text("When enabled, kanji render in a Mincho-style font while kana keep your selected font.")
-                .font(.caption)
-                .foregroundStyle(Color.appTextSecondary)
-
-            Picker("Font", selection: $readingFontName) {
-                ForEach(readingFontOptions) { option in
-                    Text(option.title).tag(option.postScriptName)
-                }
+            HStack {
+                Text("Kanji Pad Amount")
+                Spacer()
+                Text(String(format: "%.1f px", readingHeadwordSpacingAmount))
+                    .foregroundStyle(.secondary)
             }
+            Slider(
+                value: $readingHeadwordSpacingAmount,
+                in: 0.0...8.0,
+                step: 1.0
+            )
 
             HStack {
                 Text("Text Size")
@@ -390,27 +393,6 @@ struct SettingsView: View {
                 in: -2.0...10.0,
                 step: 0.25
             )
-
-            Toggle("Pad headwords", isOn: $readingHeadwordSpacingPadding)
-                .toggleStyle(.switch)
-
-            HStack {
-                Text("Headword Pad Amount")
-                Spacer()
-                Text(String(format: "%.2f×", readingHeadwordSpacingAmount))
-                    .foregroundStyle(.secondary)
-            }
-            Slider(
-                value: $readingHeadwordSpacingAmount,
-                in: 0.0...2.0,
-                step: 0.05
-            )
-            .disabled(readingHeadwordSpacingPadding == false)
-
-            Text("Controls extra spacing added inside multi-kanji headwords. 0 adds no extra spacing.")
-                .font(.caption)
-                .foregroundStyle(Color.appTextSecondary)
-
         }
     }
 

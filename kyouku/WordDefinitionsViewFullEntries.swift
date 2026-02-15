@@ -2,27 +2,65 @@ import SwiftUI
 import NaturalLanguage
 
 extension WordDefinitionsView {
+    func normalizedPitchLookup(_ value: String?) -> String {
+        (value ?? "")
+            .replacingOccurrences(of: "◦", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func surfacePitchAccents(surface: String, reading: String) -> [PitchAccent] {
+        let targetSurface = normalizedPitchLookup(surface)
+        let targetReading = normalizedPitchLookup(reading)
+        guard targetSurface.isEmpty == false, targetReading.isEmpty == false else { return [] }
+
+        let exact = pitchAccentsForTerm.filter { row in
+            normalizedPitchLookup(row.surface) == targetSurface
+                && normalizedPitchLookup(row.reading.isEmpty ? row.readingMarked : row.reading) == targetReading
+        }
+
+        return exact.sorted {
+            if $0.accent != $1.accent { return $0.accent < $1.accent }
+            if $0.morae != $1.morae { return $0.morae < $1.morae }
+            return ($0.kind ?? "") < ($1.kind ?? "")
+        }
+    }
+
     // MARK: Full Entries
     func entryDetailView(_ detail: DictionaryEntryDetail) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let formsBlock = entryFormsBlock(detail)
+        let pitchBlock = entryPitchAccentBlock(detail)
+        let senses = orderedSensesForDisplay(detail)
+
+        return VStack(alignment: .leading, spacing: 0) {
             entryDetailSection("Entry") {
                 entryDetailHeader(detail)
             }
+            .padding(.vertical, 2)
 
-            if let formsBlock = entryFormsBlock(detail) {
+            if let formsBlock {
+                Divider()
+                    .padding(.vertical, 8)
+
                 entryDetailSection("Forms") {
                     formsBlock
                 }
+                .padding(.vertical, 2)
             }
 
-            if let pitchBlock = entryPitchAccentBlock(detail) {
+            if let pitchBlock {
+                Divider()
+                    .padding(.vertical, 8)
+
                 entryDetailSection("Pitch Accent") {
                     pitchBlock
                 }
+                .padding(.vertical, 2)
             }
 
-            let senses = orderedSensesForDisplay(detail)
             if senses.isEmpty == false {
+                Divider()
+                    .padding(.vertical, 8)
+
                 entryDetailSection("Senses") {
                     let showSenseNumbers = senses.count > 1
                     ForEach(Array(senses.enumerated()), id: \.element.id) { index, sense in
@@ -33,10 +71,21 @@ extension WordDefinitionsView {
                         }
                     }
                 }
+                .padding(.vertical, 2)
             }
         }
-        .padding(.vertical, 8)
-        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+        .padding(14)
+        .background(
+            .thinMaterial,
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
     }
 
     @ViewBuilder

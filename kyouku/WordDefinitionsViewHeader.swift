@@ -35,6 +35,17 @@ extension WordDefinitionsView {
         titleText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    var headerDisplayReading: String? {
+        let preferred = (kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if preferred.isEmpty == false { return preferred }
+
+        let detailReading = (entryDetails.first?.kanaForms.first?.text ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if detailReading.isEmpty == false { return detailReading }
+
+        return nil
+    }
+
     struct HeaderMetadataPill: Identifiable, Hashable {
         enum Tone: Hashable {
             case accent
@@ -238,7 +249,13 @@ extension WordDefinitionsView {
             return
         }
 
-        headerLemmaLine = "Lemma: \(lemmaText)"
+        let lemmaReading = (entryDetails.first?.kanaForms.first?.text ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if lemmaReading.isEmpty == false, lemmaReading != lemmaText {
+            headerLemmaLine = "Lemma: \(lemmaText)/\(lemmaReading)"
+        } else {
+            headerLemmaLine = "Lemma: \(lemmaText)"
+        }
 
         func friendlyDeinflectionReason(_ reason: String) -> String {
             let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
