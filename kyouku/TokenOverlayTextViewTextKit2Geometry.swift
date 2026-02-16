@@ -442,7 +442,7 @@ extension TokenOverlayTextView {
 
     func unionRectsByLine(_ rects: [CGRect]) -> [CGRect] {
         let sorted = rects.sorted {
-            if abs($0.midY - $1.midY) > 0.5 {
+            if abs($0.midY - $1.midY) > TokenSpacingInvariantSource.positionTieTolerance {
                 return $0.midY < $1.midY
             }
             return $0.minX < $1.minX

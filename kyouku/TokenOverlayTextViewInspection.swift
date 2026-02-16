@@ -154,54 +154,17 @@ extension TokenOverlayTextView {
 
         // Prefer the boundary that already has spacing (so you can decrease it),
         // otherwise default to the leading boundary so the touched token moves.
-        guard let boundary = resolveTokenSpacingBoundary(selection: selection, length: length, backing: backing) else {
+        guard let boundary = TokenSpacingInvariantSource.resolveTokenSpacingBoundary(
+            selection: selection,
+            length: length,
+            backing: backing,
+            currentWidthProvider: tokenSpacingValueProvider
+        ) else {
             return false
         }
         // Ensure the boundary is valid for persistence.
         guard boundary > 0, boundary < length else { return false }
         return true
-    }
-
-    func resolveTokenSpacingBoundary(
-        selection: RubySpanSelection,
-        length: Int,
-        backing: NSString
-    ) -> Int? {
-        let start = selection.highlightRange.location
-        let end = NSMaxRange(selection.highlightRange)
-
-        // Candidate boundaries around this token.
-        let leading: Int? = (start > 0 && start < length) ? start : nil
-        let trailing: Int? = (end > 0 && end < length) ? end : nil
-        guard leading != nil || trailing != nil else { return nil }
-
-        func isNewlineBoundary(_ idx: Int) -> Bool {
-            let scalar = backing.character(at: idx)
-            if let u = UnicodeScalar(scalar), CharacterSet.newlines.contains(u) {
-                return true
-            }
-            return false
-        }
-
-        let leadingOK = (leading != nil && isNewlineBoundary(leading!) == false)
-        let trailingOK = (trailing != nil && isNewlineBoundary(trailing!) == false)
-        guard leadingOK || trailingOK else { return nil }
-
-        // If either side already has spacing, stick to it so dragging left can decrease.
-        if let provider = tokenSpacingValueProvider {
-            let leadingValue = (leadingOK && leading != nil) ? provider(leading!) : 0
-            let trailingValue = (trailingOK && trailing != nil) ? provider(trailing!) : 0
-            let hasLeading = abs(leadingValue) > 0.25
-            let hasTrailing = abs(trailingValue) > 0.25
-
-            if hasLeading && !hasTrailing { return leading }
-            if hasTrailing && !hasLeading { return trailing }
-        }
-
-        // Default: leading boundary (moves the touched token). If unavailable, use trailing.
-        if leadingOK, let leading { return leading }
-        if trailingOK, let trailing { return trailing }
-        return nil
     }
 
     @objc
@@ -221,7 +184,12 @@ extension TokenOverlayTextView {
             let sourceIndex = sourceIndex(fromDisplayIndex: resolvedIndex)
             guard let selection = spanSelectionContext(forUTF16Index: sourceIndex) else { return nil }
             guard pointHitsSemanticSpanForSpacing(selection, at: point) else { return nil }
-            return resolveTokenSpacingBoundary(selection: selection, length: length, backing: backing)
+            return TokenSpacingInvariantSource.resolveTokenSpacingBoundary(
+                selection: selection,
+                length: length,
+                backing: backing,
+                currentWidthProvider: tokenSpacingValueProvider
+            )
         }
 
         switch recognizer.state {
@@ -233,20 +201,37 @@ extension TokenOverlayTextView {
             }
             tokenSpacingActiveBoundaryUTF16 = boundary
             tokenSpacingStartValue = tokenSpacingValueProvider?(boundary) ?? 0
+            TokenSpacingInvariantSource.logSpacingTelemetry(
+                String(
+                    format: "drag-begin boundary=%d start=%.2f",
+                    boundary,
+                    tokenSpacingStartValue
+                )
+            )
 
         case .changed:
             guard let boundary = tokenSpacingActiveBoundaryUTF16 else { return }
             let delta = recognizer.translation(in: self).x
             let proposed = tokenSpacingStartValue + delta
-            let clamped = max(-60, min(proposed, 120))
+            let clamped = TokenSpacingInvariantSource.clampTokenSpacingWidth(proposed)
             tokenSpacingChangedHandler(boundary, clamped, false)
 
         case .ended:
             guard let boundary = tokenSpacingActiveBoundaryUTF16 else { return }
             let delta = recognizer.translation(in: self).x
             let proposed = tokenSpacingStartValue + delta
-            let clamped = max(-60, min(proposed, 120))
+            let clamped = TokenSpacingInvariantSource.clampTokenSpacingWidth(proposed)
             tokenSpacingChangedHandler(boundary, clamped, true)
+            TokenSpacingInvariantSource.logSpacingTelemetry(
+                String(
+                    format: "drag-end boundary=%d start=%.2f delta=%.2f proposed=%.2f clamped=%.2f",
+                    boundary,
+                    tokenSpacingStartValue,
+                    delta,
+                    proposed,
+                    clamped
+                )
+            )
             tokenSpacingActiveBoundaryUTF16 = nil
             tokenSpacingStartValue = 0
 

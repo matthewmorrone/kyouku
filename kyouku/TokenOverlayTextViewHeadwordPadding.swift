@@ -80,7 +80,7 @@ extension TokenOverlayTextView {
         let unique = Array(Set(lines.map { $0.characterRange.location })).sorted()
         if unique.count == lines.count {
             return lines.sorted { a, b in
-                if abs(a.typographicRectInContent.minY - b.typographicRectInContent.minY) > 0.5 {
+                if abs(a.typographicRectInContent.minY - b.typographicRectInContent.minY) > TokenSpacingInvariantSource.positionTieTolerance {
                     return a.typographicRectInContent.minY < b.typographicRectInContent.minY
                 }
                 return a.typographicRectInContent.minX < b.typographicRectInContent.minX
@@ -386,7 +386,7 @@ extension TokenOverlayTextView {
                 continue
             }
             let sorted = proposals.sorted { a, b in
-                if abs(a.frame.minX - b.frame.minX) > 0.5 { return a.frame.minX < b.frame.minX }
+                if abs(a.frame.minX - b.frame.minX) > TokenSpacingInvariantSource.positionTieTolerance { return a.frame.minX < b.frame.minX }
                 return a.run.inkRange.location < b.run.inkRange.location
             }
 
@@ -437,62 +437,6 @@ extension TokenOverlayTextView {
         var lineInsertions: [LineInsertion] = []
         lineInsertions.reserveCapacity(16)
 
-        func isHardBoundaryGlyph(_ s: String) -> Bool {
-            if s == "\u{FFFC}" { return true }
-            if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
-            let set = CharacterSet.punctuationCharacters.union(.symbols)
-            for scalar in s.unicodeScalars {
-                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
-                if set.contains(scalar) == false { return false }
-            }
-            return true
-        }
-
-        func trimmedInkRange(in displayRange: NSRange) -> NSRange? {
-            let doc = NSRange(location: 0, length: mutable.length)
-            let bounded = NSIntersectionRange(displayRange, doc)
-            guard bounded.location != NSNotFound, bounded.length > 0 else { return nil }
-            let upperBound = min(mutable.length, NSMaxRange(bounded))
-            var inkStart = bounded.location
-            var inkEndExclusive = upperBound
-            var foundInkGlyph = false
-
-            if bounded.location < upperBound {
-                var idx = bounded.location
-                while idx < upperBound {
-                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        idx = NSMaxRange(r)
-                        continue
-                    }
-                    foundInkGlyph = true
-                    inkStart = r.location
-                    break
-                }
-                guard foundInkGlyph else { return nil }
-
-                var tail = upperBound - 1
-                while tail >= inkStart {
-                    let r = backing.rangeOfComposedCharacterSequence(at: tail)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        if r.location == 0 { break }
-                        tail = r.location - 1
-                        continue
-                    }
-                    inkEndExclusive = NSMaxRange(r)
-                    break
-                }
-            }
-
-            let len = max(0, inkEndExclusive - inkStart)
-            guard inkStart != NSNotFound, len > 0 else { return nil }
-            return NSRange(location: inkStart, length: len)
-        }
-
         struct FirstTokenOnLine {
             let tokenIndex: Int
             let inkStartIndex: Int
@@ -503,15 +447,18 @@ extension TokenOverlayTextView {
         var firstTokenByLineIndex: [Int: FirstTokenOnLine] = [:]
         firstTokenByLineIndex.reserveCapacity(visibleLines.count)
 
-        for (tokenIndex, span) in semanticSpans.enumerated() {
-            let sourceRange = span.range
-            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
-            let surface = span.surface
-            if surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+        let inkTokenRecords = TokenSpacingInvariantSource.collectInkTokenRecords(
+            attributedText: mutable,
+            semanticSpans: semanticSpans,
+            maxTokens: semanticSpans.count,
+            displayRangeFromSource: { sourceRange in
+                self.displayRange(fromSourceRange: sourceRange)
+            }
+        )
 
-            let displaySpanRange = displayRange(fromSourceRange: sourceRange)
-            guard displaySpanRange.location != NSNotFound, displaySpanRange.length > 0 else { continue }
-            guard let inkRange = trimmedInkRange(in: displaySpanRange) else { continue }
+        for record in inkTokenRecords {
+            let tokenIndex = record.tokenIndex
+            let inkRange = record.inkRange
 
             let baseRectsInContent = textKit2AnchorRectsInContentCoordinates(for: inkRange, lineRectsInContent: lineRectsInContent)
             guard baseRectsInContent.isEmpty == false else { continue }
@@ -535,9 +482,9 @@ extension TokenOverlayTextView {
             if let existing = firstTokenByLineIndex[lineIndex] {
                 // For envelope-boundary correction, the representative line-start token is
                 // the visually leftmost envelope on that line.
-                if candidate.envelopeMinXInContent < (existing.envelopeMinXInContent - 0.5) {
+                if candidate.envelopeMinXInContent < (existing.envelopeMinXInContent - TokenSpacingInvariantSource.positionTieTolerance) {
                     firstTokenByLineIndex[lineIndex] = candidate
-                } else if abs(candidate.envelopeMinXInContent - existing.envelopeMinXInContent) <= 0.5,
+                } else if abs(candidate.envelopeMinXInContent - existing.envelopeMinXInContent) <= TokenSpacingInvariantSource.positionTieTolerance,
                           candidate.inkStartIndex < existing.inkStartIndex {
                     firstTokenByLineIndex[lineIndex] = candidate
                 }

@@ -524,8 +524,8 @@ enum RubyTextProcessing {
             for (idx, width) in interTokenSpacing {
                 guard idx > 0, idx < length else { continue }
                 guard width.isFinite else { continue }
-                let w = width
-                guard abs(w) > 0.25 else { continue }
+                let w = TokenSpacingInvariantSource.clampTokenSpacingWidth(width)
+                guard abs(w) > TokenSpacingInvariantSource.tokenSpacingExistingWidthEpsilon else { continue }
                 insertions.append(.init(insertAtSourceIndex: idx, width: w, kind: .interToken))
             }
         }

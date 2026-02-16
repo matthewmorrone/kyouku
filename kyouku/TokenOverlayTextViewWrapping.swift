@@ -7,20 +7,16 @@ extension TokenOverlayTextView {
         guard wrapLines else {
             preferredWrapBreakIndices = []
             preferredWrapBreakSignature = 0
+            forcedWrapBreakIndices = []
+            forcedWrapBreakSignature = 0
             return
         }
-        let length = attributedText?.length ?? 0
-
-        func isPunctuationOrSymbolOnlySpanSurface(_ s: String) -> Bool {
-            let cleaned = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard cleaned.isEmpty == false else { return false }
-            let set = CharacterSet.punctuationCharacters.union(.symbols)
-            for scalar in cleaned.unicodeScalars {
-                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return false }
-                if set.contains(scalar) == false { return false }
-            }
-            return true
+        guard let attributedText else {
+            preferredWrapBreakIndices = []
+            preferredWrapBreakSignature = 0
+            return
         }
+        let length = attributedText.length
 
         var hasher = Hasher()
         hasher.combine(length)
@@ -36,6 +32,13 @@ extension TokenOverlayTextView {
             hasher.combine(semanticSpans[last].range.location)
             hasher.combine(semanticSpans[last].range.length)
         }
+        hasher.combine(forcedWrapBreakIndices.count)
+        if forcedWrapBreakIndices.isEmpty == false {
+            let sortedForced = forcedWrapBreakIndices.sorted()
+            hasher.combine(sortedForced[0])
+            hasher.combine(sortedForced[sortedForced.count / 2])
+            hasher.combine(sortedForced[sortedForced.count - 1])
+        }
         let signature = hasher.finalize()
         guard signature != preferredWrapBreakSignature else { return }
         preferredWrapBreakSignature = signature
@@ -47,20 +50,117 @@ extension TokenOverlayTextView {
 
         var indices: Set<Int> = []
         indices.reserveCapacity(min(semanticSpans.count, 256))
-        for span in semanticSpans {
-            // Do not allow a preferred break at the start of a punctuation-only span (e.g. "、" "。" "!"),
-            // otherwise punctuation tokens can become the first glyph on a wrapped line.
-            if isPunctuationOrSymbolOnlySpanSurface(span.surface) {
-                continue
+        let tokenRecords = TokenSpacingInvariantSource.collectInkTokenRecords(
+            attributedText: attributedText,
+            semanticSpans: semanticSpans,
+            maxTokens: semanticSpans.count,
+            displayRangeFromSource: { sourceRange in
+                self.displayRange(fromSourceRange: sourceRange)
             }
-            let loc = span.range.location
-            guard loc != NSNotFound else { continue }
-            let displayLoc = displayIndex(fromSourceIndex: loc, includeInsertionsAtIndex: true)
+        )
+        for record in tokenRecords {
+            let displayLoc = record.displayRange.location
             if displayLoc > 0 && displayLoc < length {
                 indices.insert(displayLoc)
             }
         }
+        if forcedWrapBreakIndices.isEmpty == false {
+            indices.formUnion(forcedWrapBreakIndices)
+        }
         preferredWrapBreakIndices = indices
+    }
+
+    @available(iOS 15.0, *)
+    func recomputeForcedWrapBreakIndicesForRightOverflowIfNeeded() {
+        guard wrapLines else {
+            if forcedWrapBreakIndices.isEmpty == false {
+                forcedWrapBreakIndices = []
+                forcedWrapBreakSignature = 0
+                preferredWrapBreakSignature = 0
+                setNeedsLayout()
+            }
+            return
+        }
+
+        guard TokenSpacingInvariantSource.fixEnabled(.rightBoundary) else {
+            if forcedWrapBreakIndices.isEmpty == false {
+                forcedWrapBreakIndices = []
+                forcedWrapBreakSignature = 0
+                preferredWrapBreakSignature = 0
+                setNeedsLayout()
+            }
+            return
+        }
+
+        guard let attributedText, attributedText.length > 0 else { return }
+        guard semanticSpans.isEmpty == false else { return }
+
+        let rightGuideX = TokenSpacingInvariantSource.rightGuideX(in: self)
+        let rightTol = TokenSpacingInvariantSource.rightBoundaryTolerance(in: self)
+
+        let inkTokenRecords = TokenSpacingInvariantSource.collectInkTokenRecords(
+            attributedText: attributedText,
+            semanticSpans: semanticSpans,
+            maxTokens: semanticSpans.count,
+            displayRangeFromSource: { sourceRange in
+                self.displayRange(fromSourceRange: sourceRange)
+            }
+        )
+
+        var forced: Set<Int> = []
+        forced.reserveCapacity(min(semanticSpans.count, 128))
+
+        for record in inkTokenRecords {
+            let inkRange = record.inkRange
+            guard let endCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: NSMaxRange(inkRange), attributedLength: attributedText.length) else { continue }
+
+            let overflow = endCaret.minX - rightGuideX
+            guard overflow > rightTol else { continue }
+
+            let startDisplay = inkRange.location
+            if startDisplay > 0, startDisplay < attributedText.length {
+                forced.insert(startDisplay)
+            }
+        }
+
+        var hasher = Hasher()
+        hasher.combine(attributedText.length)
+        hasher.combine(semanticSpans.count)
+        hasher.combine(Int((rightGuideX * 10).rounded(.toNearestOrEven)))
+        hasher.combine(Int((rightTol * 100).rounded(.toNearestOrEven)))
+        hasher.combine(forced.count)
+        if forced.isEmpty == false {
+            let sorted = forced.sorted()
+            hasher.combine(sorted[0])
+            hasher.combine(sorted[sorted.count / 2])
+            hasher.combine(sorted[sorted.count - 1])
+        }
+        let signature = hasher.finalize()
+
+        if signature == forcedWrapBreakSignature, forced == forcedWrapBreakIndices {
+            return
+        }
+
+        forcedWrapBreakSignature = signature
+        forcedWrapBreakIndices = forced
+        preferredWrapBreakSignature = 0
+        let preview: String = {
+            guard forced.isEmpty == false else { return "[]" }
+            let sorted = forced.sorted()
+            let head = sorted.prefix(5).map(String.init).joined(separator: ",")
+            return sorted.count > 5 ? "[\(head),…]" : "[\(head)]"
+        }()
+        TokenSpacingInvariantSource.logSpacingTelemetry(
+            String(
+                format: "wrap-overflow noteCount=%d forcedBreaks=%d preview=%@ rightGuide=%.2f tol=%.2f",
+                semanticSpans.count,
+                forced.count,
+                preview,
+                rightGuideX,
+                rightTol
+            )
+        )
+        setNeedsLayout()
     }
 
     func shouldAllowWordBreakBeforeCharacter(at charIndex: Int) -> Bool {

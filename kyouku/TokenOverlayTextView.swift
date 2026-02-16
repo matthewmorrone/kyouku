@@ -186,6 +186,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
     var preferredWrapBreakIndices: Set<Int> = []
     var preferredWrapBreakSignature: Int = 0
+    var forcedWrapBreakIndices: Set<Int> = []
+    var forcedWrapBreakSignature: Int = 0
 
     var viewMetricsContext: RubyText.ViewMetricsContext? {
         didSet {
@@ -1694,6 +1696,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         // Ensure overlays are laid out first so highlight rects can match actual ruby bounds.
         layoutRubyOverlayIfNeeded()
 
+        // Phase 2: right-boundary fix is wrap-only.
+        // If a segment overflows the right guide, force a break before that segment start.
+        if #available(iOS 15.0, *) {
+            recomputeForcedWrapBreakIndicesForRightOverflowIfNeeded()
+        }
+
         // Optional (padHeadwordSpacing only): perform a viewport-only, post-layout correction
         // to keep the first ruby on each line from overhanging the fixed line-start boundary.
         if #available(iOS 15.0, *) {
@@ -1919,12 +1927,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         func visibleLineInfos() -> [VisibleLineInfo] {
             let inset = textContainerInset
 
-            // IMPORTANT: Do not assume `bounds.origin == contentOffset`.
-            // In some UIKit/SwiftUI configurations we observed `bounds.origin` staying at zero even while `contentOffset` changes. Use `contentOffset` explicitly to define the visible band in content coordinates.
-            let extraY = max(16, rubyHighlightHeadroom + 12)
-            let visibleRectInContent = CGRect(origin: contentOffset, size: bounds.size)
-                .insetBy(dx: -4, dy: -extraY)
-
             var lines: [VisibleLineInfo] = []
             lines.reserveCapacity(64)
 
@@ -1940,7 +1942,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                         height: r.size.height
                     )
                     if contentRect.isNull || contentRect.isEmpty { continue }
-                    if contentRect.intersects(visibleRectInContent) == false { continue }
 
                     let cr = line.characterRange
                     if cr.location == NSNotFound || cr.length <= 0 { continue }
@@ -1950,7 +1951,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             }
 
             return lines.sorted { a, b in
-                if abs(a.typographicRectInContent.minY - b.typographicRectInContent.minY) > 0.5 {
+                if abs(a.typographicRectInContent.minY - b.typographicRectInContent.minY) > TokenSpacingInvariantSource.positionTieTolerance {
                     return a.typographicRectInContent.minY < b.typographicRectInContent.minY
                 }
                 return a.typographicRectInContent.minX < b.typographicRectInContent.minX
@@ -1995,62 +1996,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         let visibleMaxY = bounds.height + extraY
 
         let backing = attributedText.string as NSString
-
-        func isHardBoundaryGlyph(_ s: String) -> Bool {
-            if s == "\u{FFFC}" { return true }
-            if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
-            let set = CharacterSet.punctuationCharacters.union(.symbols)
-            for scalar in s.unicodeScalars {
-                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
-                if set.contains(scalar) == false { return false }
-            }
-            return true
-        }
-
-        func trimmedInkRange(in displayRange: NSRange) -> NSRange? {
-            let doc = NSRange(location: 0, length: attributedText.length)
-            let bounded = NSIntersectionRange(displayRange, doc)
-            guard bounded.location != NSNotFound, bounded.length > 0 else { return nil }
-            let upperBound = min(attributedText.length, NSMaxRange(bounded))
-            var inkStart = bounded.location
-            var inkEndExclusive = upperBound
-            var foundInkGlyph = false
-
-            if bounded.location < upperBound {
-                var idx = bounded.location
-                while idx < upperBound {
-                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        idx = NSMaxRange(r)
-                        continue
-                    }
-                    foundInkGlyph = true
-                    inkStart = r.location
-                    break
-                }
-                guard foundInkGlyph else { return nil }
-
-                var tail = upperBound - 1
-                while tail >= inkStart {
-                    let r = backing.rangeOfComposedCharacterSequence(at: tail)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        if r.location == 0 { break }
-                        tail = r.location - 1
-                        continue
-                    }
-                    inkEndExclusive = NSMaxRange(r)
-                    break
-                }
-            }
-
-            let len = max(0, inkEndExclusive - inkStart)
-            guard inkStart != NSNotFound, len > 0 else { return nil }
-            return NSRange(location: inkStart, length: len)
-        }
 
         func lineIndex(containingDisplayIndex index: Int) -> Int? {
             guard index != NSNotFound else { return nil }
@@ -2099,37 +2044,24 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         var logged = 0
         let maxTokens = min(semanticSpans.count, 768)
 
-        var checkedTokens = 0
+        let inkTokenRecords = TokenSpacingInvariantSource.collectInkTokenRecords(
+            attributedText: attributedText,
+            semanticSpans: semanticSpans,
+            maxTokens: maxTokens,
+            displayRangeFromSource: { sourceRange in
+                self.displayRange(fromSourceRange: sourceRange)
+            }
+        )
+
+        let checkedTokens = inkTokenRecords.count
         var violations = 0
 
-        struct LineCandidate {
-            let tokenIndex: Int
-            let displayStart: Int
-            let baseMinXInView: CGFloat
-            let envelopeMinXInView: CGFloat
-            let lineIndex: Int
-            let inkRange: NSRange
-            let baseUnionInContent: CGRect
-            let snippet: String
-        }
+        var boundaryCandidates: [TokenSpacingInvariantSource.LeftBoundaryCandidate] = []
+        boundaryCandidates.reserveCapacity(128)
 
-        var firstByLine: [Int: LineCandidate] = [:]
-        firstByLine.reserveCapacity(32)
-
-        for tokenIndex in 0..<maxTokens {
-
-            let span = semanticSpans[tokenIndex]
-            let sourceRange = span.range
-            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
-            let surface = span.surface
-            if surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
-
-            let displayRange = displayRange(fromSourceRange: sourceRange)
-            guard displayRange.location != NSNotFound, displayRange.length > 0 else { continue }
-
-            checkedTokens += 1
-
-            guard let inkRange = trimmedInkRange(in: displayRange) else { continue }
+        for record in inkTokenRecords {
+            let tokenIndex = record.tokenIndex
+            let inkRange = record.inkRange
 
             // Base envelope: use the same rect source as the on-screen token envelopes.
             let baseRectsInContent = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: inkRange)
@@ -2142,80 +2074,61 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             for baseUnionInContent in baseUnionsInContent {
                 guard let lineIndex = bestMatchingLineIndex(for: baseUnionInContent, candidates: visibleLines.map(\ .typographicRectInContent)) else { continue }
 
-                // Rough visible filter.
-                let yView = (baseUnionInContent.midY - contentOffset.y)
-                if yView < visibleMinY || yView > visibleMaxY { continue }
+                // // Rough visible filter.
+                // let yView = (baseUnionInContent.midY - contentOffset.y)
+                // if yView < visibleMinY || yView > visibleMaxY { continue }
 
                 let baseMinXInView = baseUnionInContent.minX - contentOffset.x
                 let envelopeMinXInView = tokenEnvelopeMinXInViewPoints(tokenIndex: tokenIndex, baseUnionInContent: baseUnionInContent) ?? baseMinXInView
 
-                let candidate = LineCandidate(
-                    tokenIndex: tokenIndex,
-                    displayStart: inkRange.location,
-                    baseMinXInView: baseMinXInView,
-                    envelopeMinXInView: envelopeMinXInView,
-                    lineIndex: lineIndex,
-                    inkRange: inkRange,
-                    baseUnionInContent: baseUnionInContent,
-                    snippet: snippet
+                boundaryCandidates.append(
+                    .init(
+                        lineIndex: lineIndex,
+                        tokenIndex: tokenIndex,
+                        displayStart: inkRange.location,
+                        envelopeMinX: envelopeMinXInView * scale,
+                        baseMinX: baseMinXInView * scale,
+                        snippet: snippet
+                    )
                 )
-
-                if let existing = firstByLine[lineIndex] {
-                    // Beginning-of-line token for diagnostics = visually leftmost envelope on that line.
-                    // This correctly reports wrapped continuations that can appear at line start.
-                    if candidate.envelopeMinXInView < (existing.envelopeMinXInView - 0.5) {
-                        firstByLine[lineIndex] = candidate
-                    } else if abs(candidate.envelopeMinXInView - existing.envelopeMinXInView) <= 0.5,
-                              candidate.displayStart < existing.displayStart {
-                        firstByLine[lineIndex] = candidate
-                    }
-                } else {
-                    firstByLine[lineIndex] = candidate
-                }
             }
         }
 
-        // Log every visible line's first token (even if aligned).
-        let sortedLines = firstByLine.keys.sorted()
-        for lineIndex in sortedLines {
-            guard let c = firstByLine[lineIndex] else { continue }
+        let lineResults = TokenSpacingInvariantSource.evaluateLeftBoundaryLines(
+            candidates: boundaryCandidates,
+            leftGuideX: leftGuideXPixels,
+            alignedThreshold: TokenSpacingInvariantSource.alignedThreshold(in: self)
+        )
 
-            // Primary diagnostic uses ruby-envelope edge (authoritative for boundary alignment).
-            // Base-ink edge is logged as secondary context.
-            let tokenLeftXPixels = c.envelopeMinXInView * scale
-            let baseLeftXPixels = c.baseMinXInView * scale
-            let deltaPixels = tokenLeftXPixels - leftGuideXPixels
-            let isLeftCrossing = deltaPixels < TokenSpacingInvariantSource.leftCrossingThreshold(in: self)
+        for r in lineResults {
+            let lineIndex = r.lineIndex
+            let tokenLeftXPixels = r.tokenLeftX
+            let baseLeftXPixels = r.baseLeftX
+            let deltaPixels = r.deltaX
 
-            // De-dupe per line + guide + quantized delta so it only re-logs when the value changes.
-            let deltaKey = Int((deltaPixels * 2.0).rounded(.toNearestOrEven))
-            let stableLineKey = (c.tokenIndex & 0x3FFFFF) ^ ((c.displayStart & 0x3FFFFF) << 1)
-            let key = stableLineKey ^ (leftGuideKey << 2) ^ (deltaKey << 3)
-            if tokenLeftOverflowLoggedKeys.contains(key) {
-                continue
-            }
-            tokenLeftOverflowLoggedKeys.add(key)
+            // // De-dupe per line + guide + quantized delta so it only re-logs when the value changes.
+            // let deltaKey = Int((deltaPixels * 2.0).rounded(.toNearestOrEven))
+            // let stableLineKey = (r.tokenIndex & 0x3FFFFF) ^ ((r.displayStart & 0x3FFFFF) << 1)
+            // let key = stableLineKey ^ (leftGuideKey << 2) ^ (deltaKey << 3)
+            // if tokenLeftOverflowLoggedKeys.contains(key) {
+            //     continue
+            // }
+            // tokenLeftOverflowLoggedKeys.add(key)
 
-            let direction: String = {
-                if abs(deltaPixels) <= TokenSpacingInvariantSource.alignedThreshold(in: self) { return "OK" }
-                return (deltaPixels < 0) ? "LEFT" : "RIGHT"
-            }()
-            if TokenSpacingInvariantSource.checkEnabled(.leftBoundary),
-               abs(deltaPixels) > TokenSpacingInvariantSource.alignedThreshold(in: self) {
+            if TokenSpacingInvariantSource.checkEnabled(.leftBoundary), r.isDeviation {
                 violations += 1
-            }
-            if isLeftCrossing {
                 CustomLogger.shared.print(
                     String(
-                        format: "[LeftInsetBoundaryCrossing] lineIndex=%d token=%d start=%d leftGuidePx=%.2f tokenLeftPx=%.2f baseLeftPx=%.2f deltaPx=%.2f snippet=%@",
+                        format: "[LeftInsetBoundaryDeviation] dir=%@ lineIndex=%d token=%d start=%d leftGuidePx=%.2f tokenLeftPx=%.2f baseLeftPx=%.2f deltaPx=%.2f snippet=%@",
+                        r.direction.rawValue,
                         lineIndex,
-                        c.tokenIndex,
-                        c.displayStart,
+                        r.tokenIndex,
+                        r.displayStart,
                         leftGuideXPixels,
                         tokenLeftXPixels,
                         baseLeftXPixels,
                         deltaPixels,
-                        c.snippet
+                        r.snippet
                     )
                 )
             }
@@ -2228,7 +2141,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     format: "[LeftGuideLineSummary] leftGuidePx=%.2f checked=%d lines=%d misaligned=%d",
                     leftGuideXPixels,
                     checkedTokens,
-                    sortedLines.count,
+                    lineResults.count,
                     violations
                 )
             )
@@ -2264,78 +2177,25 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         let backing = attributedText.string as NSString
 
-        func isHardBoundaryGlyph(_ s: String) -> Bool {
-            if s == "\u{FFFC}" { return true }
-            if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
-            let set = CharacterSet.punctuationCharacters.union(.symbols)
-            for scalar in s.unicodeScalars {
-                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
-                if set.contains(scalar) == false { return false }
-            }
-            return true
-        }
-
-        func trimmedInkRange(in displayRange: NSRange) -> NSRange? {
-            let doc = NSRange(location: 0, length: attributedText.length)
-            let bounded = NSIntersectionRange(displayRange, doc)
-            guard bounded.location != NSNotFound, bounded.length > 0 else { return nil }
-            let upperBound = min(attributedText.length, NSMaxRange(bounded))
-            var inkStart = bounded.location
-            var inkEndExclusive = upperBound
-            var foundInkGlyph = false
-
-            if bounded.location < upperBound {
-                var idx = bounded.location
-                while idx < upperBound {
-                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        idx = NSMaxRange(r)
-                        continue
-                    }
-                    foundInkGlyph = true
-                    inkStart = r.location
-                    break
-                }
-                guard foundInkGlyph else { return nil }
-
-                var tail = upperBound - 1
-                while tail >= inkStart {
-                    let r = backing.rangeOfComposedCharacterSequence(at: tail)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        if r.location == 0 { break }
-                        tail = r.location - 1
-                        continue
-                    }
-                    inkEndExclusive = NSMaxRange(r)
-                    break
-                }
-            }
-
-            let len = max(0, inkEndExclusive - inkStart)
-            guard inkStart != NSNotFound, len > 0 else { return nil }
-            return NSRange(location: inkStart, length: len)
-        }
-
         var logged = 0
         let maxLogsPerPass = 24
         let maxTokens = min(semanticSpans.count, 1024)
         var violations = 0
 
-        for tokenIndex in 0..<maxTokens {
+        let inkTokenRecords = TokenSpacingInvariantSource.collectInkTokenRecords(
+            attributedText: attributedText,
+            semanticSpans: semanticSpans,
+            maxTokens: maxTokens,
+            displayRangeFromSource: { sourceRange in
+                self.displayRange(fromSourceRange: sourceRange)
+            }
+        )
+
+        for record in inkTokenRecords {
             if logged >= maxLogsPerPass { break }
 
-            let span = semanticSpans[tokenIndex]
-            let sourceRange = span.range
-            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
-            if span.surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
-
-            let displayRange = displayRange(fromSourceRange: sourceRange)
-            guard displayRange.location != NSNotFound, displayRange.length > 0 else { continue }
-            guard let inkRange = trimmedInkRange(in: displayRange) else { continue }
+            let tokenIndex = record.tokenIndex
+            let inkRange = record.inkRange
 
             let baseRectsInContent = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: inkRange)
             guard baseRectsInContent.isEmpty == false else { continue }
@@ -2413,116 +2273,41 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         var boundariesByTokenIndex: [Int: TokenBoundary] = [:]
         boundariesByTokenIndex.reserveCapacity(min(2048, semanticSpans.count))
 
-        func isHardBoundaryGlyph(_ s: String) -> Bool {
-            if s == "\u{FFFC}" { return true }
-            if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
-            let set = CharacterSet.punctuationCharacters.union(.symbols)
-            for scalar in s.unicodeScalars {
-                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
-                if set.contains(scalar) == false { return false }
+        let inkTokenRecords = TokenSpacingInvariantSource.collectInkTokenRecords(
+            attributedText: attributedText,
+            semanticSpans: semanticSpans,
+            maxTokens: semanticSpans.count,
+            displayRangeFromSource: { sourceRange in
+                self.displayRange(fromSourceRange: sourceRange)
+            },
+            shouldSkipDisplayRange: { displayRange in
+                self.isHardBoundaryOnly(range: displayRange)
             }
-            return true
-        }
+        )
 
-        func trimmedInkRange(in displayRange: NSRange) -> NSRange? {
-            let doc = NSRange(location: 0, length: attributedText.length)
-            let bounded = NSIntersectionRange(displayRange, doc)
-            guard bounded.location != NSNotFound, bounded.length > 0 else { return nil }
-            let backing = attributedText.string as NSString
-            let upperBound = min(attributedText.length, NSMaxRange(bounded))
-            var inkStart = bounded.location
-            var inkEndExclusive = upperBound
-            var foundInkGlyph = false
+        for record in inkTokenRecords {
+            let tokenIndex = record.tokenIndex
+            let inkRange = record.inkRange
 
-            if bounded.location < upperBound {
-                var idx = bounded.location
-                while idx < upperBound {
-                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        idx = NSMaxRange(r)
-                        continue
-                    }
-                    foundInkGlyph = true
-                    inkStart = r.location
-                    break
+            guard let startCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: inkRange.location, attributedLength: attributedText.length) else { continue }
+            guard let endCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: NSMaxRange(inkRange), attributedLength: attributedText.length) else { continue }
+
+            guard let startLineIndex = TokenSpacingInvariantSource.lineIndexForCaretRect(
+                startCaret,
+                lineRectsInContent: lineRectsInContent,
+                resolveLineIndex: { probe, candidates in
+                    self.bestMatchingLineIndex(for: probe, candidates: candidates)
                 }
-                guard foundInkGlyph else { return nil }
-
-                var tail = upperBound - 1
-                while tail >= inkStart {
-                    let r = backing.rangeOfComposedCharacterSequence(at: tail)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        if r.location == 0 { break }
-                        tail = r.location - 1
-                        continue
-                    }
-                    inkEndExclusive = NSMaxRange(r)
-                    break
+            ) else { continue }
+            guard let endLineIndex = TokenSpacingInvariantSource.lineIndexForCaretRect(
+                endCaret,
+                lineRectsInContent: lineRectsInContent,
+                resolveLineIndex: { probe, candidates in
+                    self.bestMatchingLineIndex(for: probe, candidates: candidates)
                 }
-            }
+            ) else { continue }
 
-            let len = max(0, inkEndExclusive - inkStart)
-            guard inkStart != NSNotFound, len > 0 else { return nil }
-            return NSRange(location: inkStart, length: len)
-        }
-
-        func trailingKern(for inkRange: NSRange) -> CGFloat {
-            guard inkRange.location != NSNotFound, inkRange.length > 0 else { return 0 }
-            let backing = attributedText.string as NSString
-            let last = max(inkRange.location, NSMaxRange(inkRange) - 1)
-            guard last >= 0, last < backing.length else { return 0 }
-            let composed = backing.rangeOfComposedCharacterSequence(at: last)
-            guard composed.location != NSNotFound, composed.length > 0 else { return 0 }
-            let v = attributedText.attribute(.kern, at: composed.location, effectiveRange: nil)
-            if let num = v as? NSNumber { return CGFloat(num.doubleValue) }
-            if let cg = v as? CGFloat { return cg }
-            if let dbl = v as? Double { return CGFloat(dbl) }
-            return 0
-        }
-
-        func caretRectInContentCoordinates(at index: Int) -> CGRect? {
-            guard index >= 0, index <= attributedText.length else { return nil }
-            guard let pos = position(from: beginningOfDocument, offset: index) else { return nil }
-            let r = caretRect(for: pos)
-            if r.isNull || r.isEmpty { return nil }
-            // caretRect is in view coords; convert to content coords.
-            return r.offsetBy(dx: contentOffset.x, dy: contentOffset.y)
-        }
-
-        func lineIndexForCaretRect(_ caretRectInContent: CGRect) -> Int? {
-            guard lineRectsInContent.isEmpty == false else { return nil }
-            // Use a skinny rect around the caret to match the best typographic line.
-            let probe = CGRect(x: caretRectInContent.minX, y: caretRectInContent.minY, width: 1, height: max(1, caretRectInContent.height))
-            return bestMatchingLineIndex(for: probe, candidates: lineRectsInContent)
-        }
-
-        for (tokenIndex, span) in semanticSpans.enumerated() {
-            let sourceRange = span.range
-            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
-
-            // Skip pure whitespace/newline spans; they legitimately introduce gaps.
-            let surface = span.surface
-            if surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
-
-            let displaySpanRange = displayRange(fromSourceRange: sourceRange)
-            guard displaySpanRange.location != NSNotFound, displaySpanRange.length > 0 else { continue }
-
-            let isSeparator = isHardBoundaryOnly(range: displaySpanRange)
-
-            guard isSeparator == false else { continue }
-            guard let inkRange = trimmedInkRange(in: displaySpanRange) else { continue }
-
-            guard let startCaret = caretRectInContentCoordinates(at: inkRange.location) else { continue }
-            guard let endCaret = caretRectInContentCoordinates(at: NSMaxRange(inkRange)) else { continue }
-
-            guard let startLineIndex = lineIndexForCaretRect(startCaret) else { continue }
-            guard let endLineIndex = lineIndexForCaretRect(endCaret) else { continue }
-
-            let kern = trailingKern(for: inkRange)
+            let kern = TokenSpacingInvariantSource.trailingKern(in: attributedText, inkRange: inkRange)
             boundariesByTokenIndex[tokenIndex] = TokenBoundary(
                 tokenIndex: tokenIndex,
                 startLineIndex: startLineIndex,
@@ -2556,18 +2341,29 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             tokensEndingOnLine[b.endLineIndex, default: []].append(b)
         }
 
+        let leftStartCandidates: [TokenSpacingInvariantSource.StartLineCandidate] = tokensStartingOnLine.flatMap { lineIndex, starts in
+            starts.map { s in
+                TokenSpacingInvariantSource.StartLineCandidate(
+                    lineIndex: lineIndex,
+                    tokenIndex: s.tokenIndex,
+                    startX: s.startX
+                )
+            }
+        }
+        let leftStartResults = TokenSpacingInvariantSource.evaluateStartLinesAgainstLeftGuide(
+            candidates: leftStartCandidates,
+            targetLeftX: targetLeftStartX
+        )
+        let leftStartByLine = Dictionary(uniqueKeysWithValues: leftStartResults.map { ($0.lineIndex, $0) })
+
         for (lineIndex, starts) in tokensStartingOnLine {
             guard starts.isEmpty == false else { continue }
 
             // A) Left boundary: enforce for the leftmost token that STARTS on this line.
             if TokenSpacingInvariantSource.checkEnabled(.leftBoundary) {
-                if let leftmost = starts.min(by: { a, b in
-                    if abs(a.startX - b.startX) > 0.5 { return a.startX < b.startX }
-                    return a.tokenIndex < b.tokenIndex
-                }) {
-                    let dx = leftmost.startX - targetLeftStartX
-                    if abs(dx) > leftTol {
-                        reportFailure(String(format: "[HeadwordPadding invariant] line %d leftmost headword startX %.2f must equal leftGuide %.2f (dx=%.2f)", lineIndex, leftmost.startX, targetLeftStartX, dx))
+                if let leftmost = leftStartByLine[lineIndex] {
+                    if abs(leftmost.deltaX) > leftTol {
+                        reportFailure(String(format: "[HeadwordPadding invariant] line %d leftmost headword startX %.2f must equal leftGuide %.2f (dx=%.2f)", lineIndex, leftmost.startX, targetLeftStartX, leftmost.deltaX))
                     }
                 }
             }
@@ -2700,7 +2496,19 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             return true
         }()
 
-        if showTokenPositions, semanticSpans.isEmpty == false {
+        if showTokenPositions, semanticSpans.isEmpty == false, let attributedText {
+            let inkTokenRecords = TokenSpacingInvariantSource.collectInkTokenRecords(
+                attributedText: attributedText,
+                semanticSpans: semanticSpans,
+                maxTokens: semanticSpans.count,
+                displayRangeFromSource: { sourceRange in
+                    self.displayRange(fromSourceRange: sourceRange)
+                },
+                shouldSkipDisplayRange: { displayRange in
+                    self.isHardBoundaryOnly(range: displayRange)
+                }
+            )
+
             let visible = visibleUTF16Range()
             let expandedVisible = visible.map { expandRange($0, by: 128) }
             let lineRects = textKit2LineTypographicRectsInContentCoordinates(visibleOnly: false)
@@ -2710,22 +2518,19 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 "x=\(f1(r.minX)) y=\(f1(r.minY)) w=\(f1(r.width)) h=\(f1(r.height))"
             }
 
+            let maxPrinted = 16
             var printed = 0
-            let maxPrinted = 24
 
-            for (idx, span) in semanticSpans.enumerated() {
-                if let expandedVisible {
-                    if NSIntersectionRange(span.range, expandedVisible).length <= 0 {
-                        continue
-                    }
+            for record in inkTokenRecords {
+                if printed >= maxPrinted { break }
+
+                if let expandedVisible,
+                   NSIntersectionRange(record.displayRange, expandedVisible).length == 0 {
+                    continue
                 }
 
-                let displaySpanRange = displayRange(fromSourceRange: span.range)
-                guard displaySpanRange.location != NSNotFound, displaySpanRange.length > 0 else { continue }
-                guard isHardBoundaryOnly(range: displaySpanRange) == false else { continue }
-
-                let rects = unionRectsByLine(baseHighlightRectsInContentCoordinates(in: displaySpanRange))
-                guard rects.isEmpty == false else { continue }
+                let rects = unionRectsByLine(baseHighlightRectsInContentCoordinates(in: record.displayRange))
+                guard let primary = rects.first else { continue }
 
                 let lineIndices: [Int] = rects.compactMap { bestMatchingLineIndex(for: $0, candidates: lineRects) }
                 let lineDesc: String = {
@@ -2736,22 +2541,18 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     return unique.count > 4 ? "L\(joined),…" : "L\(joined)"
                 }()
 
-                let primary = rects[0]
-                let surface = span.surface.replacingOccurrences(of: "\n", with: "\\n")
-                let start = span.range.location
-                let end = NSMaxRange(span.range)
+                let surface = record.surface.replacingOccurrences(of: "\n", with: "\\n")
+                let start = record.sourceRange.location
+                let end = NSMaxRange(record.sourceRange)
                 lines.append(
-                    "T[\(idx)] r=\(start)-\(end) \(lineDesc) mid=\(f1(primary.midX)),\(f1(primary.midY)) \(formatRect(primary)) «\(surface)»"
+                    "T[\(record.tokenIndex)] r=\(start)-\(end) \(lineDesc) mid=\(f1(primary.midX)),\(f1(primary.midY)) \(formatRect(primary)) «\(surface)»"
                 )
-
                 printed += 1
-                if printed >= maxPrinted {
-                    let remaining = max(0, semanticSpans.count - (idx + 1))
-                    if remaining > 0 {
-                        lines.append("… +\(remaining) more")
-                    }
-                    break
-                }
+            }
+
+            let remaining = max(0, inkTokenRecords.count - printed)
+            if remaining > 0 {
+                lines.append("… +\(remaining) more")
             }
         }
 
@@ -2955,8 +2756,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         // Inset guides: left = line start boundary, right = wrap boundary.
         let guidesHeight = contentSize.height
-        let leftGuideX = textContainerInset.left + textContainer.lineFragmentPadding
-        let rightGuideX = textContainerInset.left + (textContainer.size.width - textContainer.lineFragmentPadding)
+        let leftGuideX = TokenSpacingInvariantSource.leftGuideX(in: self)
+        let rightGuideX = TokenSpacingInvariantSource.rightGuideX(in: self)
         let guidesPathLeft = CGMutablePath()
         let guidesPathRight = CGMutablePath()
         if guidesHeight.isFinite, guidesHeight > 0, leftGuideX.isFinite, rightGuideX.isFinite {
@@ -3285,14 +3086,14 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             if let minX = lineRectsInContent.map({ $0.minX }).min(), minX.isFinite {
                 return minX
             }
-            return max(0, textContainerInset.left)
+            return TokenSpacingInvariantSource.leftGuideX(in: self)
         }()
         let rightGuideX: CGFloat = {
             if let maxX = lineRectsInContent.map({ $0.maxX }).max(), maxX.isFinite {
                 return maxX
             }
             // Approximate wrap boundary when no line rects exist.
-            return max(leftGuideX, textContainerInset.left + (textContainer.size.width - textContainer.lineFragmentPadding))
+            return max(leftGuideX, TokenSpacingInvariantSource.rightGuideX(in: self))
         }()
         if contentSize.height.isFinite, contentSize.height > 0 {
             leftGuidePath.move(to: CGPoint(x: leftGuideX, y: 0))
@@ -3824,71 +3625,22 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             guard range.location != NSNotFound, range.length > 0 else { return }
             guard NSMaxRange(range) <= text.length else { return }
 
-            func isHardBoundaryGlyph(_ s: String) -> Bool {
-                if s == "\u{FFFC}" { return true }
-                if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
-                let set = CharacterSet.punctuationCharacters.union(.symbols)
-                for scalar in s.unicodeScalars {
-                    if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
-                    if set.contains(scalar) == false { return false }
-                }
-                return true
-            }
-
             // Derive an "ink" range for geometry/bisectors by trimming invisible ruby-width
             // spacers (U+FFFC) and pure whitespace at the start/end of the attributed run.
             // This keeps alignment debugging tied to the visible glyphs, even when we pad
             // headword spacing for wide ruby.
             let backing = text.string as NSString
             let upperBound = min(text.length, NSMaxRange(range))
-            var inkStart = range.location
-            var inkEndExclusive = upperBound
-            var foundInkGlyph: Bool = false
-
-            if range.location < upperBound {
-                // Trim leading.
-                var idx = range.location
-                while idx < upperBound {
-                    let r = backing.rangeOfComposedCharacterSequence(at: idx)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        idx = NSMaxRange(r)
-                        continue
-                    }
-                    foundInkGlyph = true
-                    inkStart = r.location
-                    break
-                }
-
-                if foundInkGlyph == false {
-                    // This ruby attribute range contains only hard-boundary glyphs (e.g. U+FFFC
-                    // padding spacers / whitespace / punctuation). These can be introduced by
-                    // headword padding logic and should not generate ruby overlays/bisectors.
-                    return
-                }
-
-                // Trim trailing.
-                var tail = upperBound - 1
-                while tail >= inkStart {
-                    let r = backing.rangeOfComposedCharacterSequence(at: tail)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                    let s = backing.substring(with: r)
-                    if isHardBoundaryGlyph(s) {
-                        if r.location == 0 { break }
-                        tail = r.location - 1
-                        continue
-                    }
-                    inkEndExclusive = NSMaxRange(r)
-                    break
-                }
+            guard let inkRange = TokenSpacingInvariantSource.trimmedInkRange(
+                in: range,
+                attributedLength: text.length,
+                backing: backing
+            ) else {
+                // This ruby attribute range contains only hard-boundary glyphs (e.g. U+FFFC
+                // padding spacers / whitespace / punctuation). These can be introduced by
+                // headword padding logic and should not generate ruby overlays/bisectors.
+                return
             }
-
-            let inkRange: NSRange = {
-                let len = max(0, inkEndExclusive - inkStart)
-                guard inkStart != NSNotFound, len > 0 else { return range }
-                return NSRange(location: inkStart, length: len)
-            }()
 
             let rubyFontSize: CGFloat
             if let stored = text.attribute(.rubyReadingFontSize, at: range.location, effectiveRange: nil) as? Double {

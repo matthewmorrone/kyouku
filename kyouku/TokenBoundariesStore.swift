@@ -66,9 +66,7 @@ final class TokenBoundariesStore: ObservableObject {
 
     // MARK: - Inter-token spacing
 
-    private var interTokenSpacingMin: CGFloat { -60 }
-    private var interTokenSpacingMax: CGFloat { 120 }
-    private var interTokenSpacingEpsilon: CGFloat { 0.25 }
+    private var interTokenSpacingEpsilon: CGFloat { TokenSpacingInvariantSource.tokenSpacingExistingWidthEpsilon }
 
     func interTokenSpacing(for noteID: UUID, text: String) -> [Int: CGFloat] {
         guard let raw = spacingByNote[noteID], raw.isEmpty == false else { return [:] }
@@ -81,7 +79,7 @@ final class TokenBoundariesStore: ObservableObject {
         for (idx, width) in raw {
             guard idx > 0, idx < length else { continue }
             guard width.isFinite else { continue }
-            let w = max(interTokenSpacingMin, min(CGFloat(width), interTokenSpacingMax))
+            let w = TokenSpacingInvariantSource.clampTokenSpacingWidth(CGFloat(width))
             guard abs(w) > interTokenSpacingEpsilon else { continue }
 
             // Avoid adding spacing at explicit line breaks.
@@ -99,7 +97,7 @@ final class TokenBoundariesStore: ObservableObject {
         guard let raw = spacingByNote[noteID] else { return 0 }
         let width = raw[boundaryUTF16Index] ?? 0
         guard width.isFinite else { return 0 }
-        return max(interTokenSpacingMin, min(CGFloat(width), interTokenSpacingMax))
+        return TokenSpacingInvariantSource.clampTokenSpacingWidth(CGFloat(width))
     }
 
     func setInterTokenSpacing(noteID: UUID, boundaryUTF16Index: Int, width: CGFloat, text: String) {
@@ -114,7 +112,7 @@ final class TokenBoundariesStore: ObservableObject {
             return
         }
 
-        let clamped = max(interTokenSpacingMin, min(width, interTokenSpacingMax))
+        let clamped = TokenSpacingInvariantSource.clampTokenSpacingWidth(width)
         if abs(clamped) <= interTokenSpacingEpsilon {
             removeInterTokenSpacing(noteID: noteID, boundaryUTF16Index: boundaryUTF16Index)
             return
