@@ -7,6 +7,8 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
     let navigationTitleText: String
 
     let onResetSpans: () -> Void
+    let onChooseKaraokeAudio: () -> Void
+    let isKaraokeBusy: Bool
 
     @Binding var showTokensSheet: Bool
     let tokenListSheet: () -> TokenListSheet
@@ -16,6 +18,8 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         titleEditDraft: Binding<String>,
         navigationTitleText: String,
         onResetSpans: @escaping () -> Void,
+        onChooseKaraokeAudio: @escaping () -> Void,
+        isKaraokeBusy: Bool,
         showTokensSheet: Binding<Bool>,
         tokenListSheet: @escaping () -> TokenListSheet
     ) {
@@ -23,6 +27,8 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         self._titleEditDraft = titleEditDraft
         self.navigationTitleText = navigationTitleText
         self.onResetSpans = onResetSpans
+        self.onChooseKaraokeAudio = onChooseKaraokeAudio
+        self.isKaraokeBusy = isKaraokeBusy
         self._showTokensSheet = showTokensSheet
         self.tokenListSheet = tokenListSheet
     }
@@ -46,6 +52,19 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
 
         ToolbarItem(placement: .topBarTrailing) {
             HStack(spacing: 12) {
+                Button {
+                    onChooseKaraokeAudio()
+                } label: {
+                    if isKaraokeBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "waveform")
+                    }
+                }
+                .accessibilityLabel(isKaraokeBusy ? "Generating karaoke sync" : "Choose Karaoke Audio")
+                .disabled(isKaraokeBusy)
+
                 Button {
                     onResetSpans()
                 } label: {

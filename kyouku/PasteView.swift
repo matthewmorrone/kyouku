@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import Foundation
 import AVFoundation
+import UniformTypeIdentifiers
 
 struct PasteView: View {
     @EnvironmentObject var notes: NotesStore
@@ -43,6 +44,8 @@ struct PasteView: View {
 
     @State private var toastText: String? = nil
     @State private var toastDismissWorkItem: DispatchWorkItem? = nil
+    @State private var isKaraokeAudioImporterPresented: Bool = false
+    @State private var isGeneratingKaraokeAlignment: Bool = false
 
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
     @State var incrementalPopupHits: [IncrementalLookupHit] = []
@@ -322,6 +325,11 @@ struct PasteView: View {
                 .presentationDetents(incrementalSheetDetents, selection: $incrementalSheetDetent)
                 .presentationDragIndicator(.visible)
         }
+        .fileImporter(
+            isPresented: $isKaraokeAudioImporterPresented,
+            allowedContentTypes: [UTType.audio],
+            onCompletion: handleKaraokeAudioImport
+        )
     }
 
     private var coreContent: some View {
@@ -895,6 +903,132 @@ struct PasteView: View {
         }
     }
 
+    private func chooseKaraokeAudio() {
+        guard isGeneratingKaraokeAlignment == false else { return }
+        let trimmedLyrics = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedLyrics.isEmpty == false else {
+            showToast("Add lyrics text first")
+            return
+        }
+        isKaraokeAudioImporterPresented = true
+    }
+
+    private func handleKaraokeAudioImport(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            showToast(error.localizedDescription)
+        case .success(let url):
+            Task { @MainActor in
+                await generateKaraokeAlignment(from: url)
+            }
+        }
+    }
+
+    @MainActor
+    private func ensureCurrentNoteForKaraoke() -> Note? {
+        let trimmedLyrics = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedLyrics.isEmpty == false else {
+            showToast("Add lyrics text first")
+            return nil
+        }
+
+        if currentNote == nil {
+            saveNote()
+        } else if let existing = currentNote, existing.text != inputText {
+            syncNoteForInputChange(inputText)
+        }
+
+        guard let note = currentNote else {
+            showToast("Failed to save note")
+            return nil
+        }
+        return note
+    }
+
+    @MainActor
+    private func generateKaraokeAlignment(from importedURL: URL) async {
+        guard isGeneratingKaraokeAlignment == false else { return }
+        guard let note = ensureCurrentNoteForKaraoke() else { return }
+
+        isGeneratingKaraokeAlignment = true
+        showToast("Generating karaoke sync…")
+        defer { isGeneratingKaraokeAlignment = false }
+
+        do {
+            let persistedAudioURL = try persistImportedAudio(importedURL, noteID: note.id)
+            let alignment = try await KaraokeSpeechAligner.align(
+                lyrics: inputText,
+                audioURL: persistedAudioURL,
+                localeIdentifier: "ja-JP"
+            )
+
+            var updated = notes.notes.first(where: { $0.id == note.id }) ?? note
+            updated.text = inputText
+            updated.karaokeAudioFileName = persistedAudioURL.lastPathComponent
+            updated.karaokeAlignment = alignment
+            notes.updateNote(updated)
+            currentNote = updated
+
+            let strategyLabel = alignment.strategy == .speechOnDevice ? "on-device" : "fallback"
+            showToast("Karaoke sync ready (\(alignment.segments.count) lines, \(strategyLabel))")
+        } catch let error as KaraokeSpeechAlignerError {
+            switch error {
+            case .authorizationDenied:
+                showToast("Enable Speech Recognition in Settings")
+            case .audioTooLong:
+                showToast("Audio is longer than 8:00")
+            default:
+                showToast(error.localizedDescription)
+            }
+        } catch {
+            showToast(error.localizedDescription)
+        }
+    }
+
+    private func persistImportedAudio(_ importedURL: URL, noteID: UUID) throws -> URL {
+        let fileManager = FileManager.default
+        guard let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            throw NSError(
+                domain: "PasteView.KaraokeAudio",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Unable to access app documents directory."]
+            )
+        }
+
+        let directory = docs.appendingPathComponent("karaoke-audio", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+
+        let sourceURL = importedURL.standardizedFileURL
+        let ext = sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension.lowercased()
+        let destinationURL = directory.appendingPathComponent("\(noteID.uuidString).\(ext)")
+
+        if sourceURL == destinationURL.standardizedFileURL {
+            return destinationURL
+        }
+
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+
+        let needsStop = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if needsStop {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        try? fileManager.startDownloadingUbiquitousItem(at: sourceURL)
+
+        do {
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        } catch {
+            let data = try Data(contentsOf: sourceURL)
+            try data.write(to: destinationURL, options: .atomic)
+        }
+
+        return destinationURL
+    }
+
     private func fireContextMenuHaptic() {
         let generator = UIImpactFeedbackGenerator(style: .light)
         generator.prepare()
@@ -1007,6 +1141,10 @@ struct PasteView: View {
             onResetSpans: {
                 resetAllCustomSpans()
             },
+            onChooseKaraokeAudio: {
+                chooseKaraokeAudio()
+            },
+            isKaraokeBusy: isGeneratingKaraokeAlignment,
             showTokensSheet: $showTokensPopover,
             tokenListSheet: {
                 PasteTokenListSheet(
