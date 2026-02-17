@@ -65,7 +65,7 @@ struct PasteView: View {
         let lemmaCandidates: [String]
         let tokenPartOfSpeech: String?
         let sourceNoteID: UUID?
-        let tokenParts: [WordDefinitionsView.TokenPart]
+        let tokenParts: [WordDefinitionView.TokenPart]
     }
 
     @State private var wordDefinitionsRequest: WordDefinitionsRequest? = nil
@@ -307,14 +307,17 @@ struct PasteView: View {
             clearSelection(resetPersistent: true)
         }) { request in
             NavigationStack {
-                WordDefinitionsView(
-                    surface: request.surface,
-                    kana: request.kana,
-                    contextSentence: request.contextSentence,
-                    lemmaCandidates: request.lemmaCandidates,
-                    tokenPartOfSpeech: request.tokenPartOfSpeech,
-                    sourceNoteID: request.sourceNoteID,
-                    tokenParts: request.tokenParts
+                WordDefinitionView(
+                    request: .init(
+                        term: .init(surface: request.surface, kana: request.kana),
+                        context: .init(
+                            sentence: request.contextSentence,
+                            lemmaCandidates: request.lemmaCandidates,
+                            tokenPartOfSpeech: request.tokenPartOfSpeech,
+                            tokenParts: request.tokenParts
+                        ),
+                        metadata: .init(sourceNoteID: request.sourceNoteID)
+                    )
                 )
             }
         }
@@ -1920,12 +1923,12 @@ struct PasteView: View {
         )
     }
 
-    private func tokenPartsForSelection(_ selection: TokenSelectionContext) -> [WordDefinitionsView.TokenPart] {
+    private func tokenPartsForSelection(_ selection: TokenSelectionContext) -> [WordDefinitionView.TokenPart] {
         let indices = selection.sourceSpanIndices
         guard indices.isEmpty == false else { return [] }
         guard let stage1 = furiganaSpans, stage1.isEmpty == false else { return [] }
 
-        var parts: [WordDefinitionsView.TokenPart] = []
+        var parts: [WordDefinitionView.TokenPart] = []
         parts.reserveCapacity(min(8, indices.count))
         var seen: Set<String> = []
 

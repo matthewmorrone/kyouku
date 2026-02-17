@@ -316,14 +316,12 @@ struct WordsView: View {
         ) { request in
             NavigationStack {
                 if let word = store.word(id: request.wordID) {
-                    WordDefinitionsView(
-                        surface: word.dictionarySurface ?? displayHeadword(for: word),
-                        kana: word.kana,
-                        contextSentence: nil,
-                        lemmaCandidates: [],
-                        tokenPartOfSpeech: nil,
-                        sourceNoteID: word.sourceNoteIDs.sorted { $0.uuidString < $1.uuidString }.first,
-                        tokenParts: []
+                    WordDefinitionView(
+                        request: .init(
+                            term: .init(surface: word.dictionarySurface ?? displayHeadword(for: word), kana: word.kana),
+                            context: .init(sentence: nil, lemmaCandidates: [], tokenPartOfSpeech: nil, tokenParts: []),
+                            metadata: .init(sourceNoteID: word.sourceNoteIDs.sorted { $0.uuidString < $1.uuidString }.first)
+                        )
                     )
                 } else {
                     Text("Word not found")
@@ -470,14 +468,12 @@ struct WordsView: View {
         } else {
             ForEach(mergedLookupResults) { row in
                 NavigationLink {
-                    WordDefinitionsView(
-                        surface: row.surface,
-                        kana: row.kana,
-                        contextSentence: nil,
-                        lemmaCandidates: [],
-                        tokenPartOfSpeech: nil,
-                        sourceNoteID: nil,
-                        tokenParts: []
+                    WordDefinitionView(
+                        request: .init(
+                            term: .init(surface: row.surface, kana: row.kana),
+                            context: .init(sentence: nil, lemmaCandidates: [], tokenPartOfSpeech: nil, tokenParts: []),
+                            metadata: .init(sourceNoteID: nil)
+                        )
                     )
                 } label: {
                     dictionaryRow(row)
@@ -499,14 +495,12 @@ struct WordsView: View {
                         .tag(word.id)
                 } else {
                     NavigationLink {
-                        WordDefinitionsView(
-                            surface: word.dictionarySurface ?? displayHeadword(for: word),
-                            kana: word.kana,
-                            contextSentence: nil,
-                            lemmaCandidates: [],
-                            tokenPartOfSpeech: nil,
-                            sourceNoteID: word.sourceNoteIDs.sorted { $0.uuidString < $1.uuidString }.first,
-                            tokenParts: []
+                        WordDefinitionView(
+                            request: .init(
+                                term: .init(surface: word.dictionarySurface ?? displayHeadword(for: word), kana: word.kana),
+                                context: .init(sentence: nil, lemmaCandidates: [], tokenPartOfSpeech: nil, tokenParts: []),
+                                metadata: .init(sourceNoteID: word.sourceNoteIDs.sorted { $0.uuidString < $1.uuidString }.first)
+                            )
                         )
                     } label: {
                         savedRow(word)
@@ -524,14 +518,12 @@ struct WordsView: View {
         } else {
             ForEach(viewedHistory.items) { item in
                 NavigationLink {
-                    WordDefinitionsView(
-                        surface: item.surface,
-                        kana: item.kana,
-                        contextSentence: nil,
-                        lemmaCandidates: [],
-                        tokenPartOfSpeech: nil,
-                        sourceNoteID: nil,
-                        tokenParts: []
+                    WordDefinitionView(
+                        request: .init(
+                            term: .init(surface: item.surface, kana: item.kana),
+                            context: .init(sentence: nil, lemmaCandidates: [], tokenPartOfSpeech: nil, tokenParts: []),
+                            metadata: .init(sourceNoteID: nil)
+                        )
                     )
                 } label: {
                     WordsHistoryRowView(item: item)
