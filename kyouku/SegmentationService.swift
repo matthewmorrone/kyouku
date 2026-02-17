@@ -343,14 +343,13 @@ actor SegmentationService {
         var ranges: [SegmentedRange] = []
         ranges.reserveCapacity(max(1, length / 2))
 
-        await MainActor.run {
-            trie.beginProfiling()
-        }
+        trie.beginProfiling()
         // Make a Sendable copy to avoid capturing NSString in a @Sendable closure
         let swiftText: String = text as String
         let profilingStart = CFAbsoluteTimeGetCurrent()
         let loopInterval = signposter.beginInterval("SegmentRangesLoop", "len=\(length)")
 
+        let nsSwiftText = swiftText as NSString
         var cursor = 0
         var pendingNonKanjiStart: Int? = nil
         var pendingNonKanjiKind: ScriptKind? = nil
@@ -376,10 +375,7 @@ actor SegmentationService {
 
             let current = cursor
             let requireKanjiMatch = (Self.isHiragana(currentUnit) == false && Self.isKatakana(currentUnit) == false)
-            let matchEnd: Int? = await MainActor.run { [current, swiftText, requireKanjiMatch] in
-                let ns = swiftText as NSString
-                return trie.longestMatchEnd(in: ns, from: current, requireKanji: requireKanjiMatch)
-            }
+            let matchEnd = trie.longestMatchEnd(in: nsSwiftText, from: current, requireKanji: requireKanjiMatch)
             if let end = matchEnd {
                 if await flushPendingNonKanji(start: &pendingNonKanjiStart, kind: &pendingNonKanjiKind, cursor: cursor, text: text, trie: trie, into: &ranges) {
                     // start cleared inside helper
@@ -449,9 +445,7 @@ actor SegmentationService {
         )
 
         let totalDuration = CFAbsoluteTimeGetCurrent() - profilingStart
-        await MainActor.run {
-            trie.endProfiling(totalDuration: totalDuration)
-        }
+        trie.endProfiling(totalDuration: totalDuration)
         signposter.endInterval("SegmentRangesLoop", loopInterval)
 
 #if DEBUG
@@ -551,10 +545,8 @@ actor SegmentationService {
 
             let firstUnit = text.character(at: baseRange.location)
             let requireKanjiMatch = (Self.isHiragana(firstUnit) == false && Self.isKatakana(firstUnit) == false)
-            let computedEnd: Int? = await MainActor.run { [swiftText, trie, requireKanjiMatch] in
-                let ns = swiftText as NSString
-                return trie.longestMatchEnd(in: ns, from: baseRange.location, requireKanji: requireKanjiMatch)
-            }
+            let ns = swiftText as NSString
+            let computedEnd = trie.longestMatchEnd(in: ns, from: baseRange.location, requireKanji: requireKanjiMatch)
             guard computedEnd == NSMaxRange(baseRange) else { return [merged] }
 
             return [
@@ -705,10 +697,8 @@ actor SegmentationService {
                 continue
             }
             let requireKanjiMatch = (Self.isHiragana(firstUnit) == false && Self.isKatakana(firstUnit) == false)
-            let computedEnd: Int? = await MainActor.run { [start, swiftText, requireKanjiMatch] in
-                let ns = swiftText as NSString
-                return trie.longestMatchEnd(in: ns, from: start, requireKanji: requireKanjiMatch)
-            }
+            let ns = swiftText as NSString
+            let computedEnd = trie.longestMatchEnd(in: ns, from: start, requireKanji: requireKanjiMatch)
             assert(computedEnd == NSMaxRange(range.range), "Stage1 invariant failed: lexicon span is not trie-longest-match (start=\(start) computedEnd=\(String(describing: computedEnd)) actualEnd=\(NSMaxRange(range.range)))")
         }
 

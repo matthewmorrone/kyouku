@@ -78,10 +78,14 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            let start = CustomLogger.perfStart()
             store.pruneMissingNoteAssociations(validNoteIDs: Set(notesStore.notes.map(\.id)))
+            CustomLogger.shared.perf("ContentView onAppear pruneMissingNoteAssociations", elapsedMS: CustomLogger.perfElapsedMS(since: start), details: "notes=\(notesStore.notes.count)")
         }
         .onChange(of: notesStore.notes.map(\.id)) { _, newIDs in
+            let start = CustomLogger.perfStart()
             store.pruneMissingNoteAssociations(validNoteIDs: Set(newIDs))
+            CustomLogger.shared.perf("ContentView onChange pruneMissingNoteAssociations", elapsedMS: CustomLogger.perfElapsedMS(since: start), details: "noteIDs=\(newIDs.count)")
         }
     }
 }

@@ -3,6 +3,9 @@ import CoreText
 
 enum RubyTextProcessing {
     private static let coreTextRubyAttribute = NSAttributedString.Key(kCTRubyAnnotationAttributeName as String)
+    static let headwordEnvelopePadAttribute = NSAttributedString.Key("HeadwordEnvelopePad")
+    static let headwordEnvelopePadKernAttribute = NSAttributedString.Key("HeadwordEnvelopePadKern")
+    static let interTokenSpacingKernAttribute = NSAttributedString.Key("InterTokenSpacingPadKern")
 
     private static func containsHanIdeograph(_ s: String) -> Bool {
         for scalar in s.unicodeScalars {
@@ -177,85 +180,55 @@ enum RubyTextProcessing {
         return CGSize(width: max(0, width), height: height)
     }
 
-    private static func makeWidthAttachmentAttributes(width: CGFloat) -> [NSAttributedString.Key: Any] {
-        guard width.isFinite else {
-            return [
-                .foregroundColor: UIColor.clear,
-                kCTForegroundColorAttributeName as NSAttributedString.Key: UIColor.clear.cgColor
-            ]
-        }
-        let w = width
-
-        var callbacks = CTRunDelegateCallbacks(
-            version: kCTRunDelegateVersion1,
-            dealloc: { ref in
-                Unmanaged<NSNumber>.fromOpaque(UnsafeRawPointer(ref)).release()
-            },
-            getAscent: { ref in
-                let data = Unmanaged<NSNumber>.fromOpaque(UnsafeRawPointer(ref)).takeUnretainedValue()
-                _ = data
-                return 0
-            },
-            getDescent: { _ in 0 },
-            getWidth: { ref in
-                let data = Unmanaged<NSNumber>.fromOpaque(UnsafeRawPointer(ref)).takeUnretainedValue()
-                return CGFloat(data.doubleValue)
-            }
-        )
-
-        let boxed = NSNumber(value: Double(w))
-        let ref = Unmanaged.passRetained(boxed).toOpaque()
-        let delegate = CTRunDelegateCreate(&callbacks, ref)
-
-        return [
-            kCTRunDelegateAttributeName as NSAttributedString.Key: delegate as Any,
-            .foregroundColor: UIColor.clear,
-            // CoreText draws the replacement glyph; make it truly invisible.
-            kCTForegroundColorAttributeName as NSAttributedString.Key: UIColor.clear.cgColor
-        ]
+    static func headwordEnvelopePad(in attributed: NSAttributedString, displayRange: NSRange) -> CGFloat {
+        guard displayRange.location != NSNotFound, displayRange.length > 0 else { return 0 }
+        guard NSMaxRange(displayRange) <= attributed.length else { return 0 }
+        let value = attributed.attribute(headwordEnvelopePadAttribute, at: displayRange.location, effectiveRange: nil)
+        if let n = value as? NSNumber { return CGFloat(n.doubleValue) }
+        if let cg = value as? CGFloat { return cg }
+        if let dbl = value as? Double { return CGFloat(dbl) }
+        return 0
     }
 
-    static func applyRubyWidthPaddingAroundRunsIfNeeded(
+    static func applyHeadwordEnvelopePaddingWithoutSpacers(
         to attributed: NSAttributedString,
         baseFont: UIFont,
         defaultRubyFontSize: CGFloat,
         enabled: Bool,
-        headwordSpacingAmount: CGFloat = 1.0,
         interTokenSpacing: [Int: CGFloat] = [:]
     ) -> (NSAttributedString, TokenOverlayTextView.RubyIndexMap) {
-        let canPadRuby = enabled
         let hasInterTokenSpacing = interTokenSpacing.isEmpty == false
-        guard (canPadRuby || hasInterTokenSpacing), attributed.length > 0 else {
+        guard (enabled || hasInterTokenSpacing), attributed.length > 0 else {
             return (attributed, .identity)
         }
 
         let mutable = NSMutableAttributedString(attributedString: attributed)
         let full = NSRange(location: 0, length: mutable.length)
+        mutable.removeAttribute(headwordEnvelopePadAttribute, range: full)
+        mutable.removeAttribute(headwordEnvelopePadKernAttribute, range: full)
+        mutable.removeAttribute(interTokenSpacingKernAttribute, range: full)
 
-        // Insert display-only spacers (U+FFFC + CTRunDelegate width).
-        // These are display-only and tracked via RubyIndexMap so selection/semantic ranges stay in SOURCE coordinates.
-        enum SpacerKind {
-            case rubyPadding(reading: String, rubyFontSize: CGFloat)
-            case interToken
+        let backing = mutable.string as NSString
+
+        func readKern(at index: Int) -> CGFloat {
+            guard index >= 0, index < mutable.length else { return 0 }
+            let v = mutable.attribute(.kern, at: index, effectiveRange: nil)
+            if let num = v as? NSNumber { return CGFloat(num.doubleValue) }
+            if let cg = v as? CGFloat { return cg }
+            if let dbl = v as? Double { return CGFloat(dbl) }
+            return 0
         }
 
-        struct SpacerInsertion {
-            let insertAtSourceIndex: Int
-            let width: CGFloat
-            let kind: SpacerKind
-        }
-        var insertions: [SpacerInsertion] = []
-        insertions.reserveCapacity(64)
+        if enabled {
+            struct RubyRunInfo {
+                let range: NSRange
+                let reading: String
+                let rubyFontSize: CGFloat
+            }
 
-        struct RubyRunInfo {
-            let range: NSRange
-            let reading: String
-            let rubyFontSize: CGFloat
-        }
-        var rubyRuns: [RubyRunInfo] = []
-        rubyRuns.reserveCapacity(64)
+            var rubyRuns: [RubyRunInfo] = []
+            rubyRuns.reserveCapacity(64)
 
-        if canPadRuby {
             attributed.enumerateAttribute(.rubyReadingText, in: full, options: []) { value, range, _ in
                 guard let reading = value as? String, reading.isEmpty == false else { return }
                 guard range.location != NSNotFound, range.length > 0 else { return }
@@ -276,92 +249,14 @@ enum RubyTextProcessing {
 
                 rubyRuns.append(.init(range: range, reading: reading, rubyFontSize: rubyFontSize))
             }
-        }
 
-        func isPunctuationOrSymbolOnly(_ surface: String) -> Bool {
-            if surface.isEmpty { return false }
-            let set = CharacterSet.punctuationCharacters.union(.symbols)
-            for scalar in surface.unicodeScalars {
-                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return false }
-                if set.contains(scalar) == false { return false }
-            }
-            return true
-        }
-
-        let backing = mutable.string as NSString
-        let length = mutable.length
-
-        // NOTE:
-        // We intentionally do NOT propagate ruby-bearing attributes onto punctuation/symbols.
-        // Those glyphs are hard boundaries for token/headword identity and must not become part
-        // of a ruby-bearing “word” span, even if they visually follow the headword.
-
-        if canPadRuby {
             for run in rubyRuns {
-                let range = run.range
-                let reading = run.reading
-                let rubyFontSize = run.rubyFontSize
+                guard let inkRange = TokenSpacingInvariantSource.trimmedInkRange(
+                    in: run.range,
+                    attributedLength: mutable.length,
+                    backing: backing
+                ) else { continue }
 
-                guard range.location != NSNotFound, range.length > 0 else { continue }
-                guard NSMaxRange(range) <= mutable.length else { continue }
-
-                // Determine the visible "ink" range (exclude padding spacers, whitespace, and punctuation/symbols).
-                // Padding is applied symmetrically around this ink range so the token's effective layout width
-                // matches the ruby width without shifting ruby relative to its base glyphs.
-                func isHardBoundaryGlyph(_ s: String) -> Bool {
-                    if s == "\u{FFFC}" { return true }
-                    if s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
-                    let set = CharacterSet.punctuationCharacters.union(.symbols)
-                    for scalar in s.unicodeScalars {
-                        if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
-                        if set.contains(scalar) == false { return false }
-                    }
-                    return true
-                }
-
-                let upperBound = min(mutable.length, NSMaxRange(range))
-                var inkStart = range.location
-                var inkEndExclusive = upperBound
-                var foundInkGlyph = false
-
-                if range.location < upperBound {
-                    var idx = range.location
-                    while idx < upperBound {
-                        let r = backing.rangeOfComposedCharacterSequence(at: idx)
-                        guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                        let s = backing.substring(with: r)
-                        if isHardBoundaryGlyph(s) {
-                            idx = NSMaxRange(r)
-                            continue
-                        }
-                        foundInkGlyph = true
-                        inkStart = r.location
-                        break
-                    }
-
-                    if foundInkGlyph {
-                        var tail = upperBound - 1
-                        while tail >= inkStart {
-                            let r = backing.rangeOfComposedCharacterSequence(at: tail)
-                            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upperBound else { break }
-                            let s = backing.substring(with: r)
-                            if isHardBoundaryGlyph(s) {
-                                if r.location == 0 { break }
-                                tail = r.location - 1
-                                continue
-                            }
-                            inkEndExclusive = NSMaxRange(r)
-                            break
-                        }
-                    }
-                }
-
-                guard foundInkGlyph else { continue }
-                let inkLength = max(0, inkEndExclusive - inkStart)
-                guard inkLength > 0 else { continue }
-
-                // Measure base width for the visible glyphs only.
-                let inkRange = NSRange(location: inkStart, length: inkLength)
                 let baseSub = mutable.attributedSubstring(from: inkRange)
                 let baseForMeasurement = NSMutableAttributedString(attributedString: baseSub)
                 if baseForMeasurement.length > 0,
@@ -370,213 +265,80 @@ enum RubyTextProcessing {
                 }
                 let baseWidth = measureTypographicWidth(baseForMeasurement)
 
-                let rubyFont = baseFont.withSize(max(1.0, rubyFontSize))
-                let rubyAttr = NSAttributedString(string: reading, attributes: [.font: rubyFont])
+                let rubyFont = baseFont.withSize(max(1.0, run.rubyFontSize))
+                let rubyAttr = NSAttributedString(string: run.reading, attributes: [.font: rubyFont])
                 let rubyWidth = measureTypographicWidth(rubyAttr)
 
-                // Symmetric token expansion: effective layout width becomes rubyWidth.
-                let extra = max(0, rubyWidth) - baseWidth
-                guard extra > 0.01 else { continue }
+                let delta = max(0, rubyWidth - baseWidth)
+                guard delta > 0.01 else { continue }
 
-                func isParagraphBoundaryBefore(_ index: Int) -> Bool {
-                    if index <= 0 { return true }
-                    let prev = backing.character(at: index - 1)
-                    return prev == 10 || prev == 13 // \n or \r
-                }
+                mutable.addAttribute(headwordEnvelopePadAttribute, value: delta, range: inkRange)
 
-                func isParagraphBoundaryAfter(_ index: Int) -> Bool {
-                    if index >= length { return true }
-                    let next = backing.character(at: index)
-                    return next == 10 || next == 13 // \n or \r
-                }
-
-                func appendEdgeRubyPadding(totalExtraWidth: CGFloat) {
-                    guard totalExtraWidth > 0.01 else { return }
-
-                    let atParagraphStart = isParagraphBoundaryBefore(inkStart)
-                    let atParagraphEnd = isParagraphBoundaryAfter(inkEndExclusive)
-
-                    let leading: CGFloat
-                    let trailing: CGFloat
-                    if atParagraphStart && atParagraphEnd == false {
-                        // Don’t insert a large leading spacer at paragraph start.
-                        leading = 0
-                        trailing = totalExtraWidth
-                    } else if atParagraphEnd && atParagraphStart == false {
-                        // Don’t insert a large trailing spacer at paragraph end.
-                        leading = totalExtraWidth
-                        trailing = 0
-                    } else {
-                        // Default: keep ruby centered over ink by padding symmetrically.
-                        leading = totalExtraWidth * 0.5
-                        trailing = totalExtraWidth * 0.5
-                    }
-
-                    if leading > 0.01 {
-                        insertions.append(
-                            .init(
-                                insertAtSourceIndex: inkStart,
-                                width: leading,
-                                kind: .rubyPadding(reading: reading, rubyFontSize: rubyFontSize)
-                            )
-                        )
-                    }
-                    if trailing > 0.01 {
-                        insertions.append(
-                            .init(
-                                insertAtSourceIndex: inkEndExclusive,
-                                width: trailing,
-                                kind: .rubyPadding(reading: reading, rubyFontSize: rubyFontSize)
-                            )
-                        )
-                    }
-                }
-
-                // If the headword includes multiple kanji, distribute the required extra width
-                // between kanji glyphs (tracking) rather than placing all padding at the ends.
-                // IMPORTANT: only kern between adjacent kanji-to-kanji graphemes (avoid spacing
-                // between kanji and kana like "夢 の" which looks like missing text).
                 var graphemeRanges: [NSRange] = []
                 graphemeRanges.reserveCapacity(8)
-                var isKanji: [Bool] = []
-                isKanji.reserveCapacity(8)
-
-                var kanjiCount = 0
-                var idx = inkStart
-                while idx < inkEndExclusive {
+                var idx = inkRange.location
+                let upper = NSMaxRange(inkRange)
+                while idx < upper {
                     let r = backing.rangeOfComposedCharacterSequence(at: idx)
-                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= inkEndExclusive else { break }
+                    guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= upper else { break }
                     graphemeRanges.append(r)
-                    let s = backing.substring(with: r)
-                    let k = containsHanIdeograph(s)
-                    isKanji.append(k)
-                    if k { kanjiCount += 1 }
                     idx = NSMaxRange(r)
                 }
+                guard graphemeRanges.isEmpty == false else { continue }
 
-                var kanjiGapIndices: [Int] = []
-                kanjiGapIndices.reserveCapacity(8)
-                if graphemeRanges.count >= 2 {
-                    for i in 0..<(graphemeRanges.count - 1) {
-                        if isKanji[i] && isKanji[i + 1] {
-                            kanjiGapIndices.append(i)
-                        }
+                if graphemeRanges.count > 1 {
+                    let perGap = delta / CGFloat(graphemeRanges.count - 1)
+                    guard perGap > 0.01 else { continue }
+                    for g in graphemeRanges.dropLast() {
+                        let current = readKern(at: g.location)
+                        let value = current + perGap
+                        mutable.addAttribute(.kern, value: value, range: g)
+                        mutable.addAttribute(headwordEnvelopePadKernAttribute, value: perGap, range: g)
                     }
-                }
-
-                let gapCount = kanjiGapIndices.count
-                let shouldDistributeInside = kanjiCount >= 2 && gapCount >= 1
-
-                if shouldDistributeInside {
-                    let requestedPerGap = max(0, headwordSpacingAmount)
-                    let idealPerGap = extra / CGFloat(gapCount)
-                    // Avoid excessively large inter-kanji gaps; spill remainder to edge padding.
-                    let maxPerGap = max(1.0, baseFont.pointSize * 0.6)
-                    let perGap = min(maxPerGap, max(0, idealPerGap), requestedPerGap)
-
-                    if perGap > 0.01 {
-                        for i in kanjiGapIndices {
-                            let r = graphemeRanges[i]
-                            // Add to any existing kern rather than overwriting.
-                            let existing: CGFloat = {
-                                if let num = mutable.attribute(.kern, at: r.location, effectiveRange: nil) as? NSNumber {
-                                    return CGFloat(num.doubleValue)
-                                }
-                                if let cg = mutable.attribute(.kern, at: r.location, effectiveRange: nil) as? CGFloat {
-                                    return cg
-                                }
-                                if let dbl = mutable.attribute(.kern, at: r.location, effectiveRange: nil) as? Double {
-                                    return CGFloat(dbl)
-                                }
-                                return 0
-                            }()
-                            let newValue = existing + perGap
-                            mutable.addAttribute(.kern, value: newValue, range: r)
-                        }
-                    }
-
-                    let internalApplied = perGap * CGFloat(gapCount)
-                    let remaining = extra - internalApplied
-                    appendEdgeRubyPadding(totalExtraWidth: remaining)
-                } else {
-                    // Single-kanji runs (often kanji + okurigana words like 占う) should not
-                    // receive symmetric edge spacers: that can create visible left jut and a
-                    // fake gap between kanji and following okurigana. Use leading-only padding
-                    // to pull the ruby block right without opening a gap before okurigana.
-                    if kanjiCount == 1 {
-                        if extra > 0.01 {
-                            insertions.append(
-                                .init(
-                                    insertAtSourceIndex: inkStart,
-                                    width: extra,
-                                    kind: .rubyPadding(reading: reading, rubyFontSize: rubyFontSize)
-                                )
-                            )
-                            continue
-                        }
-                    }
-                    appendEdgeRubyPadding(totalExtraWidth: extra)
+                } else if let only = graphemeRanges.first {
+                    let current = readKern(at: only.location)
+                    let value = current + delta
+                    mutable.addAttribute(.kern, value: value, range: only)
+                    mutable.addAttribute(headwordEnvelopePadKernAttribute, value: delta, range: only)
                 }
             }
         }
 
         if hasInterTokenSpacing {
             for (idx, width) in interTokenSpacing {
-                guard idx > 0, idx < length else { continue }
-                guard width.isFinite else { continue }
+                guard idx > 0, idx <= mutable.length else { continue }
                 let w = TokenSpacingInvariantSource.clampTokenSpacingWidth(width)
                 guard abs(w) > TokenSpacingInvariantSource.tokenSpacingExistingWidthEpsilon else { continue }
-                insertions.append(.init(insertAtSourceIndex: idx, width: w, kind: .interToken))
+
+                let prev = idx - 1
+                guard prev >= 0, prev < backing.length else { continue }
+                let composed = backing.rangeOfComposedCharacterSequence(at: prev)
+                guard composed.location != NSNotFound, composed.length > 0 else { continue }
+
+                let current = readKern(at: composed.location)
+                mutable.addAttribute(.kern, value: current + w, range: composed)
+                mutable.addAttribute(interTokenSpacingKernAttribute, value: w, range: composed)
             }
         }
 
-        guard insertions.isEmpty == false else {
-            return (mutable, .identity)
-        }
+        return (mutable, .identity)
+    }
 
-        // Apply insertions from end to start so indices remain stable.
-        let sorted = insertions.sorted {
-            if $0.insertAtSourceIndex != $1.insertAtSourceIndex {
-                return $0.insertAtSourceIndex > $1.insertAtSourceIndex
-            }
-            return $0.width > $1.width
-        }
-
-        for item in sorted {
-            let attachmentChar = "\u{FFFC}" // object replacement character
-            let attrs = makeWidthAttachmentAttributes(width: item.width)
-            let insert = NSMutableAttributedString(string: attachmentChar, attributes: attrs)
-            insert.addAttribute(.font, value: baseFont, range: NSRange(location: 0, length: insert.length))
-
-            switch item.kind {
-            case .rubyPadding(let reading, let rubyFontSize):
-                // Extend ruby attributes across the spacers so the ruby run's measured base width includes padding.
-                insert.addAttribute(.rubyReadingText, value: reading, range: NSRange(location: 0, length: insert.length))
-                insert.addAttribute(.rubyReadingFontSize, value: rubyFontSize, range: NSRange(location: 0, length: insert.length))
-            case .interToken:
-                break
-            }
-
-            let safeIndex = max(0, min(mutable.length, item.insertAtSourceIndex))
-
-            // CRITICAL: preserve paragraph metrics on inserted spacers.
-            // TextKit can resolve paragraph style per-run; if a visual line begins with a
-            // spacer that lacks `.paragraphStyle`, line spacing/headroom may collapse and
-            // ruby can overlap adjacent lines.
-            if mutable.length > 0 {
-                let sampleIndex: Int = {
-                    if safeIndex < mutable.length { return safeIndex }
-                    return max(0, mutable.length - 1)
-                }()
-                if let paragraph = mutable.attribute(.paragraphStyle, at: sampleIndex, effectiveRange: nil) {
-                    insert.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: insert.length))
-                }
-            }
-
-            mutable.insert(insert, at: safeIndex)
-        }
-
-        let insertionPositions = insertions.map { $0.insertAtSourceIndex }.sorted()
-        return (mutable, TokenOverlayTextView.RubyIndexMap(insertionPositions: insertionPositions))
+    static func applyRubyWidthPaddingAroundRunsIfNeeded(
+        to attributed: NSAttributedString,
+        baseFont: UIFont,
+        defaultRubyFontSize: CGFloat,
+        enabled: Bool,
+        headwordSpacingAmount: CGFloat = 1.0,
+        interTokenSpacing: [Int: CGFloat] = [:]
+    ) -> (NSAttributedString, TokenOverlayTextView.RubyIndexMap) {
+        _ = headwordSpacingAmount
+        return applyHeadwordEnvelopePaddingWithoutSpacers(
+            to: attributed,
+            baseFont: baseFont,
+            defaultRubyFontSize: defaultRubyFontSize,
+            enabled: enabled,
+            interTokenSpacing: interTokenSpacing
+        )
     }
 }

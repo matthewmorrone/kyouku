@@ -100,40 +100,10 @@ extension TokenOverlayTextView {
 
     @available(iOS 15.0, *)
     func scheduleLineStartBoundaryCorrectionIfNeeded() {
-        guard padHeadwordSpacing else { return }
-        guard TokenSpacingInvariantSource.fixEnabled(.leftBoundary) else { return }
-        guard wrapLines else { return }
-        guard lineStartBoundaryCorrectionScheduled == false else { return }
-        guard let attributedText, attributedText.length > 0 else { return }
-        guard cachedRubyRuns.isEmpty == false else { return }
-        guard textLayoutManager != nil else { return }
-
-        var hasher = Hasher()
-        hasher.combine(attributedText.length)
-        hasher.combine(cachedRubyRuns.count)
-        hasher.combine(Int((textContainerInset.left * 10).rounded(.toNearestOrEven)))
-        hasher.combine(Int((textContainerInset.right * 10).rounded(.toNearestOrEven)))
-        hasher.combine(Int((textContainer.size.width * 10).rounded(.toNearestOrEven)))
-        hasher.combine(Int((textContainer.lineFragmentPadding * 10).rounded(.toNearestOrEven)))
-        // Include any existing insertions so we can converge once stable.
-        hasher.combine(rubyIndexMap.insertionPositions.count)
-        let signature = hasher.finalize()
-        guard signature != lastLineStartBoundaryCorrectionSignature else { return }
-
-        guard let adjusted = lineStartBoundaryCorrectedTextIfNeeded(from: attributedText) else {
-            lastLineStartBoundaryCorrectionSignature = signature
-            return
-        }
-
-        lineStartBoundaryCorrectionScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.lineStartBoundaryCorrectionScheduled = false
-            self.lastLineStartBoundaryCorrectionSignature = adjusted.requiresFollowUp ? 0 : signature
-            // Keep SOURCE↔DISPLAY mapping accurate if we inserted any display-only padding.
-            self.rubyIndexMap = adjusted.indexMap
-            self.applyAttributedText(adjusted.text)
-        }
+        // Disabled: legacy correction pass used spacer-character insertion and post-layout
+        // boundary mutation. Headword envelope padding is now handled in attributed text
+        // without synthetic display characters.
+        return
     }
 
     @available(iOS 15.0, *)

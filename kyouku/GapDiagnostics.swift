@@ -3,7 +3,7 @@ import UIKit
 #if DEBUG
 
 enum GapDiagnostics {
-    static let autoRunOnce = true
+    static let autoRunOnce = ProcessInfo.processInfo.environment["GAP_DIAGNOSTICS"] == "1"
 
     private static var lastCycleToken: Int?
     private static var inProgress = false

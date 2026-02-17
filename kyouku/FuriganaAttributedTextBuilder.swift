@@ -188,9 +188,7 @@ enum FuriganaAttributedTextBuilder {
                 // (1) Deinflection is a HARD STOP.
                 var deinflectionLocks = 0
                 if let trie {
-                    if let deinflector = try? await MainActor.run(resultType: Deinflector.self, body: {
-                        try Deinflector.loadBundled(named: "deinflect")
-                    }) {
+                    if let deinflector = try? await DeinflectorCache.shared.get() {
                         let merged = DeinflectionHardStopMerger.apply(text: nsText, spans: workingSpans, hardCuts: combinedHardCuts, trie: trie, deinflector: deinflector)
                         workingSpans = merged.spans
                         deinflectionLocks = merged.deinflectionLocks

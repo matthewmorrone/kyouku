@@ -1296,6 +1296,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
     override var contentOffset: CGPoint {
         didSet {
+            let scrollUpdateStart = CustomLogger.perfStart()
             let allowHorizontal = horizontalScrollEnabled && (wrapLines == false)
 
             // When lines wrap, horizontal motion is never meaningful and often manifests as
@@ -1330,6 +1331,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 scheduleDebugOverlaysUpdate()
             }
             warmVisibleSemanticSpanLayoutIfNeeded()
+            CustomLogger.shared.perf(
+                "TokenOverlayTextView.contentOffset didSet",
+                elapsedMS: CustomLogger.perfElapsedMS(since: scrollUpdateStart),
+                details: "offset=(\(Int(contentOffset.x.rounded())) ,\(Int(contentOffset.y.rounded()))) semantic=\(semanticSpans.count)",
+                thresholdMS: 2.0,
+                level: .debug
+            )
         }
     }
 
@@ -1625,6 +1633,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
     }
 
     override func layoutSubviews() {
+        let layoutPassStart = CustomLogger.perfStart()
         super.layoutSubviews()
 
         if #available(iOS 15.0, *) {
@@ -1685,7 +1694,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             invalidateIntrinsicContentSize()
         }
 
+        let warmVisibleStart = CustomLogger.perfStart()
         warmVisibleSemanticSpanLayoutIfNeeded()
+        CustomLogger.shared.perf(
+            "TokenOverlayTextView.warmVisibleSemanticSpanLayoutIfNeeded",
+            elapsedMS: CustomLogger.perfElapsedMS(since: warmVisibleStart),
+            details: "semantic=\(semanticSpans.count)",
+            thresholdMS: 2.0,
+            level: .debug
+        )
 
         // NOTE: Previously we ran a soft-wrap mitigation that shifted line-start headword-padding
         // spacers to the trailing side to avoid “ruby jutting left”. Now that ruby anchoring uses
@@ -1694,7 +1711,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         // Ruby highlight geometry is derived from the ruby overlay layers.
         // Ensure overlays are laid out first so highlight rects can match actual ruby bounds.
+        let rubyLayoutStart = CustomLogger.perfStart()
         layoutRubyOverlayIfNeeded()
+        CustomLogger.shared.perf(
+            "TokenOverlayTextView.layoutRubyOverlayIfNeeded",
+            elapsedMS: CustomLogger.perfElapsedMS(since: rubyLayoutStart),
+            details: "runs=\(cachedRubyRuns.count) dirty=\(rubyOverlayDirty)",
+            thresholdMS: 2.0,
+            level: .debug
+        )
 
         // Phase 2: right-boundary fix is wrap-only.
         // If a segment overflows the right guide, force a break before that segment start.
@@ -1823,6 +1848,14 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             debugInsetGuidesLayer.isHidden = true
         }
 
+        CustomLogger.shared.perf(
+            "TokenOverlayTextView.layoutSubviews",
+            elapsedMS: CustomLogger.perfElapsedMS(since: layoutPassStart),
+            details: "semantic=\(semanticSpans.count) rubyRuns=\(cachedRubyRuns.count) contentH=\(Int(contentSize.height.rounded()))",
+            thresholdMS: 8.0,
+            level: .debug
+        )
+
     }
 
     private func updateDebugInsetGuides() {
@@ -1931,6 +1964,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             guard let self else { return }
             guard self.window != nil else { return }
 
+            self.assertHeadwordPaddingInvariantsHard()
+
             // Segment spacing telemetry runs in DEBUG; invariant failure checks remain opt-in.
             self.enforceHeadwordPaddingLayoutInvariantsIfNeeded()
 
@@ -1943,6 +1978,85 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         pendingPostLayoutDebugLogWorkItem = workItem
         DispatchQueue.main.async(execute: workItem)
+    }
+
+    @available(iOS 15.0, *)
+    private func assertHeadwordPaddingInvariantsHard() {
+        guard let attributedText, attributedText.length > 0 else { return }
+
+        let s = attributedText.string as NSString
+        var idx = 0
+        while idx < s.length {
+            if s.character(at: idx) == 0xFFFC {
+                let msg = "[HeadwordPad] FAIL spacer index=\(idx)"
+                CustomLogger.shared.error(msg)
+                assertionFailure(msg)
+                break
+            }
+            idx += 1
+        }
+
+        guard semanticSpans.isEmpty == false else { return }
+        let lineRectsInContent = textKit2LineTypographicRectsInContentCoordinates(visibleOnly: true)
+        guard lineRectsInContent.isEmpty == false else { return }
+
+        struct SegmentOnLine {
+            let lineIndex: Int
+            let startX: CGFloat
+            let endX: CGFloat
+            let surface: String
+        }
+
+        var segmentsByLine: [Int: [SegmentOnLine]] = [:]
+        segmentsByLine.reserveCapacity(lineRectsInContent.count)
+
+        for span in semanticSpans {
+            let displayRange = self.displayRange(fromSourceRange: span.range)
+            guard displayRange.location != NSNotFound, displayRange.length > 0 else { continue }
+
+            let baseRects = baseHighlightRectsInContentCoordinates(in: displayRange)
+            guard baseRects.isEmpty == false else { continue }
+            let unions = unionRectsByLine(baseRects)
+            guard unions.isEmpty == false else { continue }
+
+            let envelopePad = max(0, RubyTextProcessing.headwordEnvelopePad(in: attributedText, displayRange: displayRange))
+            let tokenEndIndex = NSMaxRange(displayRange)
+            guard let tokenEndCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: tokenEndIndex, attributedLength: attributedText.length),
+                  let tokenEndLine = bestMatchingLineIndex(for: tokenEndCaret, candidates: lineRectsInContent) else {
+                continue
+            }
+
+            for rect in unions {
+                guard let lineIndex = bestMatchingLineIndex(for: rect, candidates: lineRectsInContent) else { continue }
+                let ownedPad = (lineIndex == tokenEndLine) ? envelopePad : 0
+                segmentsByLine[lineIndex, default: []].append(
+                    SegmentOnLine(lineIndex: lineIndex, startX: rect.minX, endX: rect.maxX + ownedPad, surface: span.surface)
+                )
+            }
+        }
+
+        for line in segmentsByLine.keys.sorted() {
+            guard let segments = segmentsByLine[line], segments.count > 1 else { continue }
+            let ordered = segments.sorted { a, b in
+                if abs(a.startX - b.startX) > TokenSpacingInvariantSource.positionTieTolerance {
+                    return a.startX < b.startX
+                }
+                return a.endX < b.endX
+            }
+
+            var previous = ordered[0]
+            for current in ordered.dropFirst() {
+                let gap = current.startX - previous.endX
+                if gap > 0.25 {
+                    let a = previous.surface.replacingOccurrences(of: "\n", with: "\\n")
+                    let b = current.surface.replacingOccurrences(of: "\n", with: "\\n")
+                    let msg = String(format: "[HeadwordPad] FAIL boundary=\"%@|%@\" gap=%.2f A.end=%.2f B.start=%.2f", a, b, gap, previous.endX, current.startX)
+                    CustomLogger.shared.error(msg)
+                    assertionFailure(msg)
+                }
+                previous = current
+            }
+        }
     }
 
     @available(iOS 15.0, *)
@@ -2280,6 +2394,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let endLineIndex: Int
             let startX: CGFloat
             let endX: CGFloat
+            let envelopePad: CGFloat
             let trailingKern: CGFloat
             let displayRange: NSRange
             let sourceRange: NSRange
@@ -2321,12 +2436,14 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             ) else { continue }
 
             let kern = TokenSpacingInvariantSource.trailingKern(in: attributedText, inkRange: segmentRange)
+            let envelopePad = max(0, RubyTextProcessing.headwordEnvelopePad(in: attributedText, displayRange: segmentRange))
             boundariesByTokenIndex[tokenIndex] = TokenBoundary(
                 tokenIndex: tokenIndex,
                 startLineIndex: startLineIndex,
                 endLineIndex: endLineIndex,
                 startX: startCaret.minX,
                 endX: endCaret.minX,
+                envelopePad: envelopePad,
                 trailingKern: kern,
                 displayRange: record.displayRange,
                 sourceRange: record.sourceRange,
@@ -2402,6 +2519,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let lineIndex: Int
             let minX: CGFloat
             let maxX: CGFloat
+            let ownedPad: CGFloat
+            let ownedMaxX: CGFloat
             let surface: String
             let displayRange: NSRange
         }
@@ -2427,6 +2546,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                         lineIndex: lineIndex,
                         minX: unionRect.minX,
                         maxX: unionRect.maxX,
+                        ownedPad: (boundariesByTokenIndex[tokenIndex]?.endLineIndex == lineIndex)
+                            ? (boundariesByTokenIndex[tokenIndex]?.envelopePad ?? 0)
+                            : 0,
+                        ownedMaxX: unionRect.maxX + ((boundariesByTokenIndex[tokenIndex]?.endLineIndex == lineIndex)
+                            ? (boundariesByTokenIndex[tokenIndex]?.envelopePad ?? 0)
+                            : 0),
                         surface: span.surface,
                         displayRange: displayRange
                     )
@@ -2455,7 +2580,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     displayRange: $0.displayRange,
                     surface: $0.surface,
                     minX: $0.minX,
-                    maxX: $0.maxX
+                    maxX: $0.ownedMaxX
                 )
             }
         }
@@ -2479,6 +2604,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 return a.maxX < b.maxX
             }
 
+            var effectiveEnds = orderedForSpacing.map { $0.ownedMaxX }
+            if orderedForSpacing.count > 1 {
+                for i in 1..<orderedForSpacing.count {
+                    let gap = orderedForSpacing[i].minX - effectiveEnds[i - 1]
+                    if abs(gap) <= 0.25 {
+                        effectiveEnds[i - 1] = orderedForSpacing[i].minX
+                    }
+                }
+            }
+
             for (position, cur) in orderedForSpacing.enumerated() {
                 let beforeSpace: CGFloat
                 let beforeKind: String
@@ -2486,19 +2621,18 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     beforeSpace = cur.minX - leftInsetGuideX
                     beforeKind = "LEFT_GUIDE"
                 } else {
-                    let prev = orderedForSpacing[position - 1]
-                    beforeSpace = cur.minX - prev.maxX
+                    beforeSpace = cur.minX - effectiveEnds[position - 1]
                     beforeKind = "PREV_SEG"
                 }
 
                 let afterSpace: CGFloat
                 let afterKind: String
                 if position == orderedForSpacing.count - 1 {
-                    afterSpace = rightInsetGuideX - cur.maxX
+                    afterSpace = rightInsetGuideX - effectiveEnds[position]
                     afterKind = "RIGHT_GUIDE"
                 } else {
                     let next = orderedForSpacing[position + 1]
-                    afterSpace = next.minX - cur.maxX
+                    afterSpace = next.minX - effectiveEnds[position]
                     afterKind = "NEXT_SEG"
                 }
 
@@ -2506,38 +2640,38 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 let beforeKindForLog = alignedKind(beforeKind)
                 let afterKindForLog = alignedKind(afterKind)
 
-                if showLineNumbersInSegmentLogs {
-                    CustomLogger.shared.print(
-                        String(
-                            format: "[SegmentSpacing] L%03d P%02d/%02d  before(%@)=%8.2f  after(%@)=%8.2f  start=%8.2f  end=%8.2f  text=%@",
-                            lineIndex,
-                            position + 1,
-                            orderedForSpacing.count,
-                            beforeKindForLog,
-                            beforeSpace,
-                            afterKindForLog,
-                            afterSpace,
-                            cur.minX,
-                            cur.maxX,
-                            surfaceForLog
-                        )
-                    )
-                } else {
-                    CustomLogger.shared.print(
-                        String(
-                            format: "[SegmentSpacing] P%02d/%02d  before(%@)=%8.2f  after(%@)=%8.2f  start=%8.2f  end=%8.2f  text=%@",
-                            position + 1,
-                            orderedForSpacing.count,
-                            beforeKindForLog,
-                            beforeSpace,
-                            afterKindForLog,
-                            afterSpace,
-                            cur.minX,
-                            cur.maxX,
-                            surfaceForLog
-                        )
-                    )
-                }
+//                if showLineNumbersInSegmentLogs {
+//                    CustomLogger.shared.print(
+//                        String(
+//                            format: "[SegmentSpacing] L%03d P%02d/%02d  before(%@)=%8.2f  after(%@)=%8.2f  start=%8.2f  end=%8.2f  text=%@",
+//                            lineIndex,
+//                            position + 1,
+//                            orderedForSpacing.count,
+//                            beforeKindForLog,
+//                            beforeSpace,
+//                            afterKindForLog,
+//                            afterSpace,
+//                            cur.minX,
+//                            effectiveEnds[position],
+//                            surfaceForLog
+//                        )
+//                    )
+//                } else {
+//                    CustomLogger.shared.print(
+//                        String(
+//                            format: "[SegmentSpacing] P%02d/%02d  before(%@)=%8.2f  after(%@)=%8.2f  start=%8.2f  end=%8.2f  text=%@",
+//                            position + 1,
+//                            orderedForSpacing.count,
+//                            beforeKindForLog,
+//                            beforeSpace,
+//                            afterKindForLog,
+//                            afterSpace,
+//                            cur.minX,
+//                            effectiveEnds[position],
+//                            surfaceForLog
+//                        )
+//                    )
+//                }
             }
         }
 
@@ -2581,17 +2715,17 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 guard let prev = boundariesByTokenIndex[prevIndex] else { continue }
                 guard prev.endLineIndex == lineIndex else { continue }
 
-                // Right boundary of the previous token, excluding its trailing `.kern`.
-                let prevRightExclKern = prev.endX - prev.trailingKern
-                let gap = cur.startX - prevRightExclKern
+                // Right boundary of previous token must include envelope-owned width.
+                let prevOwnedEnd = prev.endX + prev.envelopePad
+                let gap = cur.startX - prevOwnedEnd
                 if TokenSpacingInvariantSource.checkEnabled(.nonOverlap), gap < -overlapTol {
-                    reportFailure(String(format: "[HeadwordPadding invariant] overlap on line %d. prev=%d endX=%.2f kern=%.2f next=%d startX=%.2f gap=%.2f", lineIndex, prev.tokenIndex, prev.endX, prev.trailingKern, cur.tokenIndex, cur.startX, gap))
+                    reportFailure(String(format: "[HeadwordPadding invariant] overlap on line %d. prev=%d endX=%.2f envPad=%.2f next=%d startX=%.2f gap=%.2f", lineIndex, prev.tokenIndex, prev.endX, prev.envelopePad, cur.tokenIndex, cur.startX, gap))
                 }
 
-                let expected = prev.trailingKern
+                let expected: CGFloat = 0
                 if TokenSpacingInvariantSource.checkEnabled(.gapMatchesKern),
                    abs(gap - expected) > kernGapTol {
-                    reportFailure(String(format: "[HeadwordPadding invariant] gap != kern between consecutive headwords on line %d. prev=%d next=%d gap=%.2f expectedKern=%.2f prevEndX=%.2f nextStartX=%.2f", lineIndex, prev.tokenIndex, cur.tokenIndex, gap, expected, prev.endX, cur.startX))
+                    reportFailure(String(format: "[HeadwordPadding invariant] gap != 0 between consecutive headwords on line %d. prev=%d next=%d gap=%.2f prevOwnedEnd=%.2f nextStartX=%.2f", lineIndex, prev.tokenIndex, cur.tokenIndex, gap, prevOwnedEnd, cur.startX))
                 }
             }
         }
@@ -3743,6 +3877,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             // No change; avoid resetting attributedText which would dismiss menus.
             return
         }
+        let applyStart = CustomLogger.perfStart()
         let savedOffset = contentOffset
         let wasFirstResponder = isFirstResponder
         let oldSelectedRange = selectedRange
@@ -3794,6 +3929,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         if Self.verboseRubyLoggingEnabled {
             CustomLogger.shared.debug("applyAttributedText -> setNeedsLayout")
         }
+        CustomLogger.shared.perf(
+            "TokenOverlayTextView.applyAttributedText",
+            elapsedMS: CustomLogger.perfElapsedMS(since: applyStart),
+            details: "length=\(text.length) semantic=\(semanticSpans.count)",
+            thresholdMS: 4.0,
+            level: .debug
+        )
     }
 
     private func rebuildRubyRunCache(from text: NSAttributedString) {

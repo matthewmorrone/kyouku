@@ -77,38 +77,74 @@ final class DictionaryLookupViewModel: ObservableObject {
     }
 
     private func lookupSurfaceThenDeinflect(displayKey: String, lookupKey: String, mode: DictionarySearchMode) async throws -> LookupHit? {
+        let lookupStart = CustomLogger.perfStart()
+
         // 1) Exact surface lookup
+        let surfaceLookupStart = CustomLogger.perfStart()
         let surfacePayload: (rows: [DictionaryEntry], priority: [Int64: Int]) = try await Task.detached(priority: .userInitiated) {
             let rows = try await DictionarySQLiteStore.shared.lookup(term: lookupKey, limit: 50, mode: mode)
             let ids = Array(Set(rows.map { $0.entryID }))
             let priority = (try? await DictionarySQLiteStore.shared.fetchEntryPriorityScores(for: ids)) ?? [:]
             return (rows, priority)
         }.value
+        CustomLogger.shared.perf(
+            "DictionaryLookup surface",
+            elapsedMS: CustomLogger.perfElapsedMS(since: surfaceLookupStart),
+            details: "mode=\(String(describing: mode)) display='\(displayKey)' lookup='\(lookupKey)' rows=\(surfacePayload.rows.count)"
+        )
 
         if surfacePayload.rows.isEmpty == false {
+            CustomLogger.shared.perf(
+                "DictionaryLookup surfaceThenDeinflect",
+                elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
+                details: "mode=\(String(describing: mode)) resolved=surface display='\(displayKey)' rows=\(surfacePayload.rows.count)"
+            )
             return LookupHit(displayKey: displayKey, lookupKey: lookupKey, rows: surfacePayload.rows, priority: surfacePayload.priority, deinflectionTrace: nil)
         }
 
         // 2) Deinflection lookup
         guard mode == .japanese else { return nil }
+        let deinflectionStart = CustomLogger.perfStart()
         let deinflected = await deinflectionCache.candidates(for: displayKey)
+        CustomLogger.shared.perf(
+            "DictionaryLookup deinflectionCandidates",
+            elapsedMS: CustomLogger.perfElapsedMS(since: deinflectionStart),
+            details: "display='\(displayKey)' candidates=\(deinflected.count)"
+        )
         for d in deinflected {
             if d.trace.isEmpty { continue }
             let keys = DictionaryKeyPolicy.keys(forDisplayKey: d.baseForm)
             guard keys.lookupKey.isEmpty == false else { continue }
 
+            let lemmaLookupStart = CustomLogger.perfStart()
             let lemmaPayload: (rows: [DictionaryEntry], priority: [Int64: Int]) = try await Task.detached(priority: .userInitiated) {
                 let rows = try await DictionarySQLiteStore.shared.lookup(term: keys.lookupKey, limit: 50, mode: mode)
                 let ids = Array(Set(rows.map { $0.entryID }))
                 let priority = (try? await DictionarySQLiteStore.shared.fetchEntryPriorityScores(for: ids)) ?? [:]
                 return (rows, priority)
             }.value
+            CustomLogger.shared.perf(
+                "DictionaryLookup lemma",
+                elapsedMS: CustomLogger.perfElapsedMS(since: lemmaLookupStart),
+                details: "base='\(keys.displayKey)' lookup='\(keys.lookupKey)' rows=\(lemmaPayload.rows.count)"
+            )
 
             if lemmaPayload.rows.isEmpty == false {
                 let trace = d.trace.map { "\($0.reason):\($0.rule.kanaIn)->\($0.rule.kanaOut)" }.joined(separator: ",")
+                CustomLogger.shared.perf(
+                    "DictionaryLookup surfaceThenDeinflect",
+                    elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
+                    details: "mode=\(String(describing: mode)) resolved=lemma lemma='\(keys.displayKey)' rows=\(lemmaPayload.rows.count)"
+                )
                 return LookupHit(displayKey: keys.displayKey, lookupKey: keys.lookupKey, rows: lemmaPayload.rows, priority: lemmaPayload.priority, deinflectionTrace: trace)
             }
         }
+
+        CustomLogger.shared.perf(
+            "DictionaryLookup surfaceThenDeinflect",
+            elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
+            details: "mode=\(String(describing: mode)) resolved=none display='\(displayKey)'"
+        )
 
         return nil
     }
@@ -184,6 +220,8 @@ final class DictionaryLookupViewModel: ObservableObject {
         mode: DictionarySearchMode = .japanese
     ) async {
         guard shouldSuppressLookup(for: requestID) == false else { return }
+
+        let transactionStart = CustomLogger.perfStart()
 
         // Single presentation gate flip.
         isLoading = true
@@ -290,16 +328,28 @@ final class DictionaryLookupViewModel: ObservableObject {
         // If the user dismissed the panel (reset -> `.idle`) or a newer lookup began,
         // do not publish stale results back into `presented`.
         guard case .resolving(let activeID) = phase, activeID == requestID else {
+            CustomLogger.shared.perf(
+                "DictionaryLookup lookupTransaction",
+                elapsedMS: CustomLogger.perfElapsedMS(since: transactionStart),
+                details: "requestID=\(requestID) dropped=stale"
+            )
             return
         }
 
         commitOutcome(outcome, requestID: requestID, selection: selection)
+        CustomLogger.shared.perf(
+            "DictionaryLookup lookupTransaction",
+            elapsedMS: CustomLogger.perfElapsedMS(since: transactionStart),
+            details: "requestID=\(requestID) results=\(outcome.results.count) error=\(outcome.errorMessage != nil)"
+        )
     }
 
     func lookup(term: String, mode: DictionarySearchMode = .japanese) async {
         // Keep legacy API behavior, but batch-publish state to avoid UI jitter.
         let requestID = "term:\(mode):\(term.trimmingCharacters(in: .whitespacesAndNewlines))"
         guard shouldSuppressLookup(for: requestID) == false else { return }
+
+        let lookupStart = CustomLogger.perfStart()
 
         isLoading = true
         errorMessage = nil
@@ -335,6 +385,11 @@ final class DictionaryLookupViewModel: ObservableObject {
         // Commit only if still relevant.
         if case .resolving(let active) = phase, active == requestID {
             commitOutcome(outcome, requestID: requestID, selection: nil)
+            CustomLogger.shared.perf(
+                "DictionaryLookup lookup(term:)",
+                elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
+                details: "mode=\(String(describing: mode)) term='\(primaryKeys.displayKey)' results=\(outcome.results.count) error=\(outcome.errorMessage != nil)"
+            )
         }
     }
 

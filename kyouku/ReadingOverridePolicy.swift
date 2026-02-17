@@ -24,7 +24,7 @@ actor ReadingOverridePolicy {
 
     func overrideReading(for surface: String, mecabReading: String?) async -> String? {
         guard surface.isEmpty == false else { return nil }
-        guard let overrides = try? await loadOverrides() else { return nil }
+        guard let overrides = await cachedOverridesOrStartWarmUp() else { return nil }
         let key = Self.normalizeSurface(surface)
         guard let dictionaryReading = overrides[key] else { return nil }
         if let mecabNormalized = Self.normalizeReading(mecabReading), mecabNormalized == dictionaryReading {
@@ -33,9 +33,39 @@ actor ReadingOverridePolicy {
         return dictionaryReading
     }
 
+    private func cachedOverridesOrStartWarmUp() async -> [String: String]? {
+        if let cached = cachedOverrides {
+            return cached
+        }
+
+        // Render path guardrail:
+        // Do not block furigana/token rendering on first-use DB bootstrap.
+        // Start hydration in the background and return fast until warm.
+        startBuildTaskIfNeeded()
+
+        return nil
+    }
+
     private func loadOverrides() async throws -> [String: String] {
         if let cached = cachedOverrides { return cached }
-        if let task = buildTask { return try await task.value }
+        startBuildTaskIfNeeded()
+        guard let task = buildTask else { return [:] }
+
+        do {
+            let built = try await task.value
+            cachedOverrides = built
+            buildTask = nil
+            return built
+        } catch {
+            buildTask = nil
+            throw error
+        }
+    }
+
+    private func startBuildTaskIfNeeded() {
+        if cachedOverrides != nil || buildTask != nil {
+            return
+        }
 
         // Capture actor-isolated state before entering the Task closure.
         let loader = self.loader
@@ -53,11 +83,6 @@ actor ReadingOverridePolicy {
             return map
         }
         buildTask = task
-
-        let built = try await task.value
-        cachedOverrides = built
-        buildTask = nil
-        return built
     }
 
     private static func normalizeSurface(_ surface: String) -> String {

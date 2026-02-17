@@ -181,6 +181,7 @@ extension PasteView {
 
         let start = tappedRange.location
         incrementalLookupTask = Task {
+            let lookupStart = CustomLogger.perfStart()
             // Token-aligned candidate expansion (no character-by-character growth).
             let tokens: [TextSpan] = await MainActor.run {
                 furiganaSpans?.map(\.span) ?? []
@@ -297,6 +298,11 @@ extension PasteView {
                     incrementalSheetDetent = incrementalPreferredSheetDetent
                 }
             }
+            CustomLogger.shared.perf(
+                "PasteView.startIncrementalLookup",
+                elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
+                details: "tap=\(start) candidates=\(candidates.count) hits=\(hits.count)"
+            )
         }
     }
 

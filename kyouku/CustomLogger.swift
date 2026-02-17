@@ -18,6 +18,23 @@ final class CustomLogger {
 
     static let shared = CustomLogger()
 
+    static let perfTimingEnabled: Bool = {
+#if DEBUG
+        ProcessInfo.processInfo.environment["PERF_TIMING_LOGS"] != "0"
+#else
+        ProcessInfo.processInfo.environment["PERF_TIMING_LOGS"] == "1"
+#endif
+    }()
+
+    static let perfDefaultThresholdMS: Double = {
+        guard let raw = ProcessInfo.processInfo.environment["PERF_TIMING_THRESHOLD_MS"],
+              let value = Double(raw),
+              value >= 0 else {
+            return 0
+        }
+        return value
+    }()
+
     private let logger: Logger
     private let dateFormatter: DateFormatter
     private let timestampFormat: String
@@ -114,6 +131,37 @@ final class CustomLogger {
     /// Writes the string as-is to stdout (no timestamp/call-site decoration).
     func raw(_ message: @autoclosure () -> String) {
         Swift.print(message())
+    }
+
+    @inline(__always)
+    static func perfStart() -> CFAbsoluteTime {
+        CFAbsoluteTimeGetCurrent()
+    }
+
+    @inline(__always)
+    static func perfElapsedMS(since start: CFAbsoluteTime) -> Double {
+        max(0, (CFAbsoluteTimeGetCurrent() - start) * 1000)
+    }
+
+    func perf(
+        _ context: String,
+        elapsedMS: Double,
+        details: String = "",
+        thresholdMS: Double? = nil,
+        level: Level = .info,
+        file: StaticString = #fileID,
+        line: UInt = #line,
+        function: StaticString = #function
+    ) {
+        guard Self.perfTimingEnabled else { return }
+        let threshold = thresholdMS ?? Self.perfDefaultThresholdMS
+        guard elapsedMS >= threshold else { return }
+
+        let elapsed = String(format: "%.2f", elapsedMS)
+        let message = details.isEmpty
+            ? "[Perf] \(context) elapsed=\(elapsed)ms"
+            : "[Perf] \(context) elapsed=\(elapsed)ms \(details)"
+        log(message, level: level, file: file, line: line, function: function)
     }
 
     /// Best-effort console clear for startup diagnostics.

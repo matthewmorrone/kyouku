@@ -421,12 +421,11 @@ struct RubyText: UIViewRepresentable {
 
             let processed = RubyTextProcessing.applyAnnotationVisibility(annotationVisibility, to: mutable)
 
-            let (displayText, indexMap) = RubyTextProcessing.applyRubyWidthPaddingAroundRunsIfNeeded(
+            let (displayText, indexMap) = RubyTextProcessing.applyHeadwordEnvelopePaddingWithoutSpacers(
                 to: processed,
                 baseFont: baseFont,
                 defaultRubyFontSize: defaultRubyFontSize,
                 enabled: padHeadwordSpacing && annotationVisibility != .removed,
-                headwordSpacingAmount: headwordSpacingAmount,
                 interTokenSpacing: interTokenSpacing
             )
             uiView.rubyIndexMap = indexMap

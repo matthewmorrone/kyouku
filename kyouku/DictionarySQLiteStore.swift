@@ -165,22 +165,49 @@ actor DictionarySQLiteStore {
     /// Public async API used by the rest of the app.
     /// This matches the existing `try await DictionarySQLiteStore.shared.lookup(...)` call sites.
     func lookup(term: String, limit: Int = 30) async throws -> [DictionaryEntry] {
-        // Actor isolation ensures safe access to `db`, but the SQL work can still be heavy.
-        // We keep the work inside the actor; since callers are often on @MainActor,
-        // the `await` prevents blocking UI.
-        try lookupSync(term: term, limit: limit, mode: .japanese)
+        let start = CFAbsoluteTimeGetCurrent()
+        let result = try lookupSync(term: term, limit: limit, mode: .japanese)
+        let elapsedMS = max(0, (CFAbsoluteTimeGetCurrent() - start) * 1000)
+        await MainActor.run {
+            CustomLogger.shared.perf(
+                "DictionarySQLiteStore.lookup",
+                elapsedMS: elapsedMS,
+                details: "mode=japanese termLen=\(term.utf16.count) limit=\(limit) rows=\(result.count)"
+            )
+        }
+        return result
     }
 
     /// Variant that allows callers to influence how the query is interpreted
     /// (e.g., prefer English gloss matches for Latin input).
     func lookup(term: String, limit: Int = 30, mode: DictionarySearchMode) async throws -> [DictionaryEntry] {
-        try lookupSync(term: term, limit: limit, mode: mode)
+        let start = CFAbsoluteTimeGetCurrent()
+        let result = try lookupSync(term: term, limit: limit, mode: mode)
+        let elapsedMS = max(0, (CFAbsoluteTimeGetCurrent() - start) * 1000)
+        await MainActor.run {
+            CustomLogger.shared.perf(
+                "DictionarySQLiteStore.lookup",
+                elapsedMS: elapsedMS,
+                details: "mode=\(String(describing: mode)) termLen=\(term.utf16.count) limit=\(limit) rows=\(result.count)"
+            )
+        }
+        return result
     }
 
     /// Exact-only lookup (no substring/token fallback). Useful for Details views
     /// where we only want the selected surface and its lemma, not component hits.
     func lookupExact(term: String, limit: Int = 30, mode: DictionarySearchMode = .japanese) async throws -> [DictionaryEntry] {
-        try lookupExactSync(term: term, limit: limit, mode: mode)
+        let start = CFAbsoluteTimeGetCurrent()
+        let result = try lookupExactSync(term: term, limit: limit, mode: mode)
+        let elapsedMS = max(0, (CFAbsoluteTimeGetCurrent() - start) * 1000)
+        await MainActor.run {
+            CustomLogger.shared.perf(
+                "DictionarySQLiteStore.lookupExact",
+                elapsedMS: elapsedMS,
+                details: "mode=\(String(describing: mode)) termLen=\(term.utf16.count) limit=\(limit) rows=\(result.count)"
+            )
+        }
+        return result
     }
 
     func fetchEntryDetails(for entryIDs: [Int64]) async throws -> [DictionaryEntryDetail] {
@@ -236,9 +263,15 @@ actor DictionarySQLiteStore {
         try ensureOpen()
         guard let db else { return [] }
         let sql = """
-        SELECT text FROM kanji
+        SELECT k.text
+        FROM kanji k
+        JOIN entries e ON e.id = k.entry_id
+        WHERE e.source = 'jmdict'
         UNION
-        SELECT text FROM kana_forms;
+        SELECT r.text
+        FROM kana_forms r
+        JOIN entries e ON e.id = r.entry_id
+        WHERE e.source = 'jmdict';
         """
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
