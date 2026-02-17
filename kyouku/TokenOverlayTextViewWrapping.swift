@@ -98,29 +98,72 @@ extension TokenOverlayTextView {
         let rightGuideX = TokenSpacingInvariantSource.rightGuideX(in: self)
         let rightTol = TokenSpacingInvariantSource.rightBoundaryTolerance(in: self)
 
-        let inkTokenRecords = TokenSpacingInvariantSource.collectInkTokenRecords(
-            attributedText: attributedText,
-            semanticSpans: semanticSpans,
-            maxTokens: semanticSpans.count,
-            displayRangeFromSource: { sourceRange in
-                self.displayRange(fromSourceRange: sourceRange)
-            }
-        )
-
         var forced: Set<Int> = []
         forced.reserveCapacity(min(semanticSpans.count, 128))
 
-        for record in inkTokenRecords {
-            let inkRange = record.inkRange
-            guard let endCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: NSMaxRange(inkRange), attributedLength: attributedText.length) else { continue }
+        var forcedByOverflow = 0
+        var forcedBySplit = 0
 
-            let overflow = endCaret.minX - rightGuideX
+        func rubyMaxXInContentForTokenLine(tokenIndex: Int, anchorBaseMidY: CGFloat) -> CGFloat? {
+            guard let layers = rubyOverlayContainerLayer.sublayers, layers.isEmpty == false else { return nil }
+            let tol: CGFloat = 1.0
+            var best: CGFloat? = nil
+            for layer in layers {
+                guard let ruby = layer as? CATextLayer else { continue }
+                guard let idx = ruby.value(forKey: "rubyTokenIndex") as? Int, idx == tokenIndex else { continue }
+
+                let storedMidY: CGFloat? = {
+                    if let n = ruby.value(forKey: "rubyAnchorBaseMidY") as? NSNumber {
+                        return CGFloat(n.doubleValue)
+                    }
+                    if let d = ruby.value(forKey: "rubyAnchorBaseMidY") as? Double {
+                        return CGFloat(d)
+                    }
+                    return nil
+                }()
+
+                guard let midY = storedMidY, abs(midY - anchorBaseMidY) <= tol else { continue }
+                let r = ruby.frame
+                guard r.isNull == false, r.isEmpty == false else { continue }
+                best = max(best ?? r.maxX, r.maxX)
+            }
+            return best
+        }
+
+        for (tokenIndex, span) in semanticSpans.enumerated() {
+            let sourceRange = span.range
+            guard sourceRange.location != NSNotFound, sourceRange.length > 0 else { continue }
+
+            let segmentRange = displayRange(fromSourceRange: sourceRange)
+            guard segmentRange.location != NSNotFound, segmentRange.length > 0 else { continue }
+
+            let startDisplay = segmentRange.location
+            guard startDisplay > 0, startDisplay < attributedText.length else { continue }
+
+            // Hard guarantee: if a segment is currently split across lines, force a break
+            // at the segment start on the next pass so the entire segment can move.
+            let segmentRectsInContent = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: segmentRange)
+            guard segmentRectsInContent.isEmpty == false else { continue }
+
+            let unions = unionRectsByLine(segmentRectsInContent)
+            guard unions.isEmpty == false else { continue }
+
+            if unions.count > 1 {
+                let inserted = forced.insert(startDisplay).inserted
+                if inserted { forcedBySplit += 1 }
+                continue
+            }
+
+            var segmentMaxX = unions[0].maxX
+            if let rubyMaxX = rubyMaxXInContentForTokenLine(tokenIndex: tokenIndex, anchorBaseMidY: unions[0].midY) {
+                segmentMaxX = max(segmentMaxX, rubyMaxX)
+            }
+
+            let overflow = segmentMaxX - rightGuideX
             guard overflow > rightTol else { continue }
 
-            let startDisplay = inkRange.location
-            if startDisplay > 0, startDisplay < attributedText.length {
-                forced.insert(startDisplay)
-            }
+            let inserted = forced.insert(startDisplay).inserted
+            if inserted { forcedByOverflow += 1 }
         }
 
         var hasher = Hasher()
@@ -152,9 +195,11 @@ extension TokenOverlayTextView {
         }()
         TokenSpacingInvariantSource.logSpacingTelemetry(
             String(
-                format: "wrap-overflow noteCount=%d forcedBreaks=%d preview=%@ rightGuide=%.2f tol=%.2f",
+                format: "wrap-overflow noteCount=%d forcedBreaks=%d bySplit=%d byOverflow=%d preview=%@ rightGuide=%.2f tol=%.2f",
                 semanticSpans.count,
                 forced.count,
+                forcedBySplit,
+                forcedByOverflow,
                 preview,
                 rightGuideX,
                 rightTol
@@ -165,6 +210,25 @@ extension TokenOverlayTextView {
 
     func shouldAllowWordBreakBeforeCharacter(at charIndex: Int) -> Bool {
         guard wrapLines else { return true }
+
+        // Hard rule: never allow a break inside a semantic segment body.
+        // A break is allowed at segment boundaries (segment starts), but not within.
+        if semanticSpans.isEmpty == false,
+           let attributedText,
+           attributedText.length > 0,
+           charIndex > 0,
+           charIndex < attributedText.length {
+            let sourceBoundary = sourceIndex(fromDisplayIndex: charIndex)
+            if let span = semanticSpans.spanContainingUTF16Index(sourceBoundary) {
+                let segmentDisplayRange = displayRange(fromSourceRange: span.range)
+                if segmentDisplayRange.location != NSNotFound,
+                   segmentDisplayRange.length > 0,
+                   NSLocationInRange(charIndex, segmentDisplayRange),
+                   charIndex != segmentDisplayRange.location {
+                    return false
+                }
+            }
+        }
 
         func isDisplayWhitespace(_ u: unichar) -> Bool {
             switch u {

@@ -1710,16 +1710,8 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         #if DEBUG
         if #available(iOS 15.0, *) {
-            // Invariant checks are intentionally opt-in to avoid purposefully crashing.
-            if headwordPaddingInvariantChecksEnabled {
-                enforceHeadwordPaddingLayoutInvariantsIfNeeded()
-            }
-
-            // Always-on in DEBUG: logs only when overflow is detected (throttled).
-            logTokenLeftOverflowIfNeeded()
-
-            // Always-on in DEBUG: logs when a token spans multiple lines (throttled).
-            logTokenWordSplitAcrossLinesIfNeeded()
+            // Run debug logging once after the current layout cycle settles.
+            schedulePostLayoutDebugLogsIfNeeded()
         }
         #endif
 
@@ -1872,6 +1864,14 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         static var loggedKeys: UInt8 = 0
     }
 
+    private enum PostLayoutDebugLogAssociatedKeys {
+        static var pendingWorkItem: UInt8 = 0
+    }
+
+    private enum GapDiagnosticsAssociatedKeys {
+        static var inProgress: UInt8 = 0
+    }
+
     @available(iOS 15.0, *)
     private var lastTokenLeftOverflowLogSignature: Int {
         get { objc_getAssociatedObject(self, &TokenLeftOverflowAssociatedKeys.lastSignature) as? Int ?? 0 }
@@ -1908,6 +1908,41 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         let s = NSMutableSet()
         objc_setAssociatedObject(self, &TokenWordSplitAssociatedKeys.loggedKeys, s, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         return s
+    }
+
+    @available(iOS 15.0, *)
+    private var pendingPostLayoutDebugLogWorkItem: DispatchWorkItem? {
+        get { objc_getAssociatedObject(self, &PostLayoutDebugLogAssociatedKeys.pendingWorkItem) as? DispatchWorkItem }
+        set { objc_setAssociatedObject(self, &PostLayoutDebugLogAssociatedKeys.pendingWorkItem, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
+    }
+
+    @available(iOS 15.0, *)
+    var gapDiagnosticsInProgress: Bool {
+        get { objc_getAssociatedObject(self, &GapDiagnosticsAssociatedKeys.inProgress) as? Bool ?? false }
+        set { objc_setAssociatedObject(self, &GapDiagnosticsAssociatedKeys.inProgress, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
+    }
+
+    @available(iOS 15.0, *)
+    private func schedulePostLayoutDebugLogsIfNeeded() {
+        guard gapDiagnosticsInProgress == false else { return }
+        pendingPostLayoutDebugLogWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.window != nil else { return }
+
+            // Segment spacing telemetry runs in DEBUG; invariant failure checks remain opt-in.
+            self.enforceHeadwordPaddingLayoutInvariantsIfNeeded()
+
+            // Always-on in DEBUG: logs only when overflow is detected (throttled).
+            self.logTokenLeftOverflowIfNeeded()
+
+            // Always-on in DEBUG: logs when a token spans multiple lines (throttled).
+            self.logTokenWordSplitAcrossLinesIfNeeded()
+        }
+
+        pendingPostLayoutDebugLogWorkItem = workItem
+        DispatchQueue.main.async(execute: workItem)
     }
 
     @available(iOS 15.0, *)
@@ -1988,12 +2023,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         guard leftGuideXPixels.isFinite else { return }
 
         // Include the guide position in the key, since it changes with inset/padding.
-        let leftGuideKey = Int((leftGuideXPixels * 4).rounded(.toNearestOrEven))
+        // let leftGuideKey = Int((leftGuideXPixels * 4).rounded(.toNearestOrEven))
 
         // Visible band (view coordinates).
-        let extraY: CGFloat = 24
-        let visibleMinY = -extraY
-        let visibleMaxY = bounds.height + extraY
+        // let extraY: CGFloat = 24
+        // let visibleMinY = -extraY
+        // let visibleMaxY = bounds.height + extraY
 
         let backing = attributedText.string as NSString
 
@@ -2053,7 +2088,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             }
         )
 
-        let checkedTokens = inkTokenRecords.count
+        // let checkedTokens = inkTokenRecords.count
         var violations = 0
 
         var boundaryCandidates: [TokenSpacingInvariantSource.LeftBoundaryCandidate] = []
@@ -2101,10 +2136,10 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         )
 
         for r in lineResults {
-            let lineIndex = r.lineIndex
-            let tokenLeftXPixels = r.tokenLeftX
-            let baseLeftXPixels = r.baseLeftX
-            let deltaPixels = r.deltaX
+            // let lineIndex = r.lineIndex
+            // let tokenLeftXPixels = r.tokenLeftX
+            // let baseLeftXPixels = r.baseLeftX
+            // let deltaPixels = r.deltaX
 
             // // De-dupe per line + guide + quantized delta so it only re-logs when the value changes.
             // let deltaKey = Int((deltaPixels * 2.0).rounded(.toNearestOrEven))
@@ -2117,34 +2152,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
             if TokenSpacingInvariantSource.checkEnabled(.leftBoundary), r.isDeviation {
                 violations += 1
-                CustomLogger.shared.print(
-                    String(
-                        format: "[LeftInsetBoundaryDeviation] dir=%@ lineIndex=%d token=%d start=%d leftGuidePx=%.2f tokenLeftPx=%.2f baseLeftPx=%.2f deltaPx=%.2f snippet=%@",
-                        r.direction.rawValue,
-                        lineIndex,
-                        r.tokenIndex,
-                        r.displayStart,
-                        leftGuideXPixels,
-                        tokenLeftXPixels,
-                        baseLeftXPixels,
-                        deltaPixels,
-                        r.snippet
-                    )
-                )
+                // CustomLogger.shared.print( String( format: "[LeftInsetBoundaryDeviation] dir=%@ lineIndex=%d token=%d start=%d leftGuidePx=%.2f tokenLeftPx=%.2f baseLeftPx=%.2f deltaPx=%.2f snippet=%@", r.direction.rawValue, lineIndex, r.tokenIndex, r.displayStart, leftGuideXPixels, tokenLeftXPixels, baseLeftXPixels, deltaPixels, r.snippet ) )
             }
             logged += 1
         }
 
         if logged > 0 {
-            CustomLogger.shared.print(
-                String(
-                    format: "[LeftGuideLineSummary] leftGuidePx=%.2f checked=%d lines=%d misaligned=%d",
-                    leftGuideXPixels,
-                    checkedTokens,
-                    lineResults.count,
-                    violations
-                )
-            )
+            // CustomLogger.shared.print(String(format: "[LeftGuideLineSummary] leftGuidePx=%.2f checked=%d lines=%d misaligned=%d", leftGuideXPixels, checkedTokens, lineResults.count, violations))
         }
     }
 
@@ -2239,19 +2253,17 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let snippetRange = NSRange(location: inkRange.location, length: min(12, inkRange.length))
             let snippet = backing.substring(with: snippetRange)
             let linesStr = uniqueLineIndices.map(String.init).joined(separator: ",")
-            // CustomLogger.shared.print("[WordSplit] token=\(tokenIndex) start=\(inkRange.location) len=\(inkRange.length) lines=\(linesStr) unions=\(unions.count) snippet=\(snippet)")
+            CustomLogger.shared.print("[WordSplitInvariant] token=\(tokenIndex) start=\(inkRange.location) len=\(inkRange.length) lines=\(linesStr) segments=\(unions.count) text=\(snippet)")
             logged += 1
         }
 
         if logged > 0 {
-            // CustomLogger.shared.print("[WordSplitSummary] logged=\(logged) violations=\(violations)")
+            CustomLogger.shared.print("[WordSplitSummary] logged=\(logged) violations=\(violations)")
         }
     }
 
     @available(iOS 15.0, *)
     private func enforceHeadwordPaddingLayoutInvariantsIfNeeded() {
-        guard padHeadwordSpacing else { return }
-        guard wrapLines else { return }
         guard let attributedText, attributedText.length > 0 else { return }
         guard semanticSpans.isEmpty == false else { return }
 
@@ -2269,6 +2281,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             let startX: CGFloat
             let endX: CGFloat
             let trailingKern: CGFloat
+            let displayRange: NSRange
+            let sourceRange: NSRange
+            let surface: String
         }
         var boundariesByTokenIndex: [Int: TokenBoundary] = [:]
         boundariesByTokenIndex.reserveCapacity(min(2048, semanticSpans.count))
@@ -2279,18 +2294,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             maxTokens: semanticSpans.count,
             displayRangeFromSource: { sourceRange in
                 self.displayRange(fromSourceRange: sourceRange)
-            },
-            shouldSkipDisplayRange: { displayRange in
-                self.isHardBoundaryOnly(range: displayRange)
             }
         )
 
         for record in inkTokenRecords {
             let tokenIndex = record.tokenIndex
-            let inkRange = record.inkRange
+            let segmentRange = record.displayRange
+            guard segmentRange.location != NSNotFound, segmentRange.length > 0 else { continue }
 
-            guard let startCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: inkRange.location, attributedLength: attributedText.length) else { continue }
-            guard let endCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: NSMaxRange(inkRange), attributedLength: attributedText.length) else { continue }
+            guard let startCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: segmentRange.location, attributedLength: attributedText.length) else { continue }
+            guard let endCaret = TokenSpacingInvariantSource.caretRectInContentCoordinates(in: self, index: NSMaxRange(segmentRange), attributedLength: attributedText.length) else { continue }
 
             guard let startLineIndex = TokenSpacingInvariantSource.lineIndexForCaretRect(
                 startCaret,
@@ -2307,14 +2320,17 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 }
             ) else { continue }
 
-            let kern = TokenSpacingInvariantSource.trailingKern(in: attributedText, inkRange: inkRange)
+            let kern = TokenSpacingInvariantSource.trailingKern(in: attributedText, inkRange: segmentRange)
             boundariesByTokenIndex[tokenIndex] = TokenBoundary(
                 tokenIndex: tokenIndex,
                 startLineIndex: startLineIndex,
                 endLineIndex: endLineIndex,
                 startX: startCaret.minX,
                 endX: endCaret.minX,
-                trailingKern: kern
+                trailingKern: kern,
+                displayRange: record.displayRange,
+                sourceRange: record.sourceRange,
+                surface: record.surface
             )
         }
 
@@ -2356,7 +2372,179 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         )
         let leftStartByLine = Dictionary(uniqueKeysWithValues: leftStartResults.map { ($0.lineIndex, $0) })
 
-        for (lineIndex, starts) in tokensStartingOnLine {
+        let sortedLineIndices = tokensStartingOnLine.keys.sorted()
+
+        func alignedSurface(_ surface: String) -> String {
+            let maxWidth = 12
+            let clipped: String = {
+                if surface.count > maxWidth {
+                    return String(surface.prefix(maxWidth - 1)) + "…"
+                }
+                return surface
+            }()
+            let padCount = max(0, maxWidth - clipped.count)
+            return clipped + String(repeating: " ", count: padCount)
+        }
+
+        func alignedKind(_ kind: String) -> String {
+            let width = 11
+            let clipped: String = {
+                if kind.count > width {
+                    return String(kind.prefix(width))
+                }
+                return kind
+            }()
+            let padCount = max(0, width - clipped.count)
+            return clipped + String(repeating: " ", count: padCount)
+        }
+
+        struct LineSegmentLogItem {
+            let lineIndex: Int
+            let minX: CGFloat
+            let maxX: CGFloat
+            let surface: String
+            let displayRange: NSRange
+        }
+
+        var segmentsByLine: [Int: [LineSegmentLogItem]] = [:]
+        segmentsByLine.reserveCapacity(lineRectsInContent.count)
+
+        for (tokenIndex, span) in semanticSpans.enumerated() {
+            _ = tokenIndex
+
+            let displayRange = self.displayRange(fromSourceRange: span.range)
+            guard displayRange.location != NSNotFound, displayRange.length > 0 else { continue }
+
+            let baseRectsInContent = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: displayRange)
+            guard baseRectsInContent.isEmpty == false else { continue }
+            let baseUnionsInContent = unionRectsByLine(baseRectsInContent)
+            guard baseUnionsInContent.isEmpty == false else { continue }
+
+            for unionRect in baseUnionsInContent {
+                guard let lineIndex = bestMatchingLineIndex(for: unionRect, candidates: lineRectsInContent) else { continue }
+                segmentsByLine[lineIndex, default: []].append(
+                    LineSegmentLogItem(
+                        lineIndex: lineIndex,
+                        minX: unionRect.minX,
+                        maxX: unionRect.maxX,
+                        surface: span.surface,
+                        displayRange: displayRange
+                    )
+                )
+            }
+        }
+
+        let sortedSegmentLineIndices = segmentsByLine.keys.sorted()
+        let showLineNumbersInSegmentLogs = rubyDebugShowLineNumbersEnabled
+
+        var cycleHasher = Hasher()
+        cycleHasher.combine(attributedTextRevision)
+        cycleHasher.combine(attributedText.length)
+        cycleHasher.combine(semanticSpans.count)
+        cycleHasher.combine(Int((bounds.width * 2).rounded(.toNearestOrEven)))
+        cycleHasher.combine(Int((bounds.height * 2).rounded(.toNearestOrEven)))
+        cycleHasher.combine(Int((contentOffset.x * 2).rounded(.toNearestOrEven)))
+        cycleHasher.combine(Int((contentOffset.y * 2).rounded(.toNearestOrEven)))
+        cycleHasher.combine(sortedSegmentLineIndices.count)
+        let cycleToken = cycleHasher.finalize()
+
+        let diagnosticSegmentsByLine: [Int: [GapDiagnostics.SegmentItem]] = segmentsByLine.mapValues { items in
+            items.map {
+                GapDiagnostics.SegmentItem(
+                    lineIndex: $0.lineIndex,
+                    displayRange: $0.displayRange,
+                    surface: $0.surface,
+                    minX: $0.minX,
+                    maxX: $0.maxX
+                )
+            }
+        }
+
+        GapDiagnostics.runAutoVerdictsIfNeeded(
+            view: self,
+            cycleToken: cycleToken,
+            segmentsByLine: diagnosticSegmentsByLine,
+            leftGuideX: leftInsetGuideX,
+            rightGuideX: rightInsetGuideX,
+            attributedText: attributedText
+        )
+
+        for lineIndex in sortedSegmentLineIndices {
+            guard let segments = segmentsByLine[lineIndex], segments.isEmpty == false else { continue }
+
+            let orderedForSpacing = segments.sorted { a, b in
+                if abs(a.minX - b.minX) > TokenSpacingInvariantSource.positionTieTolerance {
+                    return a.minX < b.minX
+                }
+                return a.maxX < b.maxX
+            }
+
+            for (position, cur) in orderedForSpacing.enumerated() {
+                let beforeSpace: CGFloat
+                let beforeKind: String
+                if position == 0 {
+                    beforeSpace = cur.minX - leftInsetGuideX
+                    beforeKind = "LEFT_GUIDE"
+                } else {
+                    let prev = orderedForSpacing[position - 1]
+                    beforeSpace = cur.minX - prev.maxX
+                    beforeKind = "PREV_SEG"
+                }
+
+                let afterSpace: CGFloat
+                let afterKind: String
+                if position == orderedForSpacing.count - 1 {
+                    afterSpace = rightInsetGuideX - cur.maxX
+                    afterKind = "RIGHT_GUIDE"
+                } else {
+                    let next = orderedForSpacing[position + 1]
+                    afterSpace = next.minX - cur.maxX
+                    afterKind = "NEXT_SEG"
+                }
+
+                let surfaceForLog = alignedSurface(cur.surface)
+                let beforeKindForLog = alignedKind(beforeKind)
+                let afterKindForLog = alignedKind(afterKind)
+
+                if showLineNumbersInSegmentLogs {
+                    CustomLogger.shared.print(
+                        String(
+                            format: "[SegmentSpacing] L%03d P%02d/%02d  before(%@)=%8.2f  after(%@)=%8.2f  start=%8.2f  end=%8.2f  text=%@",
+                            lineIndex,
+                            position + 1,
+                            orderedForSpacing.count,
+                            beforeKindForLog,
+                            beforeSpace,
+                            afterKindForLog,
+                            afterSpace,
+                            cur.minX,
+                            cur.maxX,
+                            surfaceForLog
+                        )
+                    )
+                } else {
+                    CustomLogger.shared.print(
+                        String(
+                            format: "[SegmentSpacing] P%02d/%02d  before(%@)=%8.2f  after(%@)=%8.2f  start=%8.2f  end=%8.2f  text=%@",
+                            position + 1,
+                            orderedForSpacing.count,
+                            beforeKindForLog,
+                            beforeSpace,
+                            afterKindForLog,
+                            afterSpace,
+                            cur.minX,
+                            cur.maxX,
+                            surfaceForLog
+                        )
+                    )
+                }
+            }
+        }
+
+        guard headwordPaddingInvariantChecksEnabled else { return }
+
+        for lineIndex in sortedLineIndices {
+            guard let starts = tokensStartingOnLine[lineIndex] else { continue }
             guard starts.isEmpty == false else { continue }
 
             // A) Left boundary: enforce for the leftmost token that STARTS on this line.
@@ -3747,7 +3935,11 @@ extension TokenOverlayTextView: NSTextLayoutManagerDelegate {
         return fragment
     }
 
-    @objc func textLayoutManager(_ textLayoutManager: NSTextLayoutManager, shouldBreakLineByWordBefore location: NSTextLocation) -> Bool {
+    func textLayoutManager(
+        _ textLayoutManager: NSTextLayoutManager,
+        shouldBreakLineBefore location: NSTextLocation,
+        hyphenating: Bool
+    ) -> Bool {
         guard wrapLines else { return true }
 
         guard let tcm = textLayoutManager.textContentManager else { return true }

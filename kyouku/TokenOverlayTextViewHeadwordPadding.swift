@@ -129,7 +129,7 @@ extension TokenOverlayTextView {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.lineStartBoundaryCorrectionScheduled = false
-            self.lastLineStartBoundaryCorrectionSignature = signature
+            self.lastLineStartBoundaryCorrectionSignature = adjusted.requiresFollowUp ? 0 : signature
             // Keep SOURCE↔DISPLAY mapping accurate if we inserted any display-only padding.
             self.rubyIndexMap = adjusted.indexMap
             self.applyAttributedText(adjusted.text)
@@ -137,7 +137,7 @@ extension TokenOverlayTextView {
     }
 
     @available(iOS 15.0, *)
-    private func lineStartBoundaryCorrectedTextIfNeeded(from text: NSAttributedString) -> (text: NSAttributedString, indexMap: RubyIndexMap)? {
+    private func lineStartBoundaryCorrectedTextIfNeeded(from text: NSAttributedString) -> (text: NSAttributedString, indexMap: RubyIndexMap, requiresFollowUp: Bool)? {
         guard textLayoutManager != nil else { return nil }
         guard text.length > 0 else { return nil }
 
@@ -164,6 +164,7 @@ extension TokenOverlayTextView {
         }
 
         let overlapPadKernKey = NSAttributedString.Key("RubyOverlapPadKern")
+        let contiguityPadKernKey = NSAttributedString.Key("RubyContiguityPadKern")
         let lineStartSpacerKey = NSAttributedString.Key("RubyLineStartBoundarySpacer")
 
         func readOverlapPadKern(at index: Int) -> CGFloat {
@@ -205,6 +206,36 @@ extension TokenOverlayTextView {
                 mutable.addAttribute(.kern, value: newKern, range: composed)
                 mutable.addAttribute(overlapPadKernKey, value: newPad, range: composed)
             }
+        }
+
+        func readContiguityPadKern(at index: Int) -> CGFloat {
+            guard index >= 0, index < mutable.length else { return 0 }
+            let v = mutable.attribute(contiguityPadKernKey, at: index, effectiveRange: nil)
+            if let num = v as? NSNumber { return CGFloat(num.doubleValue) }
+            if let cg = v as? CGFloat { return cg }
+            if let dbl = v as? Double { return CGFloat(dbl) }
+            return 0
+        }
+
+        func addContiguityKern(_ delta: CGFloat, afterDisplayRange displayRange: NSRange) {
+            guard delta.isFinite, abs(delta) > 0.01 else { return }
+            guard displayRange.location != NSNotFound, displayRange.length > 0 else { return }
+            guard NSMaxRange(displayRange) <= mutable.length else { return }
+
+            let last = max(displayRange.location, NSMaxRange(displayRange) - 1)
+            guard last >= 0, last < backing.length else { return }
+            let composed = backing.rangeOfComposedCharacterSequence(at: last)
+            guard composed.location != NSNotFound, composed.length > 0 else { return }
+
+            let currentKern = readKern(at: composed.location)
+            let priorContiguityPad = readContiguityPadKern(at: composed.location)
+            let baseKern = (currentKern - priorContiguityPad).isFinite ? (currentKern - priorContiguityPad) : currentKern
+            let newContiguityPad = priorContiguityPad + delta
+            let newKern = baseKern + newContiguityPad
+
+            guard newKern.isFinite else { return }
+            mutable.addAttribute(.kern, value: newKern, range: composed)
+            mutable.addAttribute(contiguityPadKernKey, value: newContiguityPad, range: composed)
         }
 
         func isNonRubySpacer(at index: Int) -> Bool {
@@ -369,6 +400,14 @@ extension TokenOverlayTextView {
 
         var didChange = false
         var didKernChange = false
+        let strictZeroGapMode: Bool = {
+            let defaults = UserDefaults.standard
+            let key = "HeadwordPaddingDebug.strictZeroGapMode"
+            if defaults.object(forKey: key) != nil {
+                return defaults.bool(forKey: key)
+            }
+            return true
+        }()
 
         // Phase 2) Resolve ruby–ruby overlaps by inserting horizontal space BETWEEN headwords only.
         // We implement this by increasing `.kern` after the preceding headword's last visible glyph.
@@ -378,7 +417,7 @@ extension TokenOverlayTextView {
         let minGap: CGFloat = TokenSpacingInvariantSource.rubyOverlapMinimumGap
 
         for (lineIndex, proposals) in proposalsByLine {
-            guard TokenSpacingInvariantSource.fixEnabled(.rubyOverlapResolution) else {
+            guard TokenSpacingInvariantSource.fixEnabled(.rubyOverlapResolution), strictZeroGapMode == false else {
                 for p in proposals {
                     adjustedFramesByRunStart[p.run.inkRange.location] = p.frame
                 }
@@ -419,12 +458,9 @@ extension TokenOverlayTextView {
             _ = lineIndex
         }
 
-        // If phase (2) changed `.kern`, the final rendered ruby frames will be re-centered
-        // during the next layout pass. Do not run phase (3) against stale frames; instead,
-        // apply the kern changes now and let phase (3) run on the next invocation.
-        if didKernChange {
-            return (mutable, rubyIndexMap)
-        }
+        // Continue into phases (3) and (4) even if phase (2) updated `.kern` so
+        // contiguity normalization can run in the same cycle.
+        // Keep a follow-up request to let geometry settle on the next pass.
 
         // Phase 3) After phase (2), for each visual line, enforce the left boundary.
         // If the first headword's ruby would overhang, shift the WHOLE line right by inserting
@@ -556,6 +592,63 @@ extension TokenOverlayTextView {
             _ = spacerChange
         }
 
+        // Phase 4) Normalize intra-line segment contiguity.
+        // Enforce before/after == 0 for adjacent segments on a line by adjusting
+        // boundary kern after the preceding segment. Keep only trailing slack to right guide.
+        struct SegmentOnLine {
+            let lineIndex: Int
+            let minX: CGFloat
+            let maxX: CGFloat
+            let displayRange: NSRange
+        }
+
+        var segmentsByLine: [Int: [SegmentOnLine]] = [:]
+        segmentsByLine.reserveCapacity(lineRectsInContent.count)
+
+        for span in semanticSpans {
+            let displayRange = self.displayRange(fromSourceRange: span.range)
+            guard displayRange.location != NSNotFound, displayRange.length > 0 else { continue }
+
+            let baseRectsInContent = baseHighlightRectsInContentCoordinatesExcludingRubySpacers(in: displayRange)
+            guard baseRectsInContent.isEmpty == false else { continue }
+
+            let unionsInContent = unionRectsByLine(baseRectsInContent)
+            guard unionsInContent.isEmpty == false else { continue }
+
+            for union in unionsInContent {
+                guard let lineIndex = bestMatchingLineIndex(for: union, candidates: lineRectsInContent) else { continue }
+                segmentsByLine[lineIndex, default: []].append(
+                    SegmentOnLine(
+                        lineIndex: lineIndex,
+                        minX: union.minX,
+                        maxX: union.maxX,
+                        displayRange: displayRange
+                    )
+                )
+            }
+        }
+
+        let contiguityTolerance = max(0.01, TokenSpacingInvariantSource.kernGapTolerance(in: self))
+        for lineIndex in segmentsByLine.keys.sorted() {
+            guard let segments = segmentsByLine[lineIndex], segments.count > 1 else { continue }
+            let ordered = segments.sorted { a, b in
+                if abs(a.minX - b.minX) > TokenSpacingInvariantSource.positionTieTolerance {
+                    return a.minX < b.minX
+                }
+                return a.maxX < b.maxX
+            }
+
+            for i in 1..<ordered.count {
+                let prev = ordered[i - 1]
+                let cur = ordered[i]
+                let gap = cur.minX - prev.maxX
+                if abs(gap) <= contiguityTolerance { continue }
+
+                addContiguityKern(-gap, afterDisplayRange: prev.displayRange)
+                didChange = true
+            }
+        }
+
         if lineInsertions.isEmpty == false {
             // Apply insertions from end → start to keep indices stable.
             let sorted = lineInsertions.sorted { a, b in
@@ -575,10 +668,10 @@ extension TokenOverlayTextView {
             newPositions.append(contentsOf: lineInsertions.map { $0.sourceInsertionPosition })
             newPositions.sort()
             let newMap = RubyIndexMap(insertionPositions: newPositions)
-            return (mutable, newMap)
+            return (mutable, newMap, didKernChange)
         }
 
-        return didChange ? (mutable, rubyIndexMap) : nil
+        return didChange ? (mutable, rubyIndexMap, didKernChange) : nil
     }
 
     func caretXRangeInViewCoordinates(for characterRange: NSRange) -> (startX: CGFloat, endX: CGFloat)? {

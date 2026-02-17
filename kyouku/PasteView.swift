@@ -756,6 +756,10 @@ struct PasteView: View {
         )
 
         let interTokenSpacing: [Int: CGFloat] = {
+            // When headword-spacing normalization is active, enforce contiguous
+            // segment boundaries from layout passes rather than replaying persisted
+            // manual boundary offsets.
+            guard readingHeadwordSpacingPadding == false else { return [:] }
             guard let noteID = currentNote?.id else { return [:] }
             return tokenBoundaries.interTokenSpacing(for: noteID, text: inputText)
         }()

@@ -79,7 +79,7 @@ enum FuriganaAttributedTextBuilder {
         }()
         func log(_ prefix: String, _ message: String) {
             guard shouldDumpStages else { return }
-            CustomLogger.shared.pipeline(context: context, stage: prefix, message)
+            // CustomLogger.shared.pipeline(context: context, stage: prefix, message)
         }
         func stageLine(_ name: String, _ value: String) -> String {
             let columnWidth = 26
@@ -101,7 +101,7 @@ enum FuriganaAttributedTextBuilder {
             segmented = try await SegmentationService.shared.segment(text: text)
         }
         let nsText = text as NSString
-        var adjustedSpans = normalizeCoverage(spans: segmented, text: nsText)
+        let adjustedSpans = normalizeCoverage(spans: segmented, text: nsText)
 
         // Materialize MeCab annotations once per pipeline run and reuse them across
         // Stage 1.25 (merge-only), Stage 1.5 (split-only), and Stage 2 reading attachment.

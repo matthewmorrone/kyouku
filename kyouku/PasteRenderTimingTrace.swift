@@ -25,30 +25,22 @@ enum PasteRenderTimingTrace {
     }
 
     static func checkpoint(_ stage: String, _ details: String = "") {
-        let now = CFAbsoluteTimeGetCurrent()
+        // let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
         guard active else {
             lock.unlock()
             return
         }
-        let traceID = activeTraceID
-        let noteID = activeNoteID
-        let elapsedMS = (now - startedAt) * 1000
+        // let traceID = activeTraceID
+        // let noteID = activeNoteID
+        // let elapsedMS = (now - startedAt) * 1000
         lock.unlock()
 
-        let elapsed = String(format: "%.1f", elapsedMS)
+        // let elapsed = String(format: "%.1f", elapsedMS)
         if details.isEmpty {
-            CustomLogger.shared.pipeline(
-                context: "PasteTiming",
-                stage: stage,
-                "trace=\(traceID) note=\(noteID) +\(elapsed)ms"
-            )
+            // CustomLogger.shared.pipeline(context: "PasteTiming", stage: stage, "trace=\(traceID) note=\(noteID) +\(elapsed)ms")
         } else {
-            CustomLogger.shared.pipeline(
-                context: "PasteTiming",
-                stage: stage,
-                "trace=\(traceID) note=\(noteID) +\(elapsed)ms \(details)"
-            )
+            // CustomLogger.shared.pipeline(context: "PasteTiming", stage: stage,"trace=\(traceID) note=\(noteID) +\(elapsed)ms \(details)")
         }
     }
 
