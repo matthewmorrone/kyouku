@@ -5,6 +5,7 @@ struct DictionaryResultRow: Identifiable {
     let surface: String
     let kana: String?
     let gloss: String
+    let isCommon: Bool
 
     var id: String { "\(surface)#\(kana ?? "(no-kana)")" }
 
@@ -30,7 +31,7 @@ struct DictionaryResultRow: Identifiable {
             }()
 
             let gloss = firstGlossFor(first)
-            return DictionaryResultRow(surface: surface, kana: displayKana, gloss: gloss)
+            return DictionaryResultRow(surface: surface, kana: displayKana, gloss: gloss, isCommon: first.isCommon)
         }
     }
 }

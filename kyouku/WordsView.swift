@@ -4,10 +4,8 @@ struct WordsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notesStore: NotesStore
     @EnvironmentObject var router: AppRouter
-    @StateObject private var lookup = DictionaryLookupViewModel()
+    @StateObject private var searchViewModel = SearchViewModel()
     @ObservedObject private var viewedHistory = ViewedDictionaryHistoryStore.shared
-    @State private var searchText: String = ""
-    @State private var searchMode: DictionarySearchMode = .japanese
     @State private var editModeState: EditMode = .inactive
     @State private var selectedWordIDs: Set<Word.ID> = []
     @State private var showCSVImportSheet = false
@@ -17,7 +15,6 @@ struct WordsView: View {
     @State private var showNewWordSheet: Bool = false
     @AppStorage("wordsShowEntrySourceLabels") private var showEntrySourceLabels: Bool = false
     @AppStorage("dictionaryHomeShelf") private var dictionaryHomeShelfRaw: String = DictionaryHomeShelf.favorites.rawValue
-    @State private var suppressedSearchTaskID: String? = nil
     @State private var cachedSortedWords: [Word] = []
     @State private var cachedNoteListItems: [NoteListItem] = []
     @State private var cachedListCounts: [UUID: Int] = [:]
@@ -28,17 +25,31 @@ struct WordsView: View {
 
     @State private var isPromptingForBulkAddListName: Bool = false
     @State private var pendingBulkAddListName: String = ""
+    @State private var pendingSearchRowForNewList: DictionaryResultRow? = nil
+    @State private var isPromptingForSearchListName: Bool = false
+    @State private var pendingSearchListName: String = ""
+    @State private var newWordInitialSurface: String = ""
 
     @State private var editingWord: EditingWord? = nil
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                searchBar
-                if hasActiveSearch == false {
-                    dictionaryHomeToggle
-                }
-                mainList
+                SearchResultsView(
+                    viewModel: searchViewModel,
+                    showCameraButton: false,
+                    onCameraTap: nil,
+                    listOptionsForRow: { row in searchRowListOptions(for: row) },
+                    isFavorite: { row in isMergedRowAlreadySaved(row) },
+                    isCustom: { row in isSearchRowCustom(row) },
+                    onToggleFavorite: { row in toggleMergedRow(row) },
+                    onAddToList: { row, listID in addSearchRow(row, toList: listID) },
+                    onCreateListAndAdd: { row in promptCreateListForSearchRow(row) },
+                    onAddNewCard: { row in openNewCard(for: row) },
+                    onCopy: { row in copySearchRow(row) },
+                    onViewHistory: { row in viewHistory(for: row) },
+                    onOpenResult: { row in recordSearchRowOpen(row) }
+                )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .environment(\.editMode, $editModeState)
@@ -77,6 +88,7 @@ struct WordsView: View {
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
+                        newWordInitialSurface = ""
                         showNewWordSheet = true
                     } label: {
                         Label("New", systemImage: "plus")
@@ -240,9 +252,6 @@ struct WordsView: View {
             }
         }
         .appThemedRoot()
-        .task(id: searchTaskID) {
-            await performLookup()
-        }
         .onChange(of: editModeState) { oldValue, newValue in
             if newValue.isEditing == false {
                 selectedWordIDs.removeAll()
@@ -260,7 +269,7 @@ struct WordsView: View {
                 editModeState = .inactive
             }
         }
-        .onChange(of: trimmedSearchText) { untrimmed, trimmed in
+        .onChange(of: searchViewModel.trimmedQuery) { untrimmed, trimmed in
             if trimmed.isEmpty == false {
                 editModeState = .inactive
             }
@@ -285,7 +294,7 @@ struct WordsView: View {
             }
         }
         .sheet(isPresented: $showNewWordSheet) {
-            WordCreateView(initialSurface: hasActiveSearch ? trimmedSearchText : "")
+            WordCreateView(initialSurface: newWordInitialSurface.isEmpty ? (hasActiveSearch ? trimmedSearchText : "") : newWordInitialSurface)
         }
         .sheet(
             isPresented: Binding(
@@ -347,22 +356,39 @@ struct WordsView: View {
         } message: {
             Text("Enter a name for the new list.")
         }
+        .alert("New List", isPresented: $isPromptingForSearchListName) {
+            TextField("List name", text: $pendingSearchListName)
+                .textInputAutocapitalization(.words)
+                .disableAutocorrection(true)
+
+            Button("Cancel", role: .cancel) {
+                pendingSearchListName = ""
+                pendingSearchRowForNewList = nil
+            }
+
+            Button("Save") {
+                createListAndAddSearchRow()
+            }
+            .disabled(pendingSearchListName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Enter a name for the new list.")
+        }
     }
 
     private var searchBar: some View {
         HStack(spacing: 0) {
             ZStack(alignment: .trailing) {
-                TextField("Search Japanese or English", text: $searchText)
+                TextField("Search Japanese or English", text: $searchViewModel.query)
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
                     .submitLabel(.search)
                     .padding(.leading, 12)
-                    .padding(.trailing, searchText.isEmpty ? 12 : 34)
+                    .padding(.trailing, searchViewModel.query.isEmpty ? 12 : 34)
                     .padding(.vertical, 10)
 
-                if searchText.isEmpty == false {
+                if searchViewModel.query.isEmpty == false {
                     Button {
-                        searchText = ""
+                        searchViewModel.clearSearch()
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .semibold))
@@ -384,7 +410,7 @@ struct WordsView: View {
                 .background(Color(uiColor: .separator))
                 .padding(.vertical, 6)
 
-            Picker("Search language", selection: $searchMode) {
+            Picker("Search language", selection: $searchViewModel.lookupMode) {
                 Text("JP").tag(DictionarySearchMode.japanese)
                 Text("EN").tag(DictionarySearchMode.english)
             }
@@ -409,23 +435,16 @@ struct WordsView: View {
 
     @ViewBuilder
     private var mainList: some View {
-        if hasActiveSearch {
-            List {
-                dictionarySection
+        if dictionaryHomeShelf == .favorites {
+            List(selection: $selectedWordIDs) {
+                savedSection
             }
             .appThemedScrollBackground()
         } else {
-            if dictionaryHomeShelf == .favorites {
-                List(selection: $selectedWordIDs) {
-                    savedSection
-                }
-                .appThemedScrollBackground()
-            } else {
-                List {
-                    historySection
-                }
-                .appThemedScrollBackground()
+            List {
+                historySection
             }
+            .appThemedScrollBackground()
         }
     }
 
@@ -449,37 +468,6 @@ struct WordsView: View {
         .pickerStyle(.segmented)
         .padding(.horizontal)
         .padding(.bottom, 8)
-    }
-
-    @ViewBuilder
-    private var dictionarySection: some View {
-        if lookup.isLoading {
-            HStack() {
-                ProgressView()
-                Text("Searching …")
-                    .foregroundStyle(Color.appTextSecondary)
-            }
-        } else if let error = lookup.errorMessage, error.isEmpty == false {
-            Text(error)
-                .foregroundStyle(Color.appTextSecondary)
-        } else if lookup.results.isEmpty {
-            Text("No matches found for \(trimmedSearchText).")
-                .foregroundStyle(Color.appTextSecondary)
-        } else {
-            ForEach(mergedLookupResults) { row in
-                NavigationLink {
-                    WordDefinitionView(
-                        request: .init(
-                            term: .init(surface: row.surface, kana: row.kana),
-                            context: .init(sentence: nil, lemmaCandidates: [], tokenPartOfSpeech: nil, tokenParts: []),
-                            metadata: .init(sourceNoteID: nil)
-                        )
-                    )
-                } label: {
-                    dictionaryRow(row)
-                }
-            }
-        }
     }
 
     @ViewBuilder
@@ -589,45 +577,6 @@ struct WordsView: View {
             }
             .tint(Color(uiColor: .systemBlue))
         }
-    }
-
-    private func dictionaryRow(_ row: DictionaryResultRow) -> some View {
-        let isSaved = isMergedRowAlreadySaved(row)
-        return HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(row.surface)
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                if let kana = row.kana, kana.isEmpty == false, kana != row.surface {
-                    Text(kana)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                if row.gloss.isEmpty == false {
-                    Text(row.gloss)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            Button {
-                toggleMergedRow(row)
-            } label: {
-                Image(systemName: isSaved ? "bookmark.circle.fill" : "bookmark.circle")
-                    .font(.headline)
-                    .frame(width: 34, height: 34)
-            }
-            .buttonStyle(.borderless)
-            .tint(isSaved ? .accentColor : .secondary)
-            .accessibilityLabel(isSaved ? "Remove from saved" : "Save")
-        }
-        .contentShape(Rectangle())
-        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
     }
 
     private func refreshSortedWords() {
@@ -752,53 +701,6 @@ struct WordsView: View {
         savedSurfaceKanaKeys = surfaceKanaKeys
     }
 
-    private func performLookup() async {
-        // If we programmatically change `searchMode` after a successful fallback
-        // lookup, SwiftUI will re-run the `.task(id:)`. Suppress that second run
-        // to avoid hitting SQLite twice for the same term.
-        if let suppressed = suppressedSearchTaskID {
-            if suppressed == searchTaskID {
-                suppressedSearchTaskID = nil
-                return
-            } else {
-                // Stale suppression key; clear it so it can't affect future searches.
-                suppressedSearchTaskID = nil
-            }
-        }
-
-        let term = trimmedSearchText
-
-        // If the user cleared the search, reset results immediately
-        // without waiting for the debounce delay.
-        if term.isEmpty {
-            await lookup.load(term: "", mode: searchMode)
-            return
-        }
-
-        // Debounce rapid typing so we don't hit SQLite on every keystroke.
-        // The surrounding `.task(id:)` cancels this work when the search
-        // text changes again, so only the final pause triggers a lookup.
-        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
-        if Task.isCancelled { return }
-
-        let initialMode = searchMode
-        await lookup.load(term: term, mode: initialMode)
-        if Task.isCancelled { return }
-
-        // If this mode returned zero results, try the other mode.
-        // Only switch the UI mode if it actually produces results.
-        if lookup.results.isEmpty {
-            let fallbackMode: DictionarySearchMode = (initialMode == .english) ? .japanese : .english
-            await lookup.load(term: term, mode: fallbackMode)
-            if Task.isCancelled { return }
-
-            if lookup.results.isEmpty == false {
-                suppressedSearchTaskID = makeSearchTaskID(mode: fallbackMode, term: term)
-                searchMode = fallbackMode
-            }
-        }
-    }
-
     private func isMergedRowAlreadySaved(_ row: DictionaryResultRow) -> Bool {
         let surface = row.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let reading = row.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -834,16 +736,6 @@ struct WordsView: View {
         store.add(surface: surface, kana: reading, meaning: meaning)
     }
 
-    private func displaySurface(for entry: DictionaryEntry) -> String {
-        if entry.kanji.isEmpty {
-            if let kana = entry.kana, kana.isEmpty == false {
-                return kana
-            }
-            return trimmedSearchText
-        }
-        return entry.kanji
-    }
-
     private func displayHeadword(for word: Word) -> String {
         let surface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -877,10 +769,6 @@ struct WordsView: View {
         value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
     }
 
-    private func firstGloss(for entry: DictionaryEntry) -> String {
-        entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
-    }
-
     private func hasSavedWord(surface: String, reading: String?) -> Bool {
         let targetSurface = kanaFoldToHiragana(surface)
         if let reading {
@@ -891,48 +779,11 @@ struct WordsView: View {
     }
 
     private var trimmedSearchText: String {
-        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func makeSearchTaskID(mode: DictionarySearchMode, term: String) -> String {
-        "\(mode == .english ? "EN" : "JP")|\(term)"
-    }
-
-    private var searchTaskID: String {
-        makeSearchTaskID(mode: searchMode, term: trimmedSearchText)
-    }
-
-    /// Merge dictionary lookup results that differ only by kana script (hiragana/katakana)
-    /// for the same headword, e.g. 僕 ぼく and 僕 ボク.
-    private var mergedLookupResults: [DictionaryResultRow] {
-        let entries = lookup.results
-        guard entries.isEmpty == false else { return [] }
-
-        var buckets: [String: DictionaryResultRow.Builder] = [:]
-        var orderedKeys: [String] = []
-
-        for entry in entries {
-            let surface = displaySurface(for: entry)
-            let rawKana = entry.kana?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let kanaKey = rawKana.isEmpty ? "" : kanaFoldToHiragana(rawKana)
-            let key = "\(surface)|\(kanaKey)"
-
-            if var builder = buckets[key] {
-                builder.entries.append(entry)
-                buckets[key] = builder
-            } else {
-                buckets[key] = DictionaryResultRow.Builder(surface: surface, kanaKey: kanaKey, entries: [entry])
-                orderedKeys.append(key)
-            }
-        }
-
-        return orderedKeys.compactMap { key in
-            buckets[key]?.build(firstGlossFor: firstGloss(for:))
-        }
+        searchViewModel.trimmedQuery
     }
 
     private var hasActiveSearch: Bool {
-        trimmedSearchText.isEmpty == false
+        searchViewModel.hasActiveSearch
     }
 
     private var isEditing: Bool {
@@ -986,6 +837,100 @@ struct WordsView: View {
         if let list = targetList {
             addSelection(toList: list.id)
         }
+    }
+
+    private func searchRowMatches(_ row: DictionaryResultRow) -> [Word] {
+        let surface = row.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reading = row.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return store.words.filter { word in
+            guard kanaFoldToHiragana(word.surface) == kanaFoldToHiragana(surface) else { return false }
+            if let reading, reading.isEmpty == false {
+                return kanaFoldToHiragana(word.kana ?? "") == kanaFoldToHiragana(reading)
+            }
+            return true
+        }
+    }
+
+    private func searchRowListOptions(for row: DictionaryResultRow) -> [SearchResultRow.ListOption] {
+        let assignedListIDs = Set(searchRowMatches(row).flatMap(\.listIDs))
+        return store.lists
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .map { SearchResultRow.ListOption(id: $0.id, name: $0.name, isSelected: assignedListIDs.contains($0.id)) }
+    }
+
+    private func ensureSavedWordForSearchRow(_ row: DictionaryResultRow) -> Word? {
+        if let existing = searchRowMatches(row).first {
+            return existing
+        }
+        let meaning = row.gloss.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard row.surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false, meaning.isEmpty == false else { return nil }
+        store.add(surface: row.surface, kana: row.kana, meaning: meaning)
+        return searchRowMatches(row).first
+    }
+
+    private func addSearchRow(_ row: DictionaryResultRow, toList listID: UUID) {
+        guard let word = ensureSavedWordForSearchRow(row) else { return }
+        var next = Set(word.listIDs)
+        next.insert(listID)
+        store.setLists(forWordID: word.id, listIDs: Array(next))
+    }
+
+    private func promptCreateListForSearchRow(_ row: DictionaryResultRow) {
+        pendingSearchRowForNewList = row
+        pendingSearchListName = ""
+        isPromptingForSearchListName = true
+    }
+
+    private func createListAndAddSearchRow() {
+        defer {
+            pendingSearchRowForNewList = nil
+            pendingSearchListName = ""
+        }
+        guard let row = pendingSearchRowForNewList else { return }
+        let trimmed = pendingSearchListName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+
+        let normalized = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let targetList: WordList? = {
+            if let created = store.createList(name: trimmed) {
+                return created
+            }
+            return store.lists.first(where: { $0.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current) == normalized })
+        }()
+
+        if let list = targetList {
+            addSearchRow(row, toList: list.id)
+        }
+    }
+
+    private func openNewCard(for row: DictionaryResultRow) {
+        newWordInitialSurface = row.surface
+        showNewWordSheet = true
+    }
+
+    private func copySearchRow(_ row: DictionaryResultRow) {
+        let payload: String
+        if let kana = row.kana, kana.isEmpty == false {
+            payload = "\(row.surface)（\(kana)）\n\(row.gloss)"
+        } else {
+            payload = "\(row.surface)\n\(row.gloss)"
+        }
+        UIPasteboard.general.string = payload
+    }
+
+    private func viewHistory(for row: DictionaryResultRow) {
+        viewedHistory.record(surface: row.surface, kana: row.kana, meaning: row.gloss)
+        dictionaryHomeShelfRaw = DictionaryHomeShelf.history.rawValue
+        searchViewModel.clearSearch()
+    }
+
+    private func recordSearchRowOpen(_ row: DictionaryResultRow) {
+        viewedHistory.record(surface: row.surface, kana: row.kana, meaning: row.gloss)
+    }
+
+    private func isSearchRowCustom(_ row: DictionaryResultRow) -> Bool {
+        searchRowMatches(row).contains { ($0.dictionarySurface?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }
     }
 }
 
