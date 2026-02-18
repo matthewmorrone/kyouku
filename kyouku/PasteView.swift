@@ -3,6 +3,7 @@ import UIKit
 import Foundation
 import AVFoundation
 import UniformTypeIdentifiers
+import VisionKit
 
 struct PasteView: View {
     @EnvironmentObject var notes: NotesStore
@@ -46,6 +47,7 @@ struct PasteView: View {
     @State private var toastDismissWorkItem: DispatchWorkItem? = nil
     @State private var isKaraokeAudioImporterPresented: Bool = false
     @State private var isGeneratingKaraokeAlignment: Bool = false
+    @State private var isCameraTextScannerPresented: Bool = false
 
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
     @State var incrementalPopupHits: [IncrementalLookupHit] = []
@@ -144,6 +146,8 @@ struct PasteView: View {
     @AppStorage(CommonParticleSettings.storageKey) private var commonParticlesRaw: String = CommonParticleSettings.defaultRawValue
     @AppStorage("debugDisableDictionaryPopup") private var debugDisableDictionaryPopup: Bool = false
     @AppStorage("debugPasteDragToMoveWords") private var debugPasteDragToMoveWords: Bool = false
+    @AppStorage("rubyDebugRects") private var rubyDebugRects: Bool = false
+    @AppStorage("rubyHeadwordDebugRects") private var rubyHeadwordDebugRects: Bool = false
 
     private var scratchNoteID: UUID {
         if let cached = UUID(uuidString: scratchNoteIDRaw) {
@@ -330,6 +334,11 @@ struct PasteView: View {
             allowedContentTypes: [UTType.audio],
             onCompletion: handleKaraokeAudioImport
         )
+        .sheet(isPresented: $isCameraTextScannerPresented) {
+            CameraTextScannerSheet { detectedText in
+                createNoteFromDetectedCameraText(detectedText)
+            }
+        }
     }
 
     private var coreContent: some View {
@@ -1141,6 +1150,9 @@ struct PasteView: View {
             onResetSpans: {
                 resetAllCustomSpans()
             },
+            onCameraOCRTap: {
+                openCameraTextScanner()
+            },
             onChooseKaraokeAudio: {
                 chooseKaraokeAudio()
             },
@@ -1267,6 +1279,40 @@ struct PasteView: View {
         } else {
             showToast("Clipboard is empty")
         }
+    }
+
+    private func openCameraTextScanner() {
+        guard DataScannerViewController.isSupported else {
+            showToast("Camera text scanning is not supported on this device")
+            return
+        }
+        guard DataScannerViewController.isAvailable else {
+            showToast("Camera text scanning is currently unavailable")
+            return
+        }
+        isCameraTextScannerPresented = true
+    }
+
+    private func createNoteFromDetectedCameraText(_ rawText: String) {
+        let scannedText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard scannedText.isEmpty == false else {
+            showToast("No text detected")
+            return
+        }
+
+        let resolvedTitle = inferredTitle(from: scannedText)
+        notes.addNote(title: resolvedTitle, text: scannedText)
+        if let newest = notes.notes.first {
+            currentNote = newest
+            noteTitleInput = newest.title ?? ""
+            hasManuallyEditedTitle = (newest.title?.isEmpty == false)
+            inputText = scannedText
+            router.noteToOpen = newest
+            router.pasteShouldBeginEditing = true
+            router.selectedTab = .paste
+        }
+        PasteBufferStore.save(scannedText)
+        showToast("Added scanned text to a new note")
     }
 
     private func newNoteFromClipboard() {

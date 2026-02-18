@@ -7,6 +7,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
     let navigationTitleText: String
 
     let onResetSpans: () -> Void
+    let onCameraOCRTap: () -> Void
     let onChooseKaraokeAudio: () -> Void
     let isKaraokeBusy: Bool
 
@@ -18,6 +19,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         titleEditDraft: Binding<String>,
         navigationTitleText: String,
         onResetSpans: @escaping () -> Void,
+        onCameraOCRTap: @escaping () -> Void,
         onChooseKaraokeAudio: @escaping () -> Void,
         isKaraokeBusy: Bool,
         showTokensSheet: Binding<Bool>,
@@ -27,6 +29,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         self._titleEditDraft = titleEditDraft
         self.navigationTitleText = navigationTitleText
         self.onResetSpans = onResetSpans
+        self.onCameraOCRTap = onCameraOCRTap
         self.onChooseKaraokeAudio = onChooseKaraokeAudio
         self.isKaraokeBusy = isKaraokeBusy
         self._showTokensSheet = showTokensSheet
@@ -53,6 +56,14 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             HStack(spacing: 12) {
                 Button {
+                    onCameraOCRTap()
+                } label: {
+                    Image(systemName: "camera.viewfinder")
+                }
+                .accessibilityLabel("Capture text with camera")
+                .accessibilityHint("Opens the iPhone camera and scans text")
+
+                Button {
                     onChooseKaraokeAudio()
                 } label: {
                     if isKaraokeBusy {
@@ -64,14 +75,14 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                 }
                 .accessibilityLabel(isKaraokeBusy ? "Generating karaoke sync" : "Choose Karaoke Audio")
                 .disabled(isKaraokeBusy)
-
+                /*
                 Button {
                     onResetSpans()
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
                 }
                 .accessibilityLabel("Reset Spans")
-
+                */
                 Button {
                     showTokensSheet = true
                 } label: {
