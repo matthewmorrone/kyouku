@@ -8,8 +8,12 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
 
     let onResetSpans: () -> Void
     let onCameraOCRTap: () -> Void
-    let onChooseKaraokeAudio: () -> Void
+    let onKaraokePrimaryTap: () -> Void
+    let onClearKaraoke: () -> Void
     let isKaraokeBusy: Bool
+    let karaokeProgress: Double
+    let isKaraokeReady: Bool
+    let isKaraokePlaying: Bool
 
     @Binding var showTokensSheet: Bool
     let tokenListSheet: () -> TokenListSheet
@@ -20,8 +24,12 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         navigationTitleText: String,
         onResetSpans: @escaping () -> Void,
         onCameraOCRTap: @escaping () -> Void,
-        onChooseKaraokeAudio: @escaping () -> Void,
+        onKaraokePrimaryTap: @escaping () -> Void,
+        onClearKaraoke: @escaping () -> Void,
         isKaraokeBusy: Bool,
+        karaokeProgress: Double,
+        isKaraokeReady: Bool,
+        isKaraokePlaying: Bool,
         showTokensSheet: Binding<Bool>,
         tokenListSheet: @escaping () -> TokenListSheet
     ) {
@@ -30,8 +38,12 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         self.navigationTitleText = navigationTitleText
         self.onResetSpans = onResetSpans
         self.onCameraOCRTap = onCameraOCRTap
-        self.onChooseKaraokeAudio = onChooseKaraokeAudio
+        self.onKaraokePrimaryTap = onKaraokePrimaryTap
+        self.onClearKaraoke = onClearKaraoke
         self.isKaraokeBusy = isKaraokeBusy
+        self.karaokeProgress = karaokeProgress
+        self.isKaraokeReady = isKaraokeReady
+        self.isKaraokePlaying = isKaraokePlaying
         self._showTokensSheet = showTokensSheet
         self.tokenListSheet = tokenListSheet
     }
@@ -64,17 +76,42 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                 .accessibilityHint("Opens the iPhone camera and scans text")
 
                 Button {
-                    onChooseKaraokeAudio()
+                    onKaraokePrimaryTap()
                 } label: {
-                    if isKaraokeBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
+                    ZStack {
                         Image(systemName: "waveform")
+
+                        if isKaraokeBusy {
+                            Circle()
+                                .fill(Color.accentColor.opacity(0.2))
+                                .frame(width: 18, height: 18)
+                            Circle()
+                                .trim(from: 0, to: min(max(karaokeProgress, 0), 1))
+                                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                                .frame(width: 20, height: 20)
+                                .rotationEffect(.degrees(-90))
+                        } else if isKaraokeReady {
+                            Image(systemName: isKaraokePlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 8, weight: .bold))
+                                .padding(3)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .offset(x: 8, y: 8)
+                        }
                     }
                 }
-                .accessibilityLabel(isKaraokeBusy ? "Generating karaoke sync" : "Choose Karaoke Audio")
+                .accessibilityLabel(
+                    isKaraokeBusy
+                    ? "Generating karaoke sync"
+                    : (isKaraokeReady
+                       ? (isKaraokePlaying ? "Pause karaoke" : "Play karaoke")
+                       : "Choose Karaoke Audio")
+                )
                 .disabled(isKaraokeBusy)
+                .onLongPressGesture(minimumDuration: 0.45) {
+                    guard isKaraokeReady else { return }
+                    onClearKaraoke()
+                }
+
                 Button {
                     onResetSpans()
                 } label: {

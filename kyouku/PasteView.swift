@@ -48,6 +48,11 @@ struct PasteView: View {
     @State private var isKaraokeAudioImporterPresented: Bool = false
     @State private var isGeneratingKaraokeAlignment: Bool = false
     @State private var isCameraTextScannerPresented: Bool = false
+    @State private var karaokeGenerationProgress: Double = 0
+    @State private var karaokeProgressTask: Task<Void, Never>? = nil
+    @State private var karaokeAudioPlayer: AVAudioPlayer? = nil
+    @State private var karaokePlaybackTimer: Timer? = nil
+    @State private var karaokeCurrentRange: NSRange? = nil
 
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
     @State var incrementalPopupHits: [IncrementalLookupHit] = []
@@ -466,6 +471,10 @@ struct PasteView: View {
                 NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
                 furiganaTaskHandle?.cancel()
                 SpeechManager.shared.stop(sessionID: noteSpeechSessionID)
+                karaokeAudioPlayer?.stop()
+                stopKaraokePlaybackTimer()
+                stopKaraokeProgressSimulation()
+                karaokeCurrentRange = nil
             }
 
         let inputHandling = base
@@ -651,6 +660,9 @@ struct PasteView: View {
                 clearSelection()
                 overrideSignature = computeOverrideSignature()
                 updateCustomizedRanges()
+                karaokeAudioPlayer?.stop()
+                stopKaraokePlaybackTimer()
+                karaokeCurrentRange = nil
                 if incrementalLookupEnabled {
                     incrementalLookupTask?.cancel()
                     isIncrementalPopupVisible = false
@@ -709,10 +721,14 @@ struct PasteView: View {
     private var editorColumn: some View {
         // Precompute helpers outside of the ViewBuilder to avoid non-View statements inside VStack
         let speechOverlay = noteSpeechOverlay(for: inputText)
+        let karaokeOverlay = karaokePlaybackOverlay(for: inputText)
         let extraOverlays: [RubyText.TokenOverlay] = {
             var overlays: [RubyText.TokenOverlay] = incrementalLookupEnabled ? savedWordOverlays : []
             if let speechOverlay {
                 overlays.append(speechOverlay)
+            }
+            if let karaokeOverlay {
+                overlays.append(karaokeOverlay)
             }
             return overlays
         }()
@@ -929,6 +945,29 @@ struct PasteView: View {
         isKaraokeAudioImporterPresented = true
     }
 
+    private func handleKaraokePrimaryAction() {
+        if karaokePlaybackAvailable {
+            toggleKaraokePlayback()
+        } else {
+            chooseKaraokeAudio()
+        }
+    }
+
+    private var karaokeAlignmentForCurrentNote: KaraokeAlignment? {
+        currentNote?.karaokeAlignment
+    }
+
+    private var karaokePlaybackAvailable: Bool {
+        guard let note = currentNote else { return false }
+        guard let fileName = note.karaokeAudioFileName, fileName.isEmpty == false else { return false }
+        guard let alignment = note.karaokeAlignment else { return false }
+        return alignment.segments.isEmpty == false && karaokeAudioURL(fileName: fileName) != nil
+    }
+
+    private var karaokeIsPlaying: Bool {
+        karaokeAudioPlayer?.isPlaying == true
+    }
+
     private func handleKaraokeAudioImport(_ result: Result<URL, Error>) {
         switch result {
         case .failure(let error):
@@ -967,16 +1006,24 @@ struct PasteView: View {
         guard let note = ensureCurrentNoteForKaraoke() else { return }
 
         isGeneratingKaraokeAlignment = true
+        karaokeGenerationProgress = 0.05
+        startKaraokeProgressSimulation()
         showToast("Generating karaoke sync…")
-        defer { isGeneratingKaraokeAlignment = false }
+        defer {
+            isGeneratingKaraokeAlignment = false
+            stopKaraokeProgressSimulation()
+            karaokeGenerationProgress = 0
+        }
 
         do {
             let persistedAudioURL = try persistImportedAudio(importedURL, noteID: note.id)
+            karaokeGenerationProgress = max(karaokeGenerationProgress, 0.22)
             let alignment = try await KaraokeSpeechAligner.align(
                 lyrics: inputText,
                 audioURL: persistedAudioURL,
                 localeIdentifier: "ja-JP"
             )
+            karaokeGenerationProgress = 1.0
 
             var updated = notes.notes.first(where: { $0.id == note.id }) ?? note
             updated.text = inputText
@@ -998,6 +1045,134 @@ struct PasteView: View {
             }
         } catch {
             showToast(error.localizedDescription)
+        }
+    }
+
+    private func startKaraokeProgressSimulation() {
+        karaokeProgressTask?.cancel()
+        karaokeProgressTask = Task { @MainActor in
+            while isGeneratingKaraokeAlignment {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard Task.isCancelled == false else { return }
+                karaokeGenerationProgress = min(0.92, karaokeGenerationProgress + 0.02)
+            }
+        }
+    }
+
+    private func stopKaraokeProgressSimulation() {
+        karaokeProgressTask?.cancel()
+        karaokeProgressTask = nil
+    }
+
+    private func karaokeAudioURL(fileName: String) -> URL? {
+        let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return nil }
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        return docs
+            .appendingPathComponent("karaoke-audio", isDirectory: true)
+            .appendingPathComponent(trimmed, isDirectory: false)
+    }
+
+    private func toggleKaraokePlayback() {
+        guard karaokePlaybackAvailable else {
+            showToast("Generate karaoke sync first")
+            return
+        }
+
+        if karaokeIsPlaying {
+            karaokeAudioPlayer?.pause()
+            stopKaraokePlaybackTimer()
+            return
+        }
+
+        guard let note = currentNote,
+              let fileName = note.karaokeAudioFileName,
+              let audioURL = karaokeAudioURL(fileName: fileName) else {
+            showToast("Karaoke audio file not found")
+            return
+        }
+
+        do {
+            if karaokeAudioPlayer == nil || karaokeAudioPlayer?.url != audioURL {
+                karaokeAudioPlayer = try AVAudioPlayer(contentsOf: audioURL)
+                karaokeAudioPlayer?.prepareToPlay()
+            }
+            karaokeAudioPlayer?.play()
+            startKaraokePlaybackTimer()
+        } catch {
+            showToast(error.localizedDescription)
+        }
+    }
+
+    private func clearKaraokeData() {
+        guard let note = currentNote else {
+            showToast("No karaoke data to clear")
+            return
+        }
+
+        karaokeAudioPlayer?.stop()
+        stopKaraokePlaybackTimer()
+        karaokeCurrentRange = nil
+
+        if let fileName = note.karaokeAudioFileName,
+           let url = karaokeAudioURL(fileName: fileName),
+           FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        var updated = note
+        updated.karaokeAudioFileName = nil
+        updated.karaokeAlignment = nil
+        notes.updateNote(updated)
+        currentNote = updated
+        showToast("Cleared karaoke audio and sync")
+    }
+
+    private func startKaraokePlaybackTimer() {
+        stopKaraokePlaybackTimer()
+        karaokePlaybackTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            Task { @MainActor in
+                guard let player = karaokeAudioPlayer else {
+                    stopKaraokePlaybackTimer()
+                    karaokeCurrentRange = nil
+                    return
+                }
+
+                if player.isPlaying == false {
+                    if player.currentTime >= player.duration {
+                        karaokeCurrentRange = nil
+                    }
+                    stopKaraokePlaybackTimer()
+                    return
+                }
+
+                updateKaraokeHighlight(at: player.currentTime)
+            }
+        }
+        if let timer = karaokePlaybackTimer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    private func stopKaraokePlaybackTimer() {
+        karaokePlaybackTimer?.invalidate()
+        karaokePlaybackTimer = nil
+    }
+
+    private func updateKaraokeHighlight(at seconds: TimeInterval) {
+        guard let alignment = karaokeAlignmentForCurrentNote else {
+            karaokeCurrentRange = nil
+            return
+        }
+
+        if let active = alignment.segments.first(where: { seconds >= $0.startSeconds && seconds < $0.endSeconds }) {
+            karaokeCurrentRange = active.textRange.nsRange
+            return
+        }
+
+        if let last = alignment.segments.last,
+           seconds >= last.endSeconds {
+            karaokeCurrentRange = nil
         }
     }
 
@@ -1160,10 +1335,16 @@ struct PasteView: View {
             onCameraOCRTap: {
                 openCameraTextScanner()
             },
-            onChooseKaraokeAudio: {
-                chooseKaraokeAudio()
+            onKaraokePrimaryTap: {
+                handleKaraokePrimaryAction()
+            },
+            onClearKaraoke: {
+                clearKaraokeData()
             },
             isKaraokeBusy: isGeneratingKaraokeAlignment,
+            karaokeProgress: karaokeGenerationProgress,
+            isKaraokeReady: karaokePlaybackAvailable,
+            isKaraokePlaying: karaokeIsPlaying,
             showTokensSheet: $showTokensPopover,
             tokenListSheet: {
                 PasteTokenListSheet(
@@ -1637,7 +1818,16 @@ struct PasteView: View {
         return tokenOverlay(for: text, range: range)
     }
 
+    private func karaokePlaybackOverlay(for text: String) -> RubyText.TokenOverlay? {
+        guard let range = karaokeCurrentRange else { return nil }
+        return tokenOverlay(for: text, range: range, color: .systemPink)
+    }
+
     private func tokenOverlay(for text: String, range: NSRange) -> RubyText.TokenOverlay? {
+        tokenOverlay(for: text, range: range, color: .systemOrange)
+    }
+
+    private func tokenOverlay(for text: String, range: NSRange, color: UIColor) -> RubyText.TokenOverlay? {
         let ns = text as NSString
         guard range.location != NSNotFound, range.length > 0 else { return nil }
         guard NSMaxRange(range) <= ns.length else { return nil }
@@ -1646,7 +1836,6 @@ struct PasteView: View {
 
         // `TokenOverlay` maps to `.foregroundColor` (not background highlight),
         // so choose a high-contrast color that stays readable in dark mode.
-        let color = UIColor.systemOrange
         return RubyText.TokenOverlay(range: range, color: color)
     }
 

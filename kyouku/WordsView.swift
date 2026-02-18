@@ -35,21 +35,27 @@ struct WordsView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                SearchResultsView(
-                    viewModel: searchViewModel,
-                    showCameraButton: false,
-                    onCameraTap: nil,
-                    listOptionsForRow: { row in searchRowListOptions(for: row) },
-                    isFavorite: { row in isMergedRowAlreadySaved(row) },
-                    isCustom: { row in isSearchRowCustom(row) },
-                    onToggleFavorite: { row in toggleMergedRow(row) },
-                    onAddToList: { row, listID in addSearchRow(row, toList: listID) },
-                    onCreateListAndAdd: { row in promptCreateListForSearchRow(row) },
-                    onAddNewCard: { row in openNewCard(for: row) },
-                    onCopy: { row in copySearchRow(row) },
-                    onViewHistory: { row in viewHistory(for: row) },
-                    onOpenResult: { row in recordSearchRowOpen(row) }
-                )
+                if hasActiveSearch {
+                    SearchResultsView(
+                        viewModel: searchViewModel,
+                        showCameraButton: false,
+                        onCameraTap: nil,
+                        listOptionsForRow: { row in searchRowListOptions(for: row) },
+                        isFavorite: { row in isMergedRowAlreadySaved(row) },
+                        isCustom: { row in isSearchRowCustom(row) },
+                        onToggleFavorite: { row in toggleMergedRow(row) },
+                        onAddToList: { row, listID in addSearchRow(row, toList: listID) },
+                        onCreateListAndAdd: { row in promptCreateListForSearchRow(row) },
+                        onAddNewCard: { row in openNewCard(for: row) },
+                        onCopy: { row in copySearchRow(row) },
+                        onViewHistory: { row in viewHistory(for: row) },
+                        onOpenResult: { row in recordSearchRowOpen(row) }
+                    )
+                } else {
+                    searchBar
+                    dictionaryHomeToggle
+                    mainList
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .environment(\.editMode, $editModeState)
