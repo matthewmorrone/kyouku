@@ -75,14 +75,12 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                 }
                 .accessibilityLabel(isKaraokeBusy ? "Generating karaoke sync" : "Choose Karaoke Audio")
                 .disabled(isKaraokeBusy)
-                /*
                 Button {
                     onResetSpans()
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
                 }
                 .accessibilityLabel("Reset Spans")
-                */
                 Button {
                     showTokensSheet = true
                 } label: {
