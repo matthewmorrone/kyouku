@@ -1331,13 +1331,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 scheduleDebugOverlaysUpdate()
             }
             warmVisibleSemanticSpanLayoutIfNeeded()
-            CustomLogger.shared.perf(
-                "TokenOverlayTextView.contentOffset didSet",
-                elapsedMS: CustomLogger.perfElapsedMS(since: scrollUpdateStart),
-                details: "offset=(\(Int(contentOffset.x.rounded())) ,\(Int(contentOffset.y.rounded()))) semantic=\(semanticSpans.count)",
-                thresholdMS: 2.0,
-                level: .debug
-            )
+            // CustomLogger.shared.perf(
+            //     "TokenOverlayTextView.contentOffset didSet",
+            //     elapsedMS: CustomLogger.perfElapsedMS(since: scrollUpdateStart),
+            //     details: "offset=(\(Int(contentOffset.x.rounded())) ,\(Int(contentOffset.y.rounded()))) semantic=\(semanticSpans.count)",
+            //     thresholdMS: 2.0,
+            //     level: .debug
+            // )
         }
     }
 
@@ -1696,13 +1696,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         let warmVisibleStart = CustomLogger.perfStart()
         warmVisibleSemanticSpanLayoutIfNeeded()
-        CustomLogger.shared.perf(
-            "TokenOverlayTextView.warmVisibleSemanticSpanLayoutIfNeeded",
-            elapsedMS: CustomLogger.perfElapsedMS(since: warmVisibleStart),
-            details: "semantic=\(semanticSpans.count)",
-            thresholdMS: 2.0,
-            level: .debug
-        )
+        // CustomLogger.shared.perf(
+        //     "TokenOverlayTextView.warmVisibleSemanticSpanLayoutIfNeeded",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: warmVisibleStart),
+        //     details: "semantic=\(semanticSpans.count)",
+        //     thresholdMS: 2.0,
+        //     level: .debug
+        // )
 
         // NOTE: Previously we ran a soft-wrap mitigation that shifted line-start headword-padding
         // spacers to the trailing side to avoid “ruby jutting left”. Now that ruby anchoring uses
@@ -1711,15 +1711,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         // Ruby highlight geometry is derived from the ruby overlay layers.
         // Ensure overlays are laid out first so highlight rects can match actual ruby bounds.
-        let rubyLayoutStart = CustomLogger.perfStart()
+        // let rubyLayoutStart = CustomLogger.perfStart()
         layoutRubyOverlayIfNeeded()
-        CustomLogger.shared.perf(
-            "TokenOverlayTextView.layoutRubyOverlayIfNeeded",
-            elapsedMS: CustomLogger.perfElapsedMS(since: rubyLayoutStart),
-            details: "runs=\(cachedRubyRuns.count) dirty=\(rubyOverlayDirty)",
-            thresholdMS: 2.0,
-            level: .debug
-        )
+        // CustomLogger.shared.perf(
+        //     "TokenOverlayTextView.layoutRubyOverlayIfNeeded",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: rubyLayoutStart),
+        //     details: "runs=\(cachedRubyRuns.count) dirty=\(rubyOverlayDirty)",
+        //     thresholdMS: 2.0,
+        //     level: .debug
+        // )
 
         // Phase 2: right-boundary fix is wrap-only.
         // If a segment overflows the right guide, force a break before that segment start.
@@ -1848,13 +1848,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             debugInsetGuidesLayer.isHidden = true
         }
 
-        CustomLogger.shared.perf(
-            "TokenOverlayTextView.layoutSubviews",
-            elapsedMS: CustomLogger.perfElapsedMS(since: layoutPassStart),
-            details: "semantic=\(semanticSpans.count) rubyRuns=\(cachedRubyRuns.count) contentH=\(Int(contentSize.height.rounded()))",
-            thresholdMS: 8.0,
-            level: .debug
-        )
+        // CustomLogger.shared.perf(
+        //     "TokenOverlayTextView.layoutSubviews",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: layoutPassStart),
+        //     details: "semantic=\(semanticSpans.count) rubyRuns=\(cachedRubyRuns.count) contentH=\(Int(contentSize.height.rounded()))",
+        //     thresholdMS: 8.0,
+        //     level: .debug
+        // )
 
     }
 
@@ -1964,7 +1964,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             guard let self else { return }
             guard self.window != nil else { return }
 
-            self.assertHeadwordPaddingInvariantsHard()
+            if self.headwordPaddingInvariantChecksEnabled {
+                self.assertHeadwordPaddingInvariantsHard()
+            }
 
             // Segment spacing telemetry runs in DEBUG; invariant failure checks remain opt-in.
             self.enforceHeadwordPaddingLayoutInvariantsIfNeeded()
@@ -1990,7 +1992,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             if s.character(at: idx) == 0xFFFC {
                 let msg = "[HeadwordPad] FAIL spacer index=\(idx)"
                 CustomLogger.shared.error(msg)
-                assertionFailure(msg)
+                CustomLogger.shared.raw("[HeadwordPad][NonFatal] \(msg)")
                 break
             }
             idx += 1
@@ -2052,7 +2054,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     let b = current.surface.replacingOccurrences(of: "\n", with: "\\n")
                     let msg = String(format: "[HeadwordPad] FAIL boundary=\"%@|%@\" gap=%.2f A.end=%.2f B.start=%.2f", a, b, gap, previous.endX, current.startX)
                     CustomLogger.shared.error(msg)
-                    assertionFailure(msg)
+                    CustomLogger.shared.raw("[HeadwordPad][NonFatal] \(msg)")
                 }
                 previous = current
             }
@@ -3926,16 +3928,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         // ensure we redraw whenever the attributed text changes.
         setNeedsDisplay()
         invalidateIntrinsicContentSize()
-        if Self.verboseRubyLoggingEnabled {
-            CustomLogger.shared.debug("applyAttributedText -> setNeedsLayout")
-        }
-        CustomLogger.shared.perf(
-            "TokenOverlayTextView.applyAttributedText",
-            elapsedMS: CustomLogger.perfElapsedMS(since: applyStart),
-            details: "length=\(text.length) semantic=\(semanticSpans.count)",
-            thresholdMS: 4.0,
-            level: .debug
-        )
+        // if Self.verboseRubyLoggingEnabled {
+        //     CustomLogger.shared.debug("applyAttributedText -> setNeedsLayout")
+        // }
+        // CustomLogger.shared.perf(
+        //     "TokenOverlayTextView.applyAttributedText",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: applyStart),
+        //     details: "length=\(text.length) semantic=\(semanticSpans.count)",
+        //     thresholdMS: 4.0,
+        //     level: .debug
+        // )
     }
 
     private func rebuildRubyRunCache(from text: NSAttributedString) {

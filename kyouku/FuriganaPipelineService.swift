@@ -167,11 +167,11 @@ struct FuriganaPipelineService {
                 )
                 spans = stage2.annotatedSpans
                 semantic = stage2.semanticSpans
-                CustomLogger.shared.perf(
-                    "FuriganaPipeline.computeStage2",
-                    elapsedMS: CustomLogger.perfElapsedMS(since: stage2Start),
-                    details: "context=\(input.context) textLen=\(input.text.utf16.count) annotated=\(spans?.count ?? 0) semantic=\(semantic.count)"
-                )
+                // CustomLogger.shared.perf(
+                //     "FuriganaPipeline.computeStage2",
+                //     elapsedMS: CustomLogger.perfElapsedMS(since: stage2Start),
+                //     details: "context=\(input.context) textLen=\(input.text.utf16.count) annotated=\(spans?.count ?? 0) semantic=\(semantic.count)"
+                // )
             } catch {
                 CustomLogger.shared.error("\(input.context) span computation failed: \(String(describing: error))")
                 return Result(spans: nil, semanticSpans: [], attributedString: NSAttributedString(string: input.text))
@@ -187,12 +187,12 @@ struct FuriganaPipelineService {
         // Newlines are hard boundaries for selection + dictionary lookup.
         let linebreakSplitStart = CustomLogger.perfStart()
         let resolvedSemantic = Self.splitSemanticSpansOnLineBreaks(text: input.text, spans: semantic)
-        CustomLogger.shared.perf(
-            "FuriganaPipeline.splitSemanticSpansOnLineBreaks",
-            elapsedMS: CustomLogger.perfElapsedMS(since: linebreakSplitStart),
-            details: "context=\(input.context) in=\(semantic.count) out=\(resolvedSemantic.count)"
-        )
-        log("S50", stageLine("SemanticGrouping(linebreak)", describeSemantic(resolvedSemantic)))
+        // CustomLogger.shared.perf(
+        //     "FuriganaPipeline.splitSemanticSpansOnLineBreaks",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: linebreakSplitStart),
+        //     details: "context=\(input.context) in=\(semantic.count) out=\(resolvedSemantic.count)"
+        // )
+        // log("S50", stageLine("SemanticGrouping(linebreak)", describeSemantic(resolvedSemantic)))
 
         // Tail-end post pass: attempt to merge adjacent semantic spans into a single
         // lexicon-valid surface form when safe.
@@ -203,7 +203,7 @@ struct FuriganaPipelineService {
         let mergedSemantic: [SemanticSpan]
         if input.skipTailSemanticMerge {
             mergedSemantic = resolvedSemantic
-            log("S50", stageLine("SemanticGrouping(tail)", "skipped"))
+            // log("S50", stageLine("SemanticGrouping(tail)", "skipped"))
         } else {
             let tailMergeStart = CustomLogger.perfStart()
             mergedSemantic = await Self.mergeAdjacentSemanticSpansIfValid(
@@ -212,12 +212,12 @@ struct FuriganaPipelineService {
                 hardCuts: input.hardCuts,
                 context: input.context
             )
-            CustomLogger.shared.perf(
-                "FuriganaPipeline.mergeAdjacentSemanticSpansIfValid",
-                elapsedMS: CustomLogger.perfElapsedMS(since: tailMergeStart),
-                details: "context=\(input.context) in=\(resolvedSemantic.count) out=\(mergedSemantic.count)"
-            )
-            log("S50", stageLine("SemanticGrouping(tail)", describeSemantic(mergedSemantic)))
+            // CustomLogger.shared.perf(
+                // "FuriganaPipeline.mergeAdjacentSemanticSpansIfValid",
+                // elapsedMS: CustomLogger.perfElapsedMS(since: tailMergeStart),
+                // details: "context=\(input.context) in=\(resolvedSemantic.count) out=\(mergedSemantic.count)"
+            // )
+            // log("S50", stageLine("SemanticGrouping(tail)", describeSemantic(mergedSemantic)))
         }
 
         var attributed: NSAttributedString?
@@ -242,15 +242,15 @@ struct FuriganaPipelineService {
                     knownSurfaceKeys: input.knownWordSurfaceKeys
                 )
             }
-            CustomLogger.shared.perf(
-                "FuriganaPipeline.project",
-                elapsedMS: CustomLogger.perfElapsedMS(since: projectStart),
-                details: "context=\(input.context) textLen=\(input.text.utf16.count) semantic=\(mergedSemantic.count) attributed=\(attributed?.length ?? 0)"
-            )
-            log("R10", stageLine("RubyProjection(basis)", describeSemantic(mergedSemantic)))
+            // CustomLogger.shared.perf(
+            //     "FuriganaPipeline.project",
+            //     elapsedMS: CustomLogger.perfElapsedMS(since: projectStart),
+            //     details: "context=\(input.context) textLen=\(input.text.utf16.count) semantic=\(mergedSemantic.count) attributed=\(attributed?.length ?? 0)"
+            // )
+            // log("R10", stageLine("RubyProjection(basis)", describeSemantic(mergedSemantic)))
         } else {
             attributed = nil
-            log("R10", stageLine("RubyProjection", "skipped (showFurigana false)"))
+            // log("R10", stageLine("RubyProjection", "skipped (showFurigana false)"))
         }
 
         if input.context == "PasteView" {
@@ -260,14 +260,14 @@ struct FuriganaPipelineService {
             )
         }
 
-        log("OUT", stageLine("FinalSemantic", describeSemantic(mergedSemantic)))
-        log("OUT", stageLine("FinalAnnotated", splitDescription(resolvedSpans.map { $0.span.surface })))
+        // log("OUT", stageLine("FinalSemantic", describeSemantic(mergedSemantic)))
+        // log("OUT", stageLine("FinalAnnotated", splitDescription(resolvedSpans.map { $0.span.surface })))
 
-        CustomLogger.shared.perf(
-            "FuriganaPipeline.render",
-            elapsedMS: CustomLogger.perfElapsedMS(since: renderStart),
-            details: "context=\(input.context) textLen=\(input.text.utf16.count) annotated=\(resolvedSpans.count) semantic=\(mergedSemantic.count) attributed=\(attributed?.length ?? 0)"
-        )
+        // CustomLogger.shared.perf(
+        //     "FuriganaPipeline.render",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: renderStart),
+        //     details: "context=\(input.context) textLen=\(input.text.utf16.count) annotated=\(resolvedSpans.count) semantic=\(mergedSemantic.count) attributed=\(attributed?.length ?? 0)"
+        // )
 
         return Result(spans: resolvedSpans, semanticSpans: mergedSemantic, attributedString: attributed)
     }
@@ -592,16 +592,16 @@ struct FuriganaPipelineService {
             }
         }
 
-        let mergedSpansDelta = spans.count - out.count
-        if traceEnabled, mergedSpansDelta > 0 {
-            let full = "[PipelineTailMerge] runs=\(mergedRuns) delta=\(mergedSpansDelta) spans \(spans.count)->\(out.count) context=\(context)"
-            CustomLogger.shared.debug(full)
-            NSLog("%@", full)
-
-            // User-requested: full post-pass dump.
-            // Keep it on NSLog to avoid duplicating huge output in multiple sinks.
-            NSLog("%@", "[PipelineTailMergeDump after] context=\(context)\n\(describeSemanticSpans(out))")
-        }
+//        let mergedSpansDelta = spans.count - out.count
+//        if traceEnabled, mergedSpansDelta > 0 {
+//            let full = "[PipelineTailMerge] runs=\(mergedRuns) delta=\(mergedSpansDelta) spans \(spans.count)->\(out.count) context=\(context)"
+//            // CustomLogger.shared.debug(full)
+//            // NSLog("%@", full)
+//
+//            // User-requested: full post-pass dump.
+//            // Keep it on NSLog to avoid duplicating huge output in multiple sinks.
+//            // NSLog("%@", "[PipelineTailMergeDump after] context=\(context)\n\(describeSemanticSpans(out))")
+//        }
 
         return out
     }

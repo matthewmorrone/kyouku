@@ -6,6 +6,9 @@ scripts/cc.ja.300.pruned.f32
 scripts/__pycache__/
 *.pyc
 *.sqlite3
+third_party
+third_party/*
+kyouku/resources/ggml-base.bin
 
 # Local scratch datasets / large corpora
 data/
@@ -14,3 +17,4 @@ data/
 .derivedData-device/
 .derivedData-sim/
 .derivedData-codex/
+kyouku/Resources/ggml-base.bin

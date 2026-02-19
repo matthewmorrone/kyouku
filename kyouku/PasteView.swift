@@ -53,6 +53,12 @@ struct PasteView: View {
     @State private var karaokeAudioPlayer: AVAudioPlayer? = nil
     @State private var karaokePlaybackTimer: Timer? = nil
     @State private var karaokeCurrentRange: NSRange? = nil
+    @State private var karaokeScheduledStartDeviceTime: TimeInterval? = nil
+    @State private var karaokeStartOffsetSeconds: TimeInterval = 0
+    @State private var isKaraokeDebugDumpPresented: Bool = false
+    @State private var karaokeDebugDumpText: String = ""
+    @State private var karaokeDebugDumpFilePath: String = ""
+    @State private var karaokeDiagnosticsLog: [String] = []
 
     // Incremental lookup (tap character → lookup n, n+n1, ..., up to next newline)
     @State var incrementalPopupHits: [IncrementalLookupHit] = []
@@ -345,6 +351,24 @@ struct PasteView: View {
         .sheet(isPresented: $isCameraTextScannerPresented) {
             CameraTextScannerSheet { detectedText in
                 createNoteFromDetectedCameraText(detectedText)
+            }
+        }
+        .sheet(isPresented: $isKaraokeDebugDumpPresented) {
+            NavigationStack {
+                ScrollView {
+                    Text(
+                        karaokeDebugDumpText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? "[Karaoke Debug Dump]\nNo content rendered. Check persisted file path in summary."
+                        : karaokeDebugDumpText
+                    )
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                        .textSelection(.enabled)
+                }
+                .navigationTitle("Karaoke Debug Dump")
+                .navigationBarTitleDisplayMode(.inline)
             }
         }
     }
@@ -1005,6 +1029,7 @@ struct PasteView: View {
         guard isGeneratingKaraokeAlignment == false else { return }
         guard let note = ensureCurrentNoteForKaraoke() else { return }
 
+        appendKaraokeDiagnostic("Generate start file=\(importedURL.lastPathComponent)")
         isGeneratingKaraokeAlignment = true
         karaokeGenerationProgress = 0.05
         startKaraokeProgressSimulation()
@@ -1023,6 +1048,7 @@ struct PasteView: View {
                 audioURL: persistedAudioURL,
                 localeIdentifier: "ja-JP"
             )
+            karaokeDiagnosticsLog = alignment.diagnostics ?? []
             karaokeGenerationProgress = 1.0
 
             var updated = notes.notes.first(where: { $0.id == note.id }) ?? note
@@ -1033,8 +1059,10 @@ struct PasteView: View {
             currentNote = updated
 
             let strategyLabel = alignment.strategy == .speechOnDevice ? "on-device" : "fallback"
+            appendKaraokeDiagnostic("Generate success strategy=\(strategyLabel) lines=\(alignment.segments.count)")
             showToast("Karaoke sync ready (\(alignment.segments.count) lines, \(strategyLabel))")
         } catch let error as KaraokeSpeechAlignerError {
+            appendKaraokeDiagnostic("Generate failed error=\(error.localizedDescription)")
             switch error {
             case .authorizationDenied:
                 showToast("Enable Speech Recognition in Settings")
@@ -1044,19 +1072,14 @@ struct PasteView: View {
                 showToast(error.localizedDescription)
             }
         } catch {
+            appendKaraokeDiagnostic("Generate failed error=\(error.localizedDescription)")
             showToast(error.localizedDescription)
         }
     }
 
     private func startKaraokeProgressSimulation() {
         karaokeProgressTask?.cancel()
-        karaokeProgressTask = Task { @MainActor in
-            while isGeneratingKaraokeAlignment {
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                guard Task.isCancelled == false else { return }
-                karaokeGenerationProgress = min(0.92, karaokeGenerationProgress + 0.02)
-            }
-        }
+        karaokeProgressTask = nil
     }
 
     private func stopKaraokeProgressSimulation() {
@@ -1082,6 +1105,8 @@ struct PasteView: View {
         if karaokeIsPlaying {
             karaokeAudioPlayer?.pause()
             stopKaraokePlaybackTimer()
+            karaokeStartOffsetSeconds = karaokeAudioPlayer?.currentTime ?? karaokeStartOffsetSeconds
+            karaokeScheduledStartDeviceTime = nil
             return
         }
 
@@ -1097,9 +1122,77 @@ struct PasteView: View {
                 karaokeAudioPlayer = try AVAudioPlayer(contentsOf: audioURL)
                 karaokeAudioPlayer?.prepareToPlay()
             }
-            karaokeAudioPlayer?.play()
+            guard let player = karaokeAudioPlayer else { return }
+
+            karaokeStartOffsetSeconds = player.currentTime
+            let session = AVAudioSession.sharedInstance()
+            let leadTime = max(0.08, session.outputLatency)
+            let scheduledStart = player.deviceCurrentTime + leadTime
+            if player.play(atTime: scheduledStart) {
+                karaokeScheduledStartDeviceTime = scheduledStart
+            } else {
+                player.play()
+                karaokeScheduledStartDeviceTime = nil
+            }
             startKaraokePlaybackTimer()
         } catch {
+            showToast(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func recomputeKaraokeFromCurrentAudio() async {
+        guard isGeneratingKaraokeAlignment == false else { return }
+        guard let note = ensureCurrentNoteForKaraoke() else { return }
+        guard let fileName = note.karaokeAudioFileName,
+              let audioURL = karaokeAudioURL(fileName: fileName),
+              FileManager.default.fileExists(atPath: audioURL.path) else {
+            showToast("No karaoke audio file to recompute")
+            return
+        }
+
+                appendKaraokeDiagnostic("Recompute start file=\(audioURL.lastPathComponent)")
+        isGeneratingKaraokeAlignment = true
+        karaokeGenerationProgress = 0.05
+        startKaraokeProgressSimulation()
+        showToast("Recomputing karaoke sync…")
+        defer {
+            isGeneratingKaraokeAlignment = false
+            stopKaraokeProgressSimulation()
+            karaokeGenerationProgress = 0
+        }
+
+        do {
+            karaokeGenerationProgress = max(karaokeGenerationProgress, 0.20)
+            let alignment = try await KaraokeSpeechAligner.align(
+                lyrics: inputText,
+                audioURL: audioURL,
+                localeIdentifier: "ja-JP"
+            )
+            karaokeDiagnosticsLog = alignment.diagnostics ?? []
+            karaokeGenerationProgress = 1.0
+
+            var updated = notes.notes.first(where: { $0.id == note.id }) ?? note
+            updated.text = inputText
+            updated.karaokeAlignment = alignment
+            notes.updateNote(updated)
+            currentNote = updated
+
+            let strategyLabel = alignment.strategy == .speechOnDevice ? "on-device" : "fallback"
+            appendKaraokeDiagnostic("Recompute success strategy=\(strategyLabel) lines=\(alignment.segments.count)")
+            showToast("Karaoke recomputed (\(alignment.segments.count) lines, \(strategyLabel))")
+        } catch let error as KaraokeSpeechAlignerError {
+            appendKaraokeDiagnostic("Recompute failed error=\(error.localizedDescription)")
+            switch error {
+            case .authorizationDenied:
+                showToast("Enable Speech Recognition in Settings")
+            case .audioTooLong:
+                showToast("Audio is longer than 8:00")
+            default:
+                showToast(error.localizedDescription)
+            }
+        } catch {
+            appendKaraokeDiagnostic("Recompute failed error=\(error.localizedDescription)")
             showToast(error.localizedDescription)
         }
     }
@@ -1113,6 +1206,8 @@ struct PasteView: View {
         karaokeAudioPlayer?.stop()
         stopKaraokePlaybackTimer()
         karaokeCurrentRange = nil
+        karaokeScheduledStartDeviceTime = nil
+        karaokeStartOffsetSeconds = 0
 
         if let fileName = note.karaokeAudioFileName,
            let url = karaokeAudioURL(fileName: fileName),
@@ -1123,9 +1218,19 @@ struct PasteView: View {
         var updated = note
         updated.karaokeAudioFileName = nil
         updated.karaokeAlignment = nil
+        karaokeDiagnosticsLog.removeAll(keepingCapacity: false)
         notes.updateNote(updated)
         currentNote = updated
         showToast("Cleared karaoke audio and sync")
+    }
+
+    private func appendKaraokeDiagnostic(_ message: String) {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let stamped = "\(formatter.string(from: Date())) \(message)"
+        karaokeDiagnosticsLog.append(stamped)
+        CustomLogger.shared.raw("[Karaoke][UI] \(stamped)")
+        KaraokeDiagnosticsStore.append("[Karaoke][UI] \(message)")
     }
 
     private func startKaraokePlaybackTimer() {
@@ -1143,10 +1248,23 @@ struct PasteView: View {
                         karaokeCurrentRange = nil
                     }
                     stopKaraokePlaybackTimer()
+                    karaokeScheduledStartDeviceTime = nil
                     return
                 }
 
-                updateKaraokeHighlight(at: player.currentTime)
+                let playbackSeconds: TimeInterval
+                if let scheduledStart = karaokeScheduledStartDeviceTime {
+                    let elapsed = player.deviceCurrentTime - scheduledStart
+                    if elapsed < 0 {
+                        karaokeCurrentRange = nil
+                        return
+                    }
+                    playbackSeconds = karaokeStartOffsetSeconds + elapsed
+                } else {
+                    playbackSeconds = player.currentTime
+                }
+
+                updateKaraokeHighlight(at: playbackSeconds)
             }
         }
         if let timer = karaokePlaybackTimer {
@@ -1157,6 +1275,83 @@ struct PasteView: View {
     private func stopKaraokePlaybackTimer() {
         karaokePlaybackTimer?.invalidate()
         karaokePlaybackTimer = nil
+    }
+
+    private func openKaraokeDebugDump() {
+        guard let note = currentNote,
+              let alignment = note.karaokeAlignment else {
+            showToast("No karaoke alignment to inspect")
+            return
+        }
+
+        karaokeDebugDumpText = "[Karaoke Debug Dump]\nPreparing dump..."
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+
+        do {
+            let data = try encoder.encode(alignment)
+            let jsonText = String(data: data, encoding: .utf8) ?? "{}"
+            let alignmentDiagnostics = alignment.diagnostics ?? []
+            let runtimeDiagnostics = KaraokeDiagnosticsStore.snapshot(maxLines: 120)
+            let persistedDiagnostics = KaraokeDiagnosticsStore.persistedTail(maxLines: 200)
+            let diagnosticsCombined = alignmentDiagnostics + karaokeDiagnosticsLog + runtimeDiagnostics + persistedDiagnostics
+            let diagnosticsText: String = diagnosticsCombined.isEmpty
+                ? "No diagnostics found in alignment/runtime/persisted logs. Recompute karaoke and reopen this dump."
+                : diagnosticsCombined.joined(separator: "\n")
+
+            let persistedDumpFilePath = persistKaraokeDebugDumpFile(candidateText: jsonText)
+            karaokeDebugDumpFilePath = persistedDumpFilePath ?? "(write failed)"
+
+            let summary = """
+            [Summary]
+            strategy=\(alignment.strategy.rawValue)
+            version=\(alignment.version)
+            locale=\(alignment.localeIdentifier)
+            lines=\(alignment.segments.count)
+            generatedAt=\(alignment.generatedAt)
+            runtimeBufferCount=\(karaokeDiagnosticsLog.count)
+            persistedTailCount=\(persistedDiagnostics.count)
+            persistedDumpFile=\(karaokeDebugDumpFilePath)
+            """
+
+            karaokeDebugDumpText = """
+            \(summary)
+
+            [Karaoke Diagnostics]
+            \(diagnosticsText)
+
+            [Alignment JSON]
+            \(jsonText)
+            """
+
+            if karaokeDebugDumpText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                karaokeDebugDumpText = "Debug dump generated, but content is unexpectedly empty. strategy=\(alignment.strategy.rawValue) lines=\(alignment.segments.count)"
+            }
+
+            let preview = String(karaokeDebugDumpText.prefix(320))
+            CustomLogger.shared.raw("[Karaoke][DebugDump] preview=\(preview)")
+            KaraokeDiagnosticsStore.append("[Karaoke][DebugDump] opened strategy=\(alignment.strategy.rawValue) lines=\(alignment.segments.count)")
+            isKaraokeDebugDumpPresented = true
+        } catch {
+            karaokeDebugDumpText = "Failed to encode karaoke debug dump: \(error.localizedDescription)"
+            isKaraokeDebugDumpPresented = true
+        }
+    }
+
+    private func persistKaraokeDebugDumpFile(candidateText: String) -> String? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let url = docs.appendingPathComponent("karaoke-debug-dump.txt", isDirectory: false)
+        do {
+            try candidateText.data(using: .utf8)?.write(to: url, options: .atomic)
+            return url.path
+        } catch {
+            CustomLogger.shared.raw("[Karaoke][DebugDump] write failed: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     private func updateKaraokeHighlight(at seconds: TimeInterval) {
@@ -1341,6 +1536,14 @@ struct PasteView: View {
             onClearKaraoke: {
                 clearKaraokeData()
             },
+            onRecomputeKaraoke: {
+                Task { @MainActor in
+                    await recomputeKaraokeFromCurrentAudio()
+                }
+            },
+            onOpenKaraokeDebugDump: {
+                openKaraokeDebugDump()
+            },
             isKaraokeBusy: isGeneratingKaraokeAlignment,
             karaokeProgress: karaokeGenerationProgress,
             isKaraokeReady: karaokePlaybackAvailable,
@@ -1470,23 +1673,34 @@ struct PasteView: View {
     }
 
     private func openCameraTextScanner() {
+        CustomLogger.shared.pipeline(context: "OCR", stage: "Entry", "openCameraTextScanner invoked")
         guard DataScannerViewController.isSupported else {
+            CustomLogger.shared.pipeline(context: "OCR", stage: "Error", "DataScanner unsupported on device", level: .error)
             showToast("Camera text scanning is not supported on this device")
             return
         }
         guard DataScannerViewController.isAvailable else {
+            CustomLogger.shared.pipeline(context: "OCR", stage: "Error", "DataScanner currently unavailable", level: .error)
             showToast("Camera text scanning is currently unavailable")
             return
         }
+        CustomLogger.shared.pipeline(context: "OCR", stage: "Entry", "Presenting camera scanner sheet")
         isCameraTextScannerPresented = true
     }
 
     private func createNoteFromDetectedCameraText(_ rawText: String) {
         let scannedText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard scannedText.isEmpty == false else {
+            CustomLogger.shared.pipeline(context: "OCR", stage: "Result", "No text detected from scanner", level: .warning)
             showToast("No text detected")
             return
         }
+
+        CustomLogger.shared.pipeline(
+            context: "OCR",
+            stage: "Result",
+            "Detected text length=\((scannedText as NSString).length)"
+        )
 
         let resolvedTitle = inferredTitle(from: scannedText)
         notes.addNote(title: resolvedTitle, text: scannedText)
@@ -1840,7 +2054,7 @@ struct PasteView: View {
     }
 
     func clearSelection(resetPersistent: Bool = true) {
-        CustomLogger.shared.debug("Clearing selection resetPersistent=\(resetPersistent)")
+        // CustomLogger.shared.debug("Clearing selection resetPersistent=\(resetPersistent)")
         let hadSelection = selectionController.tokenSelection != nil
         selectionController.clearSelection(resetPersistent: resetPersistent)
         isDictionarySheetPresented = false
@@ -1849,7 +2063,7 @@ struct PasteView: View {
             inlineLookup.reset()
         }
         if dictionaryPopupEnabled && hadSelection {
-            CustomLogger.shared.debug("Dictionary popup hidden")
+            // CustomLogger.shared.debug("Dictionary popup hidden")
         }
     }
 

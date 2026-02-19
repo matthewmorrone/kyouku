@@ -45,6 +45,7 @@ private struct CameraTextScannerRepresentable: UIViewControllerRepresentable {
     @Binding var detectedText: String
 
     func makeUIViewController(context: Context) -> DataScannerViewController {
+        CustomLogger.shared.pipeline(context: "OCR", stage: "Start", "Creating DataScannerViewController")
         let controller = DataScannerViewController(
             recognizedDataTypes: [.text()],
             qualityLevel: .balanced,
@@ -54,11 +55,28 @@ private struct CameraTextScannerRepresentable: UIViewControllerRepresentable {
             isHighlightingEnabled: true
         )
         controller.delegate = context.coordinator
-        try? controller.startScanning()
+        do {
+            try controller.startScanning()
+            CustomLogger.shared.pipeline(context: "OCR", stage: "Start", "startScanning succeeded")
+        } catch {
+            let nsError = error as NSError
+            CustomLogger.shared.pipeline(
+                context: "OCR",
+                stage: "Error",
+                "startScanning failed domain=\(nsError.domain) code=\(nsError.code) message=\(nsError.localizedDescription)",
+                level: .error
+            )
+            CustomLogger.shared.raw("[OCR][Error] startScanning failed: \(nsError)")
+        }
         return controller
     }
 
     func updateUIViewController(_ uiViewController: DataScannerViewController, context: Context) {}
+
+    static func dismantleUIViewController(_ uiViewController: DataScannerViewController, coordinator: Coordinator) {
+        uiViewController.stopScanning()
+        CustomLogger.shared.pipeline(context: "OCR", stage: "Stop", "stopScanning called")
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(detectedText: $detectedText)
@@ -89,6 +107,19 @@ private struct CameraTextScannerRepresentable: UIViewControllerRepresentable {
             applyRecognizedItems(allItems)
         }
 
+        func dataScanner(
+            _ dataScanner: DataScannerViewController,
+            becameUnavailableWithError error: DataScannerViewController.ScanningUnavailable
+        ) {
+            CustomLogger.shared.pipeline(
+                context: "OCR",
+                stage: "Error",
+                "Scanner became unavailable: \(error)",
+                level: .error
+            )
+            CustomLogger.shared.raw("[OCR][Error] Scanner became unavailable: \(error)")
+        }
+
         private func applyRecognizedItems(_ items: [RecognizedItem]) {
             let lines: [String] = items.compactMap { item in
                 guard case .text(let text) = item else { return nil }
@@ -96,6 +127,10 @@ private struct CameraTextScannerRepresentable: UIViewControllerRepresentable {
             }
 
             detectedText = lines.joined(separator: "\n")
+
+            if detectedText.isEmpty {
+                CustomLogger.shared.pipeline(context: "OCR", stage: "Update", "No text recognized in current frame")
+            }
         }
     }
 }

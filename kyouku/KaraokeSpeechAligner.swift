@@ -11,6 +11,7 @@ enum KaraokeSpeechAlignerError: LocalizedError {
     case recognitionFailed
     case noRecognitionSegments
     case invalidAudioDuration
+    case allRecognitionBackendsFailed(speechError: String, whisperError: String)
 
     var errorDescription: String? {
         switch self {
@@ -33,11 +34,18 @@ enum KaraokeSpeechAlignerError: LocalizedError {
             return "Speech recognition returned no timestamped segments."
         case .invalidAudioDuration:
             return "Audio duration could not be determined."
+        case .allRecognitionBackendsFailed(let speechError, let whisperError):
+            return "All recognition backends failed. speech=\(speechError); whisper=\(whisperError)"
         }
     }
 }
 
 enum KaraokeSpeechAligner {
+    private enum RecognitionBackend: String {
+        case speechOnDevice = "speech_on_device"
+        case whisperCpp = "whisper_cpp"
+    }
+
     static let maxAudioDurationSeconds: Double = 8 * 60
 
     static func align(
@@ -45,8 +53,18 @@ enum KaraokeSpeechAligner {
         audioURL: URL,
         localeIdentifier: String = "ja-JP"
     ) async throws -> KaraokeAlignment {
+        var diagnostics: [String] = []
+        appendDiagnostic("Start align locale=\(localeIdentifier) url=\(audioURL.lastPathComponent)", to: &diagnostics)
+
         let audioDuration = try await loadAudioDurationSeconds(from: audioURL)
+        appendDiagnostic("Audio duration=\(String(format: "%.2f", audioDuration))s", to: &diagnostics)
+
         if audioDuration > maxAudioDurationSeconds {
+            appendDiagnostic(
+                "Reject audio: too long max=\(Int(maxAudioDurationSeconds))s actual=\(String(format: "%.2f", audioDuration))s",
+                level: .error,
+                to: &diagnostics
+            )
             throw KaraokeSpeechAlignerError.audioTooLong(
                 maxAllowedSeconds: maxAudioDurationSeconds,
                 actualSeconds: audioDuration
@@ -56,11 +74,25 @@ enum KaraokeSpeechAligner {
         let recognition: [KaraokeRecognitionSegment]
 
         do {
-            recognition = try await recognizeSegments(audioURL: audioURL, localeIdentifier: localeIdentifier)
+            let recognitionResult = try await recognizeSegments(
+                lyrics: lyrics,
+                audioURL: audioURL,
+                localeIdentifier: localeIdentifier
+            )
+            recognition = recognitionResult.segments
+            appendDiagnostic(
+                "Recognition success backend=\(recognitionResult.backend.rawValue) segments=\(recognition.count)",
+                to: &diagnostics
+            )
         } catch {
             // Keep the pipeline resilient: if recognition fails, still return line-level timing.
             strategy = .fallbackInterpolation
             recognition = []
+            appendDiagnostic(
+                "Recognition failed: \(diagnosticDescription(for: error))",
+                level: .error,
+                to: &diagnostics
+            )
         }
 
         let segments = KaraokeLineTimingMapper.lineSegments(
@@ -68,17 +100,111 @@ enum KaraokeSpeechAligner {
             recognition: recognition,
             audioDurationSeconds: audioDuration
         )
+        appendDiagnostic(
+            "Line mapping complete strategy=\(strategy.rawValue) lineSegments=\(segments.count)",
+            to: &diagnostics
+        )
 
         return KaraokeAlignment(
             generatedAt: Date(),
             localeIdentifier: localeIdentifier,
             audioDurationSeconds: audioDuration,
             strategy: strategy,
-            segments: segments
+            version: KaraokeAlignment.currentVersion,
+            granularities: [.line, .phrase, .token],
+            segments: segments,
+            diagnostics: diagnostics
         )
     }
 
+    private static func diagnosticDescription(for error: Error) -> String {
+        if let alignerError = error as? KaraokeSpeechAlignerError {
+            return "\(alignerError) (\(alignerError.localizedDescription))"
+        }
+
+        let nsError = error as NSError
+        return "\(type(of: error)) domain=\(nsError.domain) code=\(nsError.code) message=\(nsError.localizedDescription)"
+    }
+
+    private static func appendDiagnostic(
+        _ message: String,
+        level: CustomLogger.Level = .info,
+        to diagnostics: inout [String]
+    ) {
+        diagnostics.append(message)
+        CustomLogger.shared.pipeline(context: "Karaoke", stage: "Align", message, level: level)
+        CustomLogger.shared.raw("[Karaoke][Align] \(message)")
+        KaraokeDiagnosticsStore.append("[Karaoke][Align] \(message)")
+    }
+
     private static func recognizeSegments(
+        lyrics: String,
+        audioURL: URL,
+        localeIdentifier: String
+    ) async throws -> (segments: [KaraokeRecognitionSegment], backend: RecognitionBackend) {
+        do {
+            let segments = try await recognizeSegmentsWithSpeech(
+                audioURL: audioURL,
+                localeIdentifier: localeIdentifier
+            )
+            return (segments: segments, backend: .speechOnDevice)
+        } catch {
+            let speechErrorMessage = diagnosticDescription(for: error)
+            let whisperLanguage = whisperLanguageCode(from: localeIdentifier)
+            let timedWords: [TimedWord]
+            do {
+                timedWords = try await WhisperService.shared.transcribeWords(
+                    from: audioURL,
+                    language: whisperLanguage,
+                    canonicalLyrics: lyrics
+                )
+            } catch {
+                let whisperErrorMessage = diagnosticDescription(for: error)
+                throw KaraokeSpeechAlignerError.allRecognitionBackendsFailed(
+                    speechError: speechErrorMessage,
+                    whisperError: whisperErrorMessage
+                )
+            }
+
+            let mapped = timedWords.compactMap { word -> KaraokeRecognitionSegment? in
+                let text = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard text.isEmpty == false else { return nil }
+                guard word.end > word.start else { return nil }
+
+                return KaraokeRecognitionSegment(
+                    text: text,
+                    startSeconds: word.start,
+                    endSeconds: word.end,
+                    confidence: 0.7
+                )
+            }
+
+            guard mapped.isEmpty == false else {
+                throw KaraokeSpeechAlignerError.noRecognitionSegments
+            }
+
+            return (segments: mapped, backend: .whisperCpp)
+        }
+    }
+
+    private static func whisperLanguageCode(from localeIdentifier: String) -> String {
+        let locale = Locale(identifier: localeIdentifier)
+        if #available(iOS 16.0, *) {
+            if let languageCode = locale.language.languageCode?.identifier,
+               languageCode.isEmpty == false {
+                return languageCode
+            }
+        }
+
+        if let languageCode = localeIdentifier.split(separator: "-").first,
+           languageCode.isEmpty == false {
+            return String(languageCode).lowercased()
+        }
+
+        return "ja"
+    }
+
+    private static func recognizeSegmentsWithSpeech(
         audioURL: URL,
         localeIdentifier: String
     ) async throws -> [KaraokeRecognitionSegment] {

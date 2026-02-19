@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E322701B2F45F54600CA6376 /* whisper in Frameworks */ = {isa = PBXBuildFile; productRef = E322701A2F45F54600CA6376 /* whisper */; };
 		E338EC112EFFC9BA004FC07C /* CharacterFilter in Frameworks */ = {isa = PBXBuildFile; productRef = E338EC102EFFC9BA004FC07C /* CharacterFilter */; };
 		E338EC132EFFC9BA004FC07C /* IPADic in Frameworks */ = {isa = PBXBuildFile; productRef = E338EC122EFFC9BA004FC07C /* IPADic */; };
 		E338EC152EFFC9BA004FC07C /* Mecab-Swift in Frameworks */ = {isa = PBXBuildFile; productRef = E338EC142EFFC9BA004FC07C /* Mecab-Swift */; };
@@ -55,6 +56,7 @@
 			files = (
 				E338EC132EFFC9BA004FC07C /* IPADic in Frameworks */,
 				E338EC112EFFC9BA004FC07C /* CharacterFilter in Frameworks */,
+				E322701B2F45F54600CA6376 /* whisper in Frameworks */,
 				E338EC152EFFC9BA004FC07C /* Mecab-Swift in Frameworks */,
 				E338EC172EFFC9BA004FC07C /* StringTools in Frameworks */,
 			);
@@ -128,6 +130,7 @@
 				E338EC122EFFC9BA004FC07C /* IPADic */,
 				E338EC142EFFC9BA004FC07C /* Mecab-Swift */,
 				E338EC162EFFC9BA004FC07C /* StringTools */,
+				E322701A2F45F54600CA6376 /* whisper */,
 			);
 			productName = kyouku;
 			productReference = E392E52A2EE804A50069963A /* kyouku.app */;
@@ -166,6 +169,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				E338EC0F2EFFC9BA004FC07C /* XCRemoteSwiftPackageReference "Mecab-Swift" */,
+				E32270192F45F54600CA6376 /* XCRemoteSwiftPackageReference "whisper" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E392E52B2EE804A50069963A /* Products */;
@@ -502,6 +506,10 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		E32270192F45F54600CA6376 /* XCLocalSwiftPackageReference "whisper" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "third_party/whisper.spm";
+		};
 		E338EC0F2EFFC9BA004FC07C /* XCRemoteSwiftPackageReference "Mecab-Swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/shinjukunian/Mecab-Swift";
@@ -513,6 +521,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		E322701A2F45F54600CA6376 /* whisper */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E32270192F45F54600CA6376 /* XCRemoteSwiftPackageReference "whisper" */;
+			productName = whisper;
+		};
 		E338EC102EFFC9BA004FC07C /* CharacterFilter */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = E338EC0F2EFFC9BA004FC07C /* XCRemoteSwiftPackageReference "Mecab-Swift" */;

@@ -10,6 +10,8 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
     let onCameraOCRTap: () -> Void
     let onKaraokePrimaryTap: () -> Void
     let onClearKaraoke: () -> Void
+    let onRecomputeKaraoke: () -> Void
+    let onOpenKaraokeDebugDump: () -> Void
     let isKaraokeBusy: Bool
     let karaokeProgress: Double
     let isKaraokeReady: Bool
@@ -26,6 +28,8 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         onCameraOCRTap: @escaping () -> Void,
         onKaraokePrimaryTap: @escaping () -> Void,
         onClearKaraoke: @escaping () -> Void,
+        onRecomputeKaraoke: @escaping () -> Void,
+        onOpenKaraokeDebugDump: @escaping () -> Void,
         isKaraokeBusy: Bool,
         karaokeProgress: Double,
         isKaraokeReady: Bool,
@@ -40,6 +44,8 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         self.onCameraOCRTap = onCameraOCRTap
         self.onKaraokePrimaryTap = onKaraokePrimaryTap
         self.onClearKaraoke = onClearKaraoke
+        self.onRecomputeKaraoke = onRecomputeKaraoke
+        self.onOpenKaraokeDebugDump = onOpenKaraokeDebugDump
         self.isKaraokeBusy = isKaraokeBusy
         self.karaokeProgress = karaokeProgress
         self.isKaraokeReady = isKaraokeReady
@@ -80,6 +86,11 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                 } label: {
                     ZStack {
                         Image(systemName: "waveform")
+                            .symbolEffect(
+                                .pulse.byLayer,
+                                options: .repeating,
+                                isActive: isKaraokePlaying
+                            )
 
                         if isKaraokeBusy {
                             Circle()
@@ -107,17 +118,33 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                        : "Choose Karaoke Audio")
                 )
                 .disabled(isKaraokeBusy)
-                .onLongPressGesture(minimumDuration: 0.45) {
-                    guard isKaraokeReady else { return }
-                    onClearKaraoke()
+                .contextMenu {
+                    if isKaraokeReady {
+                        Button(role: .destructive) {
+                            onClearKaraoke()
+                        } label: {
+                            Label("Reset Karaoke", systemImage: "trash")
+                        }
+                        Button {
+                            onRecomputeKaraoke()
+                        } label: {
+                            Label("Recompute from Current Audio", systemImage: "arrow.trianglehead.clockwise")
+                        }
+                        Button {
+                            onOpenKaraokeDebugDump()
+                        } label: {
+                            Label("Open Karaoke Debug Dump", systemImage: "doc.text.magnifyingglass")
+                        }
+                    }
                 }
-
+                /*
                 Button {
                     onResetSpans()
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
                 }
                 .accessibilityLabel("Reset Spans")
+                */
                 Button {
                     showTokensSheet = true
                 } label: {

@@ -685,7 +685,10 @@ private extension WordDefinitionView {
 
                 let rows = try await DictionarySQLiteStore.shared.fetchPitchAccents(surface: surface, reading: reading)
                 for row in rows {
-                    let key = "\(row.surface)|\(row.reading)|\(row.accent)|\(row.morae)|\(row.kind ?? "")"
+                    let normalizedReading = (row.readingMarked?.replacingOccurrences(of: "◦", with: "") ?? row.reading)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let normalizedKind = (row.kind ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let key = "\(normalizedReading)|\(row.accent)|\(row.morae)|\(normalizedKind)"
                     if seen.insert(key).inserted {
                         out.append(row)
                     }

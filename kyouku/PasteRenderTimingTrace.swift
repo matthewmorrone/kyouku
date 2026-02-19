@@ -17,11 +17,11 @@ enum PasteRenderTimingTrace {
         active = true
         lock.unlock()
 
-        CustomLogger.shared.pipeline(
-            context: "PasteTiming",
-            stage: "BEGIN",
-            "trace=\(traceID) note=\(activeNoteID) textLen=\(textLength) reason=\(reason)"
-        )
+        // CustomLogger.shared.pipeline(
+        //     context: "PasteTiming",
+        //     stage: "BEGIN",
+        //     "trace=\(traceID) note=\(activeNoteID) textLen=\(textLength) reason=\(reason)"
+        // )
     }
 
     static func checkpoint(_ stage: String, _ details: String = "") {
