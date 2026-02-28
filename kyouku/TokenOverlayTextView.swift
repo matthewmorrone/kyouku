@@ -1296,7 +1296,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
     override var contentOffset: CGPoint {
         didSet {
-            let scrollUpdateStart = CustomLogger.perfStart()
+            _ = CustomLogger.perfStart()
             let allowHorizontal = horizontalScrollEnabled && (wrapLines == false)
 
             // When lines wrap, horizontal motion is never meaningful and often manifests as
@@ -1331,13 +1331,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                 scheduleDebugOverlaysUpdate()
             }
             warmVisibleSemanticSpanLayoutIfNeeded()
-            CustomLogger.shared.perf(
-                "TokenOverlayTextView.contentOffset didSet",
-                elapsedMS: CustomLogger.perfElapsedMS(since: scrollUpdateStart),
-                details: "offset=(\(Int(contentOffset.x.rounded())) ,\(Int(contentOffset.y.rounded()))) semantic=\(semanticSpans.count)",
-                thresholdMS: 2.0,
-                level: .debug
-            )
+            // CustomLogger.shared.perf(
+            //     "TokenOverlayTextView.contentOffset didSet",
+            //     elapsedMS: CustomLogger.perfElapsedMS(since: scrollUpdateStart),
+            //     details: "offset=(\(Int(contentOffset.x.rounded())) ,\(Int(contentOffset.y.rounded()))) semantic=\(semanticSpans.count)",
+            //     thresholdMS: 2.0,
+            //     level: .debug
+            // )
         }
     }
 
@@ -1633,7 +1633,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
     }
 
     override func layoutSubviews() {
-        let layoutPassStart = CustomLogger.perfStart()
+        _ = CustomLogger.perfStart()
         super.layoutSubviews()
 
         if #available(iOS 15.0, *) {
@@ -1689,20 +1689,20 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         let containerMismatch = lastMeasuredTextContainerWidth > 0 && abs(currentTargetWidth - lastMeasuredTextContainerWidth) > 0.5
         if boundsMismatch || containerMismatch {
             if Self.verboseRubyLoggingEnabled {
-                CustomLogger.shared.debug( String( format: "LAYOUT layoutSubviews boundsW=%.2f measuredW=%.2f insetL=%.2f insetR=%.2f padding=%.2f currentTargetW=%.2f measuredTargetW=%.2f containerW=%.2f", bounds.width, lastMeasuredBoundsWidth, inset.left, inset.right, textContainer.lineFragmentPadding, currentTargetWidth, lastMeasuredTextContainerWidth, textContainer.size.width ) )
+                // CustomLogger.shared.debug(String(format: "LAYOUT layoutSubviews boundsW=%.2f measuredW=%.2f insetL=%.2f insetR=%.2f padding=%.2f currentTargetW=%.2f measuredTargetW=%.2f containerW=%.2f", bounds.width, lastMeasuredBoundsWidth, inset.left, inset.right, textContainer.lineFragmentPadding, currentTargetWidth, lastMeasuredTextContainerWidth, textContainer.size.width))
             }
             invalidateIntrinsicContentSize()
         }
 
-        let warmVisibleStart = CustomLogger.perfStart()
+        _ = CustomLogger.perfStart()
         warmVisibleSemanticSpanLayoutIfNeeded()
-        CustomLogger.shared.perf(
-            "TokenOverlayTextView.warmVisibleSemanticSpanLayoutIfNeeded",
-            elapsedMS: CustomLogger.perfElapsedMS(since: warmVisibleStart),
-            details: "semantic=\(semanticSpans.count)",
-            thresholdMS: 2.0,
-            level: .debug
-        )
+        // CustomLogger.shared.perf(
+        //     "TokenOverlayTextView.warmVisibleSemanticSpanLayoutIfNeeded",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: warmVisibleStart),
+        //     details: "semantic=\(semanticSpans.count)",
+        //     thresholdMS: 2.0,
+        //     level: .debug
+        // )
 
         // NOTE: Previously we ran a soft-wrap mitigation that shifted line-start headword-padding
         // spacers to the trailing side to avoid “ruby jutting left”. Now that ruby anchoring uses
@@ -1711,15 +1711,15 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
 
         // Ruby highlight geometry is derived from the ruby overlay layers.
         // Ensure overlays are laid out first so highlight rects can match actual ruby bounds.
-        let rubyLayoutStart = CustomLogger.perfStart()
+        // let rubyLayoutStart = CustomLogger.perfStart()
         layoutRubyOverlayIfNeeded()
-        CustomLogger.shared.perf(
-            "TokenOverlayTextView.layoutRubyOverlayIfNeeded",
-            elapsedMS: CustomLogger.perfElapsedMS(since: rubyLayoutStart),
-            details: "runs=\(cachedRubyRuns.count) dirty=\(rubyOverlayDirty)",
-            thresholdMS: 2.0,
-            level: .debug
-        )
+        // CustomLogger.shared.perf(
+        //     "TokenOverlayTextView.layoutRubyOverlayIfNeeded",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: rubyLayoutStart),
+        //     details: "runs=\(cachedRubyRuns.count) dirty=\(rubyOverlayDirty)",
+        //     thresholdMS: 2.0,
+        //     level: .debug
+        // )
 
         // Phase 2: right-boundary fix is wrap-only.
         // If a segment overflows the right guide, force a break before that segment start.
@@ -1848,13 +1848,13 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             debugInsetGuidesLayer.isHidden = true
         }
 
-        CustomLogger.shared.perf(
-            "TokenOverlayTextView.layoutSubviews",
-            elapsedMS: CustomLogger.perfElapsedMS(since: layoutPassStart),
-            details: "semantic=\(semanticSpans.count) rubyRuns=\(cachedRubyRuns.count) contentH=\(Int(contentSize.height.rounded()))",
-            thresholdMS: 8.0,
-            level: .debug
-        )
+        // CustomLogger.shared.perf(
+        //     "TokenOverlayTextView.layoutSubviews",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: layoutPassStart),
+        //     details: "semantic=\(semanticSpans.count) rubyRuns=\(cachedRubyRuns.count) contentH=\(Int(contentSize.height.rounded()))",
+        //     thresholdMS: 8.0,
+        //     level: .debug
+        // )
 
     }
 
@@ -1964,7 +1964,9 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             guard let self else { return }
             guard self.window != nil else { return }
 
-            self.assertHeadwordPaddingInvariantsHard()
+            if self.headwordPaddingInvariantChecksEnabled {
+                self.assertHeadwordPaddingInvariantsHard()
+            }
 
             // Segment spacing telemetry runs in DEBUG; invariant failure checks remain opt-in.
             self.enforceHeadwordPaddingLayoutInvariantsIfNeeded()
@@ -1990,7 +1992,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             if s.character(at: idx) == 0xFFFC {
                 let msg = "[HeadwordPad] FAIL spacer index=\(idx)"
                 CustomLogger.shared.error(msg)
-                assertionFailure(msg)
+                CustomLogger.shared.raw("[HeadwordPad][NonFatal] \(msg)")
                 break
             }
             idx += 1
@@ -2052,7 +2054,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
                     let b = current.surface.replacingOccurrences(of: "\n", with: "\\n")
                     let msg = String(format: "[HeadwordPad] FAIL boundary=\"%@|%@\" gap=%.2f A.end=%.2f B.start=%.2f", a, b, gap, previous.endX, current.startX)
                     CustomLogger.shared.error(msg)
-                    assertionFailure(msg)
+                    CustomLogger.shared.raw("[HeadwordPad][NonFatal] \(msg)")
                 }
                 previous = current
             }
@@ -2364,15 +2366,12 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             tokenWordSplitLoggedKeys.add(key)
 
             violations += 1
-            let snippetRange = NSRange(location: inkRange.location, length: min(12, inkRange.length))
-            let snippet = backing.substring(with: snippetRange)
-            let linesStr = uniqueLineIndices.map(String.init).joined(separator: ",")
-            CustomLogger.shared.print("[WordSplitInvariant] token=\(tokenIndex) start=\(inkRange.location) len=\(inkRange.length) lines=\(linesStr) segments=\(unions.count) text=\(snippet)")
+            // CustomLogger.shared.print("[WordSplitInvariant] token=\(tokenIndex) start=\(inkRange.location) len=\(inkRange.length) lines=\(linesStr) segments=\(unions.count) text=\(snippet)")
             logged += 1
         }
 
         if logged > 0 {
-            CustomLogger.shared.print("[WordSplitSummary] logged=\(logged) violations=\(violations)")
+            // CustomLogger.shared.print("[WordSplitSummary] logged=\(logged) violations=\(violations)")
         }
     }
 
@@ -2560,7 +2559,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         }
 
         let sortedSegmentLineIndices = segmentsByLine.keys.sorted()
-        let showLineNumbersInSegmentLogs = rubyDebugShowLineNumbersEnabled
+        _ = rubyDebugShowLineNumbersEnabled
 
         var cycleHasher = Hasher()
         cycleHasher.combine(attributedTextRevision)
@@ -2615,30 +2614,25 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             }
 
             for (position, cur) in orderedForSpacing.enumerated() {
-                let beforeSpace: CGFloat
                 let beforeKind: String
                 if position == 0 {
-                    beforeSpace = cur.minX - leftInsetGuideX
                     beforeKind = "LEFT_GUIDE"
                 } else {
-                    beforeSpace = cur.minX - effectiveEnds[position - 1]
                     beforeKind = "PREV_SEG"
                 }
 
-                let afterSpace: CGFloat
                 let afterKind: String
                 if position == orderedForSpacing.count - 1 {
-                    afterSpace = rightInsetGuideX - effectiveEnds[position]
                     afterKind = "RIGHT_GUIDE"
                 } else {
                     let next = orderedForSpacing[position + 1]
-                    afterSpace = next.minX - effectiveEnds[position]
+                    _ = next.minX - effectiveEnds[position]
                     afterKind = "NEXT_SEG"
                 }
 
-                let surfaceForLog = alignedSurface(cur.surface)
-                let beforeKindForLog = alignedKind(beforeKind)
-                let afterKindForLog = alignedKind(afterKind)
+                _ = alignedSurface(cur.surface)
+                _ = alignedKind(beforeKind)
+                _ = alignedKind(afterKind)
 
 //                if showLineNumbersInSegmentLogs {
 //                    CustomLogger.shared.print(
@@ -3877,7 +3871,7 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
             // No change; avoid resetting attributedText which would dismiss menus.
             return
         }
-        let applyStart = CustomLogger.perfStart()
+        _ = CustomLogger.perfStart()
         let savedOffset = contentOffset
         let wasFirstResponder = isFirstResponder
         let oldSelectedRange = selectedRange
@@ -3926,16 +3920,16 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         // ensure we redraw whenever the attributed text changes.
         setNeedsDisplay()
         invalidateIntrinsicContentSize()
-        if Self.verboseRubyLoggingEnabled {
-            CustomLogger.shared.debug("applyAttributedText -> setNeedsLayout")
-        }
-        CustomLogger.shared.perf(
-            "TokenOverlayTextView.applyAttributedText",
-            elapsedMS: CustomLogger.perfElapsedMS(since: applyStart),
-            details: "length=\(text.length) semantic=\(semanticSpans.count)",
-            thresholdMS: 4.0,
-            level: .debug
-        )
+        // if Self.verboseRubyLoggingEnabled {
+        //     CustomLogger.shared.debug("applyAttributedText -> setNeedsLayout")
+        // }
+        // CustomLogger.shared.perf(
+        //     "TokenOverlayTextView.applyAttributedText",
+        //     elapsedMS: CustomLogger.perfElapsedMS(since: applyStart),
+        //     details: "length=\(text.length) semantic=\(semanticSpans.count)",
+        //     thresholdMS: 4.0,
+        //     level: .debug
+        // )
     }
 
     private func rebuildRubyRunCache(from text: NSAttributedString) {

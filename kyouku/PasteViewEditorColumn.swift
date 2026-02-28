@@ -62,6 +62,7 @@ struct PasteEditorColumnBody: View {
     let onToggleFurigana: (Bool) -> Void
     let onShowToast: (String) -> Void
     let onHaptic: () -> Void
+    let onResetDefaultSegmentationReading: () -> Void
 
     private var effectiveShowFurigana: Bool {
         incrementalLookupEnabled ? false : showFurigana
@@ -129,7 +130,8 @@ struct PasteEditorColumnBody: View {
                 clipboardAccessEnabled: clipboardAccessEnabled,
                 onToggleFurigana: onToggleFurigana,
                 onShowToast: onShowToast,
-                onHaptic: onHaptic
+                onHaptic: onHaptic,
+                onResetDefaultSegmentationReading: onResetDefaultSegmentationReading
             )
         }
     }

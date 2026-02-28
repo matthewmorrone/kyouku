@@ -9,7 +9,13 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
     let onResetSpans: () -> Void
     let onCameraOCRTap: () -> Void
     let onKaraokePrimaryTap: () -> Void
+    let onChooseAudio: () -> Void
+    let onChooseSubtitles: () -> Void
     let onClearKaraoke: () -> Void
+    let onRecomputeKaraoke: () -> Void
+    let onOpenKaraokeDebugDump: () -> Void
+    let isKaraokeAudioUploaded: Bool
+    let isKaraokeFileUploaded: Bool
     let isKaraokeBusy: Bool
     let karaokeProgress: Double
     let isKaraokeReady: Bool
@@ -25,7 +31,13 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         onResetSpans: @escaping () -> Void,
         onCameraOCRTap: @escaping () -> Void,
         onKaraokePrimaryTap: @escaping () -> Void,
+        onChooseAudio: @escaping () -> Void,
+        onChooseSubtitles: @escaping () -> Void,
         onClearKaraoke: @escaping () -> Void,
+        onRecomputeKaraoke: @escaping () -> Void,
+        onOpenKaraokeDebugDump: @escaping () -> Void,
+        isKaraokeAudioUploaded: Bool,
+        isKaraokeFileUploaded: Bool,
         isKaraokeBusy: Bool,
         karaokeProgress: Double,
         isKaraokeReady: Bool,
@@ -39,7 +51,13 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         self.onResetSpans = onResetSpans
         self.onCameraOCRTap = onCameraOCRTap
         self.onKaraokePrimaryTap = onKaraokePrimaryTap
+        self.onChooseAudio = onChooseAudio
+        self.onChooseSubtitles = onChooseSubtitles
         self.onClearKaraoke = onClearKaraoke
+        self.onRecomputeKaraoke = onRecomputeKaraoke
+        self.onOpenKaraokeDebugDump = onOpenKaraokeDebugDump
+        self.isKaraokeAudioUploaded = isKaraokeAudioUploaded
+        self.isKaraokeFileUploaded = isKaraokeFileUploaded
         self.isKaraokeBusy = isKaraokeBusy
         self.karaokeProgress = karaokeProgress
         self.isKaraokeReady = isKaraokeReady
@@ -80,6 +98,11 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                 } label: {
                     ZStack {
                         Image(systemName: "waveform")
+                            .symbolEffect(
+                                .pulse.byLayer,
+                                options: .repeating,
+                                isActive: isKaraokePlaying
+                            )
 
                         if isKaraokeBusy {
                             Circle()
@@ -107,17 +130,40 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                        : "Choose Karaoke Audio")
                 )
                 .disabled(isKaraokeBusy)
-                .onLongPressGesture(minimumDuration: 0.45) {
-                    guard isKaraokeReady else { return }
-                    onClearKaraoke()
-                }
+                .contextMenu {
+                    Button {
+                        onChooseAudio()
+                    } label: {
+                        if isKaraokeAudioUploaded {
+                            Label("audio uploaded ✓", systemImage: "checkmark")
+                        } else {
+                            Label("upload audio", systemImage: "speaker.wave.3")
+                        }
+                    }
+                    Button {
+                        onChooseSubtitles()
+                    } label: {
+                        if isKaraokeFileUploaded {
+                            Label("srt/json uploaded ✓", systemImage: "checkmark")
+                        } else {
+                            Label("upload srt/json", systemImage: "doc.text")
+                        }
+                    }
 
+                    Button(role: .destructive) {
+                        onClearKaraoke()
+                    } label: {
+                        Label("reset karaoke", systemImage: "trash")
+                    }
+                }
+                /*
                 Button {
                     onResetSpans()
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
                 }
                 .accessibilityLabel("Reset Spans")
+                */
                 Button {
                     showTokensSheet = true
                 } label: {

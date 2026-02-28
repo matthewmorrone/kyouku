@@ -29,6 +29,7 @@ struct PasteControlsBar: View {
     let onToggleFurigana: (_ enabled: Bool) -> Void
     let onShowToast: (_ message: String) -> Void
     let onHaptic: () -> Void
+    let onResetDefaultSegmentationReading: () -> Void
 
     @State private var showingFuriganaOptions = false
 
@@ -160,6 +161,14 @@ struct PasteControlsBar: View {
                 .tint(.accentColor)
                 .font(.title2)
                 .accessibilityLabel("Edit")
+                .contextMenu {
+                    Button(role: .destructive) {
+                        onHaptic()
+                        onResetDefaultSegmentationReading()
+                    } label: {
+                        Label("Reset", systemImage: "arrow.counterclockwise")
+                    }
+                }
             }
         }
         .controlSize(.small)

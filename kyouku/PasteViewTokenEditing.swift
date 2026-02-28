@@ -105,7 +105,7 @@ extension PasteView {
     func handleOverridesExternalChange() {
         let signature = computeOverrideSignature()
         guard signature != overrideSignature else { return }
-        CustomLogger.shared.debug("Override change detected for note=\(activeNoteID)")
+        // CustomLogger.shared.debug("Override change detected for note=\(activeNoteID)")
         overrideSignature = signature
         updateCustomizedRanges()
         guard inputText.isEmpty == false else { return }
