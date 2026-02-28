@@ -41,13 +41,19 @@ Goals:
 - Embedding vector blob size: 1,200 bytes (suggests 300-dim float32 vectors)
 
 **How it’s built / updated**
-- Preferred generator: `scripts/generate-db.py`.
-  - Input: a JMdict JSON file (expected names include `jmdict-eng-3.6.1.json`, `jmdict-eng-3.6.2.json`).
-  - Optional inputs:
-    - `--jmnedict-json`: JMnedict JSON (names / proper nouns; expected names include `jmnedict-all-3.6.2.json`)
-    - `--sentences-tsv`: TSV containing `jp_id<TAB>jp_text<TAB>en_id<TAB>en_text`
-    - `--embeddings-bin`: binary embeddings file (script default name: `cc.ja.300.pruned.f32`)
-  - Output: a `dictionary.sqlite3` with the schema above.
+- Preferred generator: `scripts/generate_db.py`.
+  - Required input:
+    - `data/jmdict-eng-3.6.2.json` (or explicit `--jmdict-json`)
+  - Optional inputs (safe to omit):
+    - `--jmnedict-json` (e.g. `data/jmnedict-all-3.6.2.json`)
+    - `--kanjidic2-json` (default `data/kanjidic2-en-3.6.2.json`)
+    - `--reading-overrides-tsv` (default `data/reading_overrides.tsv`)
+    - `--pitch-tsv` (default `data/pitch_accent.tsv`)
+    - `--sentences-tsv` (default `data/sentence-pairs.tsv`)
+    - `--embeddings-bin` (default `data/cc.ja.300.pruned.f32`)
+  - Output:
+    - default `scripts/dictionary.sqlite3`
+    - typical app-bundle output: `kyouku/Resources/dictionary.sqlite3`
 
 **Upstream data sources & attribution**
 - **JMdict** (dictionary entries and tags)
@@ -62,7 +68,30 @@ Goals:
   - The ID ranges + formatting strongly resemble the **Tatoeba Project** sentence corpus.
   - Project: https://tatoeba.org/
   - Licensing: varies by sentence/contributor; verify the exact license terms for the dataset you imported.
-  - Action item: record which export you used (date, URL, license notes) and preserve the source TSV or generation steps.
+  - Recovered provenance evidence (shell history):
+    - `Sentence pairs in Japanese-English - 2026-01-20.tsv`
+    - `Sentence pairs in English-Japanese - 2026-01-20.tsv`
+  - Current canonical local file checksum:
+    - `data/sentence-pairs.tsv` SHA256: `2638c4baf8cb415d99a61af3ed8ae334fcc947f56a44add6c76aeb5506421aee`
+- **Pitch accents** (`pitch_accents` table)
+  - Recovered provenance (2026-02-27): UniDic/NINJAL kana-accent lexicon source.
+  - Source archive (verified working):
+    - https://clrd.ninjal.ac.jp/unidic_archive/cwj/2.1.2/unidic-mecab_kana-accent-2.1.2_src.zip
+  - Source file inside archive:
+    - `unidic-mecab_kana-accent-2.1.2_src/lex.csv`
+  - Conversion script in this repo:
+    - `scripts/unidic_to_pitch_tsv.py`
+  - Output format expected by `scripts/generate_db.py`:
+    - `id<TAB>word<TAB>kana<TAB>kind<TAB>accent<TAB>morae`
+  - Parsing/mapping used by converter:
+    - `word` = `lex.csv` col 0 (surface)
+    - `kana` = `lex.csv` col 15 (`pronBase`, normalized to kana/long-vowel marks)
+    - `accent` = first integer parsed from `lex.csv` col 27 (`aType`)
+    - `morae` = mora count computed from `kana`
+    - `kind` = POS subtype (`pos2` fallback `pos1`)
+  - Notes:
+    - Symbol/blank rows are excluded.
+    - Rows with missing/invalid accent or morae are excluded.
 - **Embeddings** (`embeddings` table)
   - Upstream source: fastText pretrained “Word vectors for 157 languages” (Common Crawl + Wikipedia), Japanese model `cc.ja.300`.
     - Project page: https://fasttext.cc/docs/en/crawl-vectors.html
@@ -74,15 +103,70 @@ Goals:
     - Citation (per fastText docs):
       - E. Grave, P. Bojanowski, P. Gupta, A. Joulin, T. Mikolov, “Learning Word Vectors for 157 Languages” (LREC 2018)
       - https://arxiv.org/abs/1802.06893
-  - Local artifacts (dev-only) currently present under `data/embeddings/`:
+  - Local artifacts (dev-only) used in this repo:
     - `cc.ja.300.bin` (SHA256: `217faf8282042e912612da78cf0002ec4fcde716643ae093058f6274c80d93b3`)
     - `cc.ja.300.vec` (SHA256: `6aeddf072d66bf1242a62c9db1fc26db03032db1b6f2859382198b5398ae4adb`)
     - `cc.ja.300.pruned.vec` (header: `30000 300`; SHA256: `c513c0c9880bceb23383438250aee5a4125e619db6d8cfef3219554ac340ab83`)
-    - `cc.ja.300.pruned.f32` (binary float32 vectors; expected header: `n_words=30000`, `dim=300`; SHA256: `6bee3d826b16486b1b1f2626ade2448db05ec567de5ee865a2d33f2e425bb81a`)
-    - Pruning helper lists (e.g. `keep_vocab.top30k.txt`, plus other vocab/debug files)
+    - `cc.ja.300.pruned.f32` (binary float32 vectors; expected header: `n_words=30000`, `dim=300`; current local SHA256: `9269e34e7186af3b2a5e5216354626bc1c18892db7103bf412b8d40eda793de6`)
+    - Pruning helper list: `data/keep_vocab.top30k.txt`
   - How it’s imported into the bundle DB:
-    - `scripts/generate-db.py --embeddings-bin data/embeddings/cc.ja.300.pruned.f32`
+    - `scripts/generate_db.py --embeddings-bin data/cc.ja.300.pruned.f32`
+  - Rebuild workflow in this repo:
+    1. Download `cc.ja.300.vec.gz` from fastText and decompress to `data/cc.ja.300.vec`.
+    2. Build keep vocab (`data/keep_vocab.top30k.txt`) from JMdict surfaces/readings.
+    3. Build `data/cc.ja.300.pruned.f32` with:
+      - `scripts/build_pruned_embeddings_f32.py --vec-file data/cc.ja.300.vec --keep-vocab data/keep_vocab.top30k.txt --output data/cc.ja.300.pruned.f32`
   - Note: the bundled `dictionary.sqlite3` does not store upstream provenance metadata; treat this document as the record of source/license/citation.
+
+### 1.3 Reproducible recovery playbook (if local data is wiped)
+
+If `data/` is deleted locally, rebuild with these steps:
+
+1. Restore/download core source files:
+   - `data/jmdict-eng-3.6.2.json`
+   - optional: `data/sentence-pairs.tsv`
+2. Rebuild pitch accents from UniDic kana-accent source:
+   - download: `https://clrd.ninjal.ac.jp/unidic_archive/cwj/2.1.2/unidic-mecab_kana-accent-2.1.2_src.zip`
+  - convert with `scripts/unidic_to_pitch_tsv.py` to `data/pitch_accent.tsv`
+3. Rebuild embeddings:
+   - obtain `data/cc.ja.300.vec`
+   - build `data/keep_vocab.top30k.txt`
+  - run `scripts/build_pruned_embeddings_f32.py` to produce `data/cc.ja.300.pruned.f32`
+4. Rebuild DB:
+   - `python3 scripts/generate_db.py --jmdict-json data/jmdict-eng-3.6.2.json --output kyouku/Resources/dictionary.sqlite3 --overwrite`
+
+Supporting automation in this repo:
+- `scripts/data_manifest.template.json`
+- `scripts/build_sentence_pairs_tsv.py`
+- `scripts/build_pruned_embeddings_f32.py`
+- `scripts/unidic_to_pitch_tsv.py`
+
+Generated artifact ownership (one script per generated file):
+- `data/sentence-pairs.tsv` -> `scripts/build_sentence_pairs_tsv.py` (source lineage: Tatoeba exports)
+- `data/pitch_accent.tsv` -> `scripts/unidic_to_pitch_tsv.py`
+- `data/cc.ja.300.pruned.f32` -> `scripts/build_pruned_embeddings_f32.py`
+- `kyouku/Resources/dictionary.sqlite3` -> `scripts/generate_db.py`
+
+### 1.4 Current pinned artifact checksums (2026-02-27)
+
+- `data/jmdict-eng-3.6.2.json`
+  - SHA256: `1c6fb944f8e3a26d71c73bca8a024e0d5e34fea7a728842e162dc4bfc32850eb`
+  - Source lineage: scriptin/jmdict-simplified 3.6.2 release family (`jmdict-eng-3.6.2+*.json.zip`)
+- `data/pitch_accent.tsv`
+  - SHA256: `85f0073ef6b471e2a9b1d22c1c47e08a5321dd4e530b8d89ca02f49dd663d53b`
+  - Derived from UniDic kana-accent archive via `scripts/unidic_to_pitch_tsv.py`
+- `data/sentence-pairs.tsv`
+  - SHA256: `2638c4baf8cb415d99a61af3ed8ae334fcc947f56a44add6c76aeb5506421aee`
+  - Source lineage: local exports dated 2026-01-20 (JP↔EN pair files; see above)
+- `data/keep_vocab.top30k.txt`
+  - SHA256: `fa7f13be088ba66ab06c3eeaea6757a5a032b4da72be71f4e68efa47b675fce1`
+  - Derived from JMdict kanji/kana set
+- `data/cc.ja.300.pruned.f32`
+  - SHA256: `9269e34e7186af3b2a5e5216354626bc1c18892db7103bf412b8d40eda793de6`
+  - Derived from fastText `cc.ja.300.vec` + keep vocab
+- `kyouku/Resources/dictionary.sqlite3`
+  - SHA256: `59ac3eccd25f33860fd082a1d0ba4dede9e6d2c3b7c61458794141cbdc6991c6`
+  - Built by `scripts/generate_db.py` with currently available optional inputs
 
 ### 1.2 `kyouku/Resources/deinflect.min.json`
 

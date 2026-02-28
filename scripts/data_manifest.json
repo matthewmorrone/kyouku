@@ -1,0 +1,73 @@
+{
+  "files": [
+    {
+      "path": "data/jmdict-eng-3.6.2.json",
+      "derived": false,
+      "url": "https://github.com/scriptin/jmdict-simplified/releases/download/3.6.2%2B20260223124729/jmdict-eng-3.6.2%2B20260223124729.json.zip",
+      "sha256": "1c6fb944f8e3a26d71c73bca8a024e0d5e34fea7a728842e162dc4bfc32850eb",
+      "provenance": "scriptin/jmdict-simplified release asset; local extracted file hash pinned",
+      "required": true
+    },
+    {
+      "path": "data/jmnedict-all-3.6.2.json",
+      "derived": false,
+      "url": "https://github.com/scriptin/jmdict-simplified/releases/download/3.6.2%2B20260223124729/jmnedict-all-3.6.2%2B20260223124729.json.zip",
+      "source_archive_sha256": "18122b1167032631be25ef411a86b69e38bea980c725ffd129af91bd4608cd82",
+      "sha256": "447a3b3dae88250aeac4f63a212051a5770ef2ca746d30bbebf8424fe6ea539a",
+      "provenance": "scriptin/jmdict-simplified release asset",
+      "required": false
+    },
+    {
+      "path": "data/kanjidic2-en-3.6.2.json",
+      "derived": false,
+      "url": "https://github.com/scriptin/jmdict-simplified/releases/download/3.6.2%2B20260223124729/kanjidic2-en-3.6.2%2B20260223124729.json.zip",
+      "source_archive_sha256": "6149f40df6de693929794bcf5a609bc1df3dca90ca9c2696c5cb0af73883ace5",
+      "sha256": "c447d5dfdd84e0981cfe2c785b4421c778a42b966d77628683f2226614a433c1",
+      "provenance": "scriptin/jmdict-simplified release asset",
+      "required": false
+    },
+    {
+      "path": "data/pitch_accent.tsv",
+      "derived": true,
+      "url": null,
+      "sha256": "85f0073ef6b471e2a9b1d22c1c47e08a5321dd4e530b8d89ca02f49dd663d53b",
+      "provenance": "Derived from UniDic kana-accent lex.csv via scripts/unidic_to_pitch_tsv.py",
+      "source_archive_url": "https://clrd.ninjal.ac.jp/unidic_archive/cwj/2.1.2/unidic-mecab_kana-accent-2.1.2_src.zip",
+      "source_archive_sha256": "70793cacda81b403eda71736cc180f3144303623755a612b13e1dffeb6554591",
+      "required": false
+    },
+    {
+      "path": "data/sentence-pairs.tsv",
+      "derived": true,
+      "url": null,
+      "sha256": "2638c4baf8cb415d99a61af3ed8ae334fcc947f56a44add6c76aeb5506421aee",
+      "provenance": "Built from Tatoeba export lineage: 'Sentence pairs in Japanese-English - 2026-01-20.tsv' and 'Sentence pairs in English-Japanese - 2026-01-20.tsv' via scripts/build_sentence_pairs_tsv.py",
+      "required": false
+    },
+    {
+      "path": "data/cc.ja.300.vec",
+      "derived": false,
+      "url": "https://dl.fbaipublicfiles.com/fasttext/vectors-crawl/cc.ja.300.vec.gz",
+      "source_archive_sha256": "8e30841b7041aa1b7983114bb033b3c1774ba777b78d828835ace8360730cd78",
+      "sha256": "6aeddf072d66bf1242a62c9db1fc26db03032db1b6f2859382198b5398ae4adb",
+      "provenance": "fastText source vector file (decompressed locally from .vec.gz)",
+      "required": false
+    },
+    {
+      "path": "data/cc.ja.300.pruned.f32",
+      "derived": true,
+      "url": null,
+      "sha256": "9269e34e7186af3b2a5e5216354626bc1c18892db7103bf412b8d40eda793de6",
+      "provenance": "Derived from data/cc.ja.300.vec + data/keep_vocab.top30k.txt via scripts/build_pruned_embeddings_f32.py",
+      "required": false
+    },
+    {
+      "path": "data/keep_vocab.top30k.txt",
+      "derived": true,
+      "url": null,
+      "sha256": "fa7f13be088ba66ab06c3eeaea6757a5a032b4da72be71f4e68efa47b675fce1",
+      "provenance": "Derived from JMdict kanji+kana unique forms (first 30k)",
+      "required": false
+    }
+  ]
+}

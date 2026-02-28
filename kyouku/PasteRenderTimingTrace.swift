@@ -11,17 +11,17 @@ enum PasteRenderTimingTrace {
         let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
         activeTraceID &+= 1
-        let traceID = activeTraceID
+        _ = activeTraceID
         startedAt = now
         activeNoteID = noteID?.uuidString ?? "-"
         active = true
         lock.unlock()
 
-        CustomLogger.shared.pipeline(
-            context: "PasteTiming",
-            stage: "BEGIN",
-            "trace=\(traceID) note=\(activeNoteID) textLen=\(textLength) reason=\(reason)"
-        )
+        // CustomLogger.shared.pipeline(
+        //     context: "PasteTiming",
+        //     stage: "BEGIN",
+        //     "trace=\(traceID) note=\(activeNoteID) textLen=\(textLength) reason=\(reason)"
+        // )
     }
 
     static func checkpoint(_ stage: String, _ details: String = "") {

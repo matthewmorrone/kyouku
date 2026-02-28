@@ -101,6 +101,8 @@ CREATE TABLE kanji (
     entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
     is_common INTEGER NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 0,
+    jlpt_level INTEGER,
     tags TEXT
 );
 
@@ -109,6 +111,7 @@ CREATE TABLE kana_forms (
     entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
     is_common INTEGER NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 0,
     tags TEXT
 );
 
@@ -177,14 +180,29 @@ CREATE TABLE sentence_pairs (
     PRIMARY KEY (jp_id, en_id)
 );
 
-CREATE INDEX idx_kanji_text ON kanji(text);
-CREATE INDEX idx_kana_forms_text ON kana_forms(text);
+-- Reading overrides / contextual rules for kanji readings.
+CREATE TABLE reading_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    surface TEXT NOT NULL,
+    reading TEXT NOT NULL,
+    match_reading TEXT,
+    next_prefixes TEXT,
+    next_pattern TEXT,
+    priority INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_kanji_text_priority ON kanji(text, priority ASC);
+CREATE INDEX idx_kanji_text_jlpt ON kanji(text, jlpt_level ASC);
+CREATE INDEX idx_kanji_jlpt_level ON kanji(jlpt_level);
+CREATE INDEX idx_kana_forms_text_priority ON kana_forms(text, priority ASC);
 CREATE INDEX idx_glosses_text ON glosses(text);
 CREATE INDEX idx_english_index_token ON english_index(token);
 CREATE INDEX idx_surface_index_hash ON surface_index(token_hash);
 CREATE INDEX idx_pitch_accents_surface_reading ON pitch_accents(surface, reading);
 CREATE INDEX idx_sentence_pairs_jp_id ON sentence_pairs(jp_id);
 CREATE INDEX idx_sentence_pairs_en_id ON sentence_pairs(en_id);
+CREATE INDEX idx_reading_overrides_surface ON reading_overrides(surface);
+CREATE INDEX idx_reading_overrides_priority ON reading_overrides(priority ASC);
 
 CREATE TABLE embeddings (
   word TEXT PRIMARY KEY,
@@ -240,6 +258,89 @@ def import_embeddings(conn: sqlite3.Connection, cur: sqlite3.Cursor, bin_path: P
         raise RuntimeError(f"Embeddings import count mismatch: header={n_words} inserted={inserted} table_count={row_count}")
 
     return n_words, dim
+
+
+def load_kanjidic2_metadata(kanjidic2_path: Path) -> dict:
+    """
+    Load Kanjidic2 kanji metadata and return a mapping:
+    kanji_char -> jlpt_level (1-5 for N1-N5, or None)
+    """
+    if not kanjidic2_path or not kanjidic2_path.exists():
+        return {}
+    
+    try:
+        with open(kanjidic2_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Warning: Failed to load Kanjidic2: {e}")
+        return {}
+    
+    mapping = {}
+    for char_entry in data.get('characters', []):
+        literal = char_entry.get('literal')
+        jlpt_level = char_entry.get('misc', {}).get('jlptLevel')
+        
+        if literal and jlpt_level is not None:
+            mapping[literal] = jlpt_level
+    
+    return mapping
+
+
+def import_reading_overrides(cur: sqlite3.Cursor, tsv_path: Path, batch_size: int = 100):
+    if not tsv_path.exists():
+        raise FileNotFoundError(f"Reading overrides TSV not found: {tsv_path}")
+
+    inserted = 0
+    bad = 0
+    skipped_header = 0
+    batch: list[tuple[str, str, str | None, str | None, str | None, int]] = []
+
+    with tsv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        for row in reader:
+            if not row:
+                continue
+            if skipped_header == 0 and row[0].lower() == "surface":
+                skipped_header += 1
+                continue
+            if len(row) < 2:
+                bad += 1
+                continue
+
+            surface = row[0].strip()
+            reading = row[1].strip()
+            match_reading = row[2].strip() if len(row) > 2 and row[2].strip() else None
+            next_prefixes = row[3].strip() if len(row) > 3 and row[3].strip() else None
+            next_pattern = row[4].strip() if len(row) > 4 and row[4].strip() else None
+            priority = 0
+            if len(row) > 5 and row[5].strip():
+                try:
+                    priority = int(row[5].strip())
+                except ValueError:
+                    priority = 0
+
+            if not surface or not reading:
+                bad += 1
+                continue
+
+            batch.append((surface, reading, match_reading, next_prefixes, next_pattern, priority))
+            if len(batch) >= batch_size:
+                cur.executemany(
+                    "INSERT INTO reading_overrides (surface, reading, match_reading, next_prefixes, next_pattern, priority) VALUES (?, ?, ?, ?, ?, ?)",
+                    batch,
+                )
+                inserted += len(batch)
+                batch.clear()
+
+    if batch:
+        cur.executemany(
+            "INSERT INTO reading_overrides (surface, reading, match_reading, next_prefixes, next_pattern, priority) VALUES (?, ?, ?, ?, ?, ?)",
+            batch,
+        )
+        inserted += len(batch)
+        batch.clear()
+
+    return inserted, bad, skipped_header
 
 
 def import_sentence_pairs(cur: sqlite3.Cursor, tsv_path: Path):
@@ -388,30 +489,16 @@ def print_db_summary(conn: sqlite3.Connection):
 
 
 def resolve_default_paths(repo_root: Path, script_dir: Path):
-    # Prefer repo_root/data for large inputs, with scripts/ as a fallback.
+    # Use a single deterministic default under repo_root/data.
     data_dir = repo_root / "data"
-    json_candidates = [
-        data_dir / "jmdict-eng-3.6.2.json",
-        data_dir / "jmdict-eng-3.6.1.json",
-        script_dir / "jmdict-eng-3.6.2.json",
-        script_dir / "jmdict-eng-3.6.1.json",
-        repo_root / "jmdict-eng-3.6.2.json",
-        repo_root / "jmdict-eng-3.6.1.json",
-        Path.cwd() / "jmdict-eng-3.6.2.json",
-        Path.cwd() / "jmdict-eng-3.6.1.json",
-    ]
+    json_path = data_dir / "jmdict-eng-3.6.2.json"
 
-    json_path = next((p for p in json_candidates if p.exists()), json_candidates[0])
-
-    jmnedict_candidates = [
-        data_dir / "jmnedict-all-3.6.2.json",
-        Path.cwd() / "jmnedict-all-3.6.2.json",
-    ]
-    jmnedict_path = next((p for p in jmnedict_candidates if p.exists()), None)
+    # Don't auto-detect JMnedict; require explicit --jmnedict-json flag to include it
+    jmnedict_path = None
     # Default output should be safe and local to the generator script, to avoid
     # accidentally overwriting the app-bundled DB.
     db_path = script_dir / "dictionary.sqlite3"
-    return json_path, jmnedict_path, db_path, json_candidates
+    return json_path, jmnedict_path, db_path
 
 
 def parse_csv_set(raw: str | None) -> set[str]:
@@ -428,7 +515,7 @@ def parse_csv_set(raw: str | None) -> set[str]:
 def main(argv: list[str]) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     script_dir = Path(__file__).resolve().parent
-    default_json, default_jmnedict, default_db, json_candidates = resolve_default_paths(repo_root, script_dir)
+    default_json, default_jmnedict, default_db = resolve_default_paths(repo_root, script_dir)
     data_dir = (repo_root / "data").resolve()
     default_sentences_tsv = (data_dir / "sentence-pairs.tsv").resolve()
     if not default_sentences_tsv.exists():
@@ -449,6 +536,11 @@ def main(argv: list[str]) -> int:
         "--jmnedict-json",
         default=str(default_jmnedict) if default_jmnedict else None,
         help="Optional path to JMnedict JSON (names / proper nouns)",
+    )
+    parser.add_argument(
+        "--kanjidic2-json",
+        default="data/kanjidic2-en-3.6.2.json",
+        help="Optional path to Kanjidic2 JSON (for kanji JLPT levels; relative to repo root)",
     )
     parser.add_argument(
         "--output",
@@ -484,6 +576,11 @@ def main(argv: list[str]) -> int:
         "--no-embeddings",
         action="store_true",
         help="Disable importing embeddings",
+    )
+    parser.add_argument(
+        "--reading-overrides-tsv",
+        default="data/reading_overrides.tsv",
+        help="Path to reading overrides TSV file (relative to repo root)",
     )
     parser.add_argument(
         "--pitch-tsv",
@@ -585,11 +682,8 @@ def main(argv: list[str]) -> int:
 
     if not json_path.exists():
         print(f"JSON file not found: {json_path}")
-        print("Tried (in order):")
-        for cand in json_candidates:
-            suffix = " (exists)" if cand.exists() else ""
-            print(f"  - {cand}{suffix}")
-        print("\nTip: pass an explicit path via --jmdict-json, e.g. --jmdict-json scripts/jmdict-eng-3.6.2.json")
+        print("Expected default path: data/jmdict-eng-3.6.2.json")
+        print("Tip: pass an explicit path via --jmdict-json, e.g. --jmdict-json data/jmdict-eng-3.6.2.json")
         return 1
 
     if jmnedict_path is not None and not jmnedict_path.exists():
@@ -634,6 +728,13 @@ def main(argv: list[str]) -> int:
             jmnedict_words = names_data.get("words", [])
             print(f"JMnedict words found: {len(jmnedict_words)}")
 
+        # Load Kanjidic2 JLPT levels
+        kanjidic2_path = Path(args.kanjidic2_json) if args.kanjidic2_json else None
+        if kanjidic2_path and not kanjidic2_path.is_absolute():
+            kanjidic2_path = (repo_root / kanjidic2_path).resolve()
+        kanji_metadata = load_kanjidic2_metadata(kanjidic2_path) # type: ignore
+        print(f"Loaded JLPT levels for {len(kanji_metadata)} kanji")
+
         combined_total = total + len(jmnedict_words)
 
         print("Beginning insert...")
@@ -668,9 +769,10 @@ def main(argv: list[str]) -> int:
                 if not text:
                     continue
                 tags = k.get("tags") or []
+                jlpt_level = kanji_metadata.get(text)
                 cur.execute(
-                    "INSERT INTO kanji (entry_id, text, is_common, tags) VALUES (?, ?, ?, ?)",
-                    (entry_id, text, 1 if k.get("common") else 0, join_or_none(tags)),
+                    "INSERT INTO kanji (entry_id, text, is_common, priority, jlpt_level, tags) VALUES (?, ?, ?, ?, ?, ?)",
+                    (entry_id, text, 1 if k.get("common") else 0, 0, jlpt_level, join_or_none(tags)),
                 )
                 if is_common:
                     insert_surface_tokens(
@@ -782,9 +884,10 @@ def main(argv: list[str]) -> int:
                     if not text:
                         continue
                     tags = k.get("tags") or []
+                    jlpt_level = kanji_metadata.get(text)
                     cur.execute(
-                        "INSERT INTO kanji (entry_id, text, is_common, tags) VALUES (?, ?, ?, ?)",
-                        (entry_id, text, 0, join_or_none(tags)),
+                        "INSERT INTO kanji (entry_id, text, is_common, priority, jlpt_level, tags) VALUES (?, ?, ?, ?, ?, ?)",
+                        (entry_id, text, 0, 0, jlpt_level, join_or_none(tags)),
                     )
 
                 # Insert kana forms
@@ -853,6 +956,19 @@ def main(argv: list[str]) -> int:
                     print(f"Processed {processed}/{combined_total} entries ({pct:.1f}%) — {elapsed:.1f}s elapsed")
 
         conn.commit()
+
+        if args.reading_overrides_tsv:
+            overrides_path = Path(args.reading_overrides_tsv)
+            if not overrides_path.is_absolute():
+                overrides_path = (repo_root / overrides_path).resolve()
+            if overrides_path.exists():
+                print(f"Importing reading overrides from: {overrides_path}")
+                conn.execute("BEGIN;")
+                inserted, bad, skipped_header = import_reading_overrides(cur, overrides_path)
+                conn.commit()
+                print(
+                    f"Reading overrides imported: inserted={inserted} bad_lines={bad} header_rows_skipped={skipped_header}"
+                )
 
         if args.pitch_tsv:
             pitch_path = Path(args.pitch_tsv)

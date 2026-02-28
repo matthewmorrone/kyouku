@@ -1,11 +1,22 @@
 jmdict-eng-3.6.1.json
-scripts/jmdict-eng-3.6.2.json
-scripts/mozcdic-ut-sudachidict.txt
-scripts/sentence-pairs.tsv
-scripts/cc.ja.300.pruned.f32
-scripts/__pycache__/
 *.pyc
 *.sqlite3
+third_party
+third_party/*
+kyouku/Resources
+kyouku/Resources/*
+kyouku.xcodeproj
+
+# Keep script sources tracked
+scripts/__pycache__/
+
+# Keep large local data artifacts out of git
+data/*.vec
+data/*.vec.gz
+data/*.bin
+data/*.f32
+data/*.sqlite
+data/*.sqlite3
 
 # Local scratch datasets / large corpora
 data/
@@ -14,3 +25,4 @@ data/
 .derivedData-device/
 .derivedData-sim/
 .derivedData-codex/
+kyouku.xcodeproj/project.pbxproj
