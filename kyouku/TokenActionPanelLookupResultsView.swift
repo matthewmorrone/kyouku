@@ -334,10 +334,6 @@ struct LookupResultsView: View {
     }
 
     private func resetReadingIndexIfNeeded() {
-        guard effectiveResults.count <= 1 else {
-            highlightedReadingIndex = 0
-            return
-        }
         guard let entry = highlightedEntry?.entry else {
             highlightedReadingIndex = 0
             return
@@ -373,14 +369,14 @@ struct LookupResultsView: View {
             }
         }
 
-        let tokenReading = (effectiveSelection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if tokenReading.isEmpty == false, let idx = variants.firstIndex(of: tokenReading) {
+        let entryKana = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if entryKana.isEmpty == false, let idx = variants.firstIndex(of: entryKana) {
             highlightedReadingIndex = idx
             return
         }
 
-        let entryKana = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if entryKana.isEmpty == false, let idx = variants.firstIndex(of: entryKana) {
+        let tokenReading = (effectiveSelection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if tokenReading.isEmpty == false, let idx = variants.firstIndex(of: tokenReading) {
             highlightedReadingIndex = idx
             return
         }
@@ -466,18 +462,24 @@ struct LookupResultsView: View {
         let lemmaSurface = (entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
         let surfaceReading = (effectiveSelection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let displayHeadword = entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? "")
+        let variants = readingVariants(for: entry, detail: matchingHighlightedEntryDetail)
 
         let showSurfaceReading: Bool = {
             guard surfaceReading.isEmpty == false else { return false }
             guard tokenSurface.isEmpty == false else { return false }
             guard isKanaOnlySurface(tokenSurface) == false else { return false }
+            // When paging multiple dictionary results, always show each entry's own reading.
+            guard effectiveResults.count <= 1 else { return false }
+            // When an entry has multiple dictionary kana variants, prefer showing the
+            // dictionary-selected reading in the card header.
+            guard variants.count <= 1 else { return false }
             // For mixed kanji+kana tokens, show the surface reading so the user can
             // quickly confirm overrides.
             return tokenSurface != lemmaSurface
         }()
 
-        let variants = readingVariants(for: entry, detail: matchingHighlightedEntryDetail)
         let selectedReading = variants.indices.contains(highlightedReadingIndex) ? variants[highlightedReadingIndex] : (entry.kana ?? "")
+        let selectedEntry = entryWithKanaVariant(entry, kana: selectedReading)
         let headerReadingText: String = {
             if showSurfaceReading {
                 return surfaceReading
@@ -485,6 +487,12 @@ struct LookupResultsView: View {
             return selectedReading.trimmingCharacters(in: .whitespacesAndNewlines)
         }()
         let shouldShowHeaderReading = headerReadingText.isEmpty == false && headerReadingText != displayHeadword
+
+        let isActiveSelectedDictionaryReading: Bool = {
+            let tokenReading = (effectiveSelection.annotatedSpan.readingKana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate = (selectedEntry.kana ?? selectedEntry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
+            return tokenReading.isEmpty == false && candidate.isEmpty == false && tokenReading == candidate
+        }()
 
         let isSaved = isWordSaved?(entry) ?? false
 
@@ -540,13 +548,13 @@ struct LookupResultsView: View {
 
                 if shouldShowApplyReadingButton {
                     iconActionButton(
-                        systemImage: isActiveDictionaryReading ? "checkmark.circle.fill" : "checkmark.circle",
-                        tint: isActiveDictionaryReading ? .accentColor : .secondary,
-                        accessibilityLabel: isActiveDictionaryReading ? "Active dictionary reading" : "Apply dictionary reading"
+                        systemImage: isActiveSelectedDictionaryReading ? "checkmark.circle.fill" : "checkmark.circle",
+                        tint: isActiveSelectedDictionaryReading ? .accentColor : .secondary,
+                        accessibilityLabel: isActiveSelectedDictionaryReading ? "Active dictionary reading" : "Apply dictionary reading"
                     ) {
-                        onApplyReading(entry)
+                        onApplyReading(selectedEntry)
                     }
-                    .disabled(canUseReading(entry) == false)
+                    .disabled(canUseReading(selectedEntry) == false)
                 }
 
                 if let onShowDefinitions {

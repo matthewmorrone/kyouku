@@ -12,11 +12,30 @@ final class TokenBoundariesStore: ObservableObject {
     private struct PersistedPayload: Codable {
         var spansByNote: [UUID: [StoredSpan]]
         var hardCutsByNote: [UUID: [Int]]
+        var textSignatureByNote: [UUID: UInt64]
+
+        init(
+            spansByNote: [UUID: [StoredSpan]],
+            hardCutsByNote: [UUID: [Int]],
+            textSignatureByNote: [UUID: UInt64]
+        ) {
+            self.spansByNote = spansByNote
+            self.hardCutsByNote = hardCutsByNote
+            self.textSignatureByNote = textSignatureByNote
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            spansByNote = try container.decodeIfPresent([UUID: [StoredSpan]].self, forKey: .spansByNote) ?? [:]
+            hardCutsByNote = try container.decodeIfPresent([UUID: [Int]].self, forKey: .hardCutsByNote) ?? [:]
+            textSignatureByNote = try container.decodeIfPresent([UUID: UInt64].self, forKey: .textSignatureByNote) ?? [:]
+        }
     }
 
     @Published private(set) var spansByNote: [UUID: [StoredSpan]] = [:]
     @Published private(set) var hardCutsByNote: [UUID: [Int]] = [:]
     @Published private(set) var spacingByNote: [UUID: [Int: Double]] = [:]
+    @Published private(set) var textSignatureByNote: [UUID: UInt64] = [:]
 
     private let fileName = "token-spans.json"
 
@@ -32,6 +51,10 @@ final class TokenBoundariesStore: ObservableObject {
         guard let cuts = hardCutsByNote[noteID], cuts.isEmpty == false else { return [] }
         let length = (text as NSString).length
         guard length > 0 else { return [] }
+        guard noteDataMatchesText(noteID: noteID, text: text) else {
+            invalidateStaleNoteData(noteID: noteID)
+            return []
+        }
         return cuts
             .filter { $0 > 0 && $0 < length }
             .sorted()
@@ -45,6 +68,7 @@ final class TokenBoundariesStore: ObservableObject {
         let inserted = existing.insert(utf16Index).inserted
         guard inserted else { return }
         hardCutsByNote[noteID] = existing.sorted()
+        textSignatureByNote[noteID] = textSignature(text)
         save()
     }
 
@@ -61,6 +85,7 @@ final class TokenBoundariesStore: ObservableObject {
         }
         guard existing.count != beforeCount else { return }
         hardCutsByNote[noteID] = existing.sorted()
+        textSignatureByNote[noteID] = textSignature(text)
         save()
     }
 
@@ -168,6 +193,10 @@ final class TokenBoundariesStore: ObservableObject {
 
     func spans(for noteID: UUID, text: String) -> [TextSpan]? {
         guard let stored = spansByNote[noteID], stored.isEmpty == false else { return nil }
+        guard noteDataMatchesText(noteID: noteID, text: text) else {
+            invalidateStaleNoteData(noteID: noteID)
+            return nil
+        }
         let nsText = text as NSString
         let textLength = nsText.length
         guard textLength > 0 else { return [] }
@@ -205,6 +234,7 @@ final class TokenBoundariesStore: ObservableObject {
         } else {
             spansByNote[noteID] = cleaned
         }
+        textSignatureByNote[noteID] = textSignature(text)
         save()
     }
 
@@ -212,11 +242,36 @@ final class TokenBoundariesStore: ObservableObject {
         let removedSpans = spansByNote.removeValue(forKey: noteID) != nil
         let removedCuts = hardCutsByNote.removeValue(forKey: noteID) != nil
         let removedSpacing = spacingByNote.removeValue(forKey: noteID) != nil
-        guard removedSpans || removedCuts || removedSpacing else { return }
+        let removedSignature = textSignatureByNote.removeValue(forKey: noteID) != nil
+        guard removedSpans || removedCuts || removedSpacing || removedSignature else { return }
         // Inter-token spacing is intentionally not persisted.
         if removedSpans || removedCuts {
             save()
         }
+    }
+
+    private func noteDataMatchesText(noteID: UUID, text: String) -> Bool {
+        guard let storedSignature = textSignatureByNote[noteID] else { return false }
+        return storedSignature == textSignature(text)
+    }
+
+    private func textSignature(_ text: String) -> UInt64 {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for scalar in text.unicodeScalars {
+            hash ^= UInt64(scalar.value)
+            hash &*= 0x100000001b3
+        }
+        hash ^= UInt64(text.utf16.count)
+        hash &*= 0x100000001b3
+        return hash
+    }
+
+    private func invalidateStaleNoteData(noteID: UUID) {
+        let removedSpans = spansByNote.removeValue(forKey: noteID) != nil
+        let removedCuts = hardCutsByNote.removeValue(forKey: noteID) != nil
+        let removedSignature = textSignatureByNote.removeValue(forKey: noteID) != nil
+        guard removedSpans || removedCuts || removedSignature else { return }
+        save()
     }
 
     // MARK: - Persistence
@@ -236,6 +291,7 @@ final class TokenBoundariesStore: ObservableObject {
             if let decoded = try? JSONDecoder().decode(PersistedPayload.self, from: data) {
                 spansByNote = decoded.spansByNote
                 hardCutsByNote = decoded.hardCutsByNote
+                textSignatureByNote = decoded.textSignatureByNote
                 // Inter-token spacing is intentionally NOT persisted across installs.
                 // Old files may contain spacingByNote; we ignore it on load.
                 spacingByNote = [:]
@@ -244,6 +300,7 @@ final class TokenBoundariesStore: ObservableObject {
             if let decoded = try? JSONDecoder().decode([UUID: [StoredSpan]].self, from: data) {
                 spansByNote = decoded
                 hardCutsByNote = [:]
+                textSignatureByNote = [:]
                 spacingByNote = [:]
                 return
             }
@@ -251,11 +308,13 @@ final class TokenBoundariesStore: ObservableObject {
             _ = try? JSONDecoder().decode([UUID: [Int]].self, from: data)
             spansByNote = [:]
             hardCutsByNote = [:]
+            textSignatureByNote = [:]
             spacingByNote = [:]
         } catch {
             CustomLogger.shared.error("Failed to load token boundaries: \(error)")
             spansByNote = [:]
             hardCutsByNote = [:]
+            textSignatureByNote = [:]
             spacingByNote = [:]
         }
     }
@@ -265,7 +324,8 @@ final class TokenBoundariesStore: ObservableObject {
         do {
             let payload = PersistedPayload(
                 spansByNote: spansByNote,
-                hardCutsByNote: hardCutsByNote
+                hardCutsByNote: hardCutsByNote,
+                textSignatureByNote: textSignatureByNote
             )
             let data = try JSONEncoder().encode(payload)
             try data.write(to: url, options: .atomic)

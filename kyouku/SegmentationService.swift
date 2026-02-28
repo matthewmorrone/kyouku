@@ -171,6 +171,8 @@ actor SegmentationService {
 
         struct State {
             var nonLexChars: Int
+            var lexSingletonSegments: Int
+            var lexSegments: Int
             var segments: Int
             var nextOffset: Int
             var isLex: Bool
@@ -178,14 +180,19 @@ actor SegmentationService {
 
         let inf = Int.max / 8
         var dp: [State] = Array(
-            repeating: State(nonLexChars: inf, segments: inf, nextOffset: -1, isLex: false),
+            repeating: State(nonLexChars: inf, lexSingletonSegments: 0, lexSegments: 0, segments: inf, nextOffset: -1, isLex: false),
             count: runLength + 1
         )
-        dp[runLength] = State(nonLexChars: 0, segments: 0, nextOffset: runLength, isLex: false)
+        dp[runLength] = State(nonLexChars: 0, lexSingletonSegments: 0, lexSegments: 0, segments: 0, nextOffset: runLength, isLex: false)
 
         func better(_ a: State, than b: State) -> Bool {
             if a.nonLexChars != b.nonLexChars { return a.nonLexChars < b.nonLexChars }
-            // Among equally-covered paths, prefer fewer segments (longer words).
+            // Prefer fewer one-character lexicon chunks (e.g. avoid ティアー + ズ).
+            if a.lexSingletonSegments != b.lexSingletonSegments { return a.lexSingletonSegments < b.lexSingletonSegments }
+            // Among equally-covered paths, prefer more lexicon segments to decompose
+            // katakana compounds when multiple full-cover paths exist.
+            if a.lexSegments != b.lexSegments { return a.lexSegments > b.lexSegments }
+            // Then prefer fewer total segments (longer words) for stability.
             if a.segments != b.segments { return a.segments < b.segments }
             // Stable tie-break: prefer advancing further.
             return a.nextOffset > b.nextOffset
@@ -194,7 +201,7 @@ actor SegmentationService {
         // DP from end → start: minimize non-lex chars, then minimize number of segments.
         if runLength > 0 {
             for i in stride(from: runLength - 1, through: 0, by: -1) {
-                var best = State(nonLexChars: inf, segments: inf, nextOffset: i + 1, isLex: false)
+                var best = State(nonLexChars: inf, lexSingletonSegments: 0, lexSegments: 0, segments: inf, nextOffset: i + 1, isLex: false)
 
                 // Option A: take a lexicon word starting here.
                 for endAbs in matchEndsByOffset[i] {
@@ -202,14 +209,29 @@ actor SegmentationService {
                     guard j > i, j <= runLength else { continue }
                     let tail = dp[j]
                     if tail.nonLexChars >= inf { continue }
-                    let cand = State(nonLexChars: tail.nonLexChars, segments: tail.segments + 1, nextOffset: j, isLex: true)
+                    let segmentLength = j - i
+                    let cand = State(
+                        nonLexChars: tail.nonLexChars,
+                        lexSingletonSegments: tail.lexSingletonSegments + (segmentLength == 1 ? 1 : 0),
+                        lexSegments: tail.lexSegments + 1,
+                        segments: tail.segments + 1,
+                        nextOffset: j,
+                        isLex: true
+                    )
                     if better(cand, than: best) { best = cand }
                 }
 
                 // Option B: fallback singleton.
                 let tail = dp[i + 1]
                 if tail.nonLexChars < inf {
-                    let cand = State(nonLexChars: tail.nonLexChars + 1, segments: tail.segments + 1, nextOffset: i + 1, isLex: false)
+                    let cand = State(
+                        nonLexChars: tail.nonLexChars + 1,
+                        lexSingletonSegments: tail.lexSingletonSegments,
+                        lexSegments: tail.lexSegments,
+                        segments: tail.segments + 1,
+                        nextOffset: i + 1,
+                        isLex: false
+                    )
                     if better(cand, than: best) { best = cand }
                 }
 
