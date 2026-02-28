@@ -81,7 +81,7 @@ actor LexiconProvider {
             cachedSokuonTerminalAllowedForms = bootstrap.sokuonTerminalAllowedForms
             buildTask = nil
             signposter.endInterval("Trie() Overall", overallInterval)
-            await CustomLogger.shared.info("Lexicon trie built and cached in memory.")
+            // await CustomLogger.shared.info("Lexicon trie built and cached in memory.")
             return bootstrap
         } catch {
             buildTask = nil

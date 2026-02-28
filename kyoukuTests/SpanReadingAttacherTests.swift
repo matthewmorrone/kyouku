@@ -32,6 +32,22 @@ final class SpanReadingAttacherTests: XCTestCase {
         XCTAssertEqual(rewritten, "なに")
     }
 
+    func testContextualRewrite_HitoriPrefixPreservesSuffixForIchininReading() {
+        let text = "一人で来た" as NSString
+        let surface = "一人で"
+        let range = NSRange(location: 0, length: (surface as NSString).length)
+        let rewritten = SpanReadingAttacher.applyContextualReadingRules(surface: surface, reading: "いちにんで", nsText: text, range: range)
+        XCTAssertEqual(rewritten, "ひとりで")
+    }
+
+    func testContextualRewrite_NaniPrefixForMergedSurface() {
+        let text = "何でもない" as NSString
+        let surface = "何でもない"
+        let range = NSRange(location: 0, length: (surface as NSString).length)
+        let rewritten = SpanReadingAttacher.applyContextualReadingRules(surface: surface, reading: "なにでもない", nsText: text, range: range)
+        XCTAssertEqual(rewritten, "なんでもない")
+    }
+
     private func assertFallback(surface: String, readingKatakana: String, expectedHiragana: String, file: StaticString = #filePath, line: UInt = #line) {
         guard let katakana = SpanReadingAttacher.kanjiReadingFromToken(tokenSurface: surface, tokenReadingKatakana: readingKatakana) else {
             return XCTFail("Expected fallback reading for \(surface)", file: file, line: line)

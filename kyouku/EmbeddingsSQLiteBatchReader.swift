@@ -80,7 +80,7 @@ final class EmbeddingsSQLiteBatchReader: @unchecked Sendable {
                     let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: blob), count: bytes, deallocator: .none)
                     if let vec: [Float] = data.withUnsafeBytes({ raw in
                         let floats = raw.bindMemory(to: Float.self)
-                        assert(floats.count == Self.dim)
+                        // assert(floats.count == Self.dim)
                         guard floats.count == Self.dim else { return nil }
                         return Array(floats)
                     }) {

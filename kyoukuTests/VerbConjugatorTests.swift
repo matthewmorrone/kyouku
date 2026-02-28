@@ -65,4 +65,32 @@ final class VerbConjugatorTests: XCTestCase {
             XCTAssertEqual(m["Imperative"], "来い")
         }
     }
+
+    func testKieruIchidan() {
+        let items = VerbConjugator.conjugations(for: "きえる", verbClass: .ichidan, set: .all)
+        let m = surfaceMap(items)
+        XCTAssertEqual(m["Polite (ます)"], "きえます")
+        XCTAssertEqual(m["て-form"], "きえて")
+        XCTAssertEqual(m["Past (た)"], "きえた")
+        XCTAssertEqual(m["Negative (ない)"], "きえない")
+        XCTAssertEqual(m["Potential"], "きえられる")
+    }
+
+    func testInferVerbClassFallsBackToSuruWhenVerbLike() {
+        let inferred = VerbConjugator.inferVerbClass(
+            fromJMDictPosTags: ["v"],
+            dictionaryForm: "べんきょうする",
+            tokenPartOfSpeech: nil
+        )
+        XCTAssertEqual(inferred, .suru)
+    }
+
+    func testInferVerbClassUsesTokenPartOfSpeechWhenTagsMissing() {
+        let inferred = VerbConjugator.inferVerbClass(
+            fromJMDictPosTags: [],
+            dictionaryForm: "のむ",
+            tokenPartOfSpeech: "動詞"
+        )
+        XCTAssertEqual(inferred, .godan)
+    }
 }

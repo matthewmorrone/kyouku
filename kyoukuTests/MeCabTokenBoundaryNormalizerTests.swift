@@ -69,4 +69,23 @@ final class MeCabTokenBoundaryNormalizerTests: XCTestCase {
         XCTAssertEqual(result.spans.first?.surface, text)
         XCTAssertTrue(result.forcedCuts.isEmpty)
     }
+
+    func testDoesNotSplitAcrossIterationMarkAdjacentMecabTokens() {
+        let text = "さゝやく"
+        let nsText = text as NSString
+        let spans = [
+            TextSpan(range: NSRange(location: 0, length: nsText.length), surface: text, isLexiconMatch: true)
+        ]
+        let mecab = [
+            mecab(NSRange(location: 0, length: 1), surface: "さ", pos: "動詞"),
+            mecab(NSRange(location: 1, length: 1), surface: "ゝ", pos: "記号"),
+            mecab(NSRange(location: 2, length: 2), surface: "やく", pos: "動詞")
+        ]
+
+        let result = MeCabTokenBoundaryNormalizer.apply(text: nsText, spans: spans, mecab: mecab)
+
+        XCTAssertEqual(result.spans.count, 1)
+        XCTAssertEqual(result.spans.first?.surface, text)
+        XCTAssertTrue(result.forcedCuts.isEmpty)
+    }
 }

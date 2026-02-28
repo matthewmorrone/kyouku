@@ -101,12 +101,17 @@ struct WordDefinitionView: View {
                             }
                         )
                     }
-                    SectionCard {
-                        MeaningSection(senses: snapshot.senses)
-                    }
+                    // SectionCard {
+                    //     MeaningSection(senses: snapshot.senses)
+                    // }
                     if snapshot.entryCards.isEmpty == false {
                         SectionCard {
                             EntryCardsSection(cards: snapshot.entryCards)
+                        }
+                    }
+                    if snapshot.kanaKanjiCandidates.isEmpty == false {
+                        SectionCard {
+                            KanaKanjiCandidatesSection(candidates: snapshot.kanaKanjiCandidates)
                         }
                     }
                     if snapshot.conjugations.isEmpty == false {
@@ -129,9 +134,6 @@ struct WordDefinitionView: View {
                             KanjiSection(rows: snapshot.kanjiRows)
                         }
                     }
-                    SectionCard {
-                        NotesSection(text: notesBinding(snapshot: snapshot))
-                    }
                     if snapshot.clippings.isEmpty == false {
                         SectionCard {
                             ContainedInSection(clippings: snapshot.clippings) { note in
@@ -145,6 +147,9 @@ struct WordDefinitionView: View {
                         ExampleSection(examples: snapshot.examples) { tappedSurface in
                             showExampleTokenPreview(for: tappedSurface)
                         }
+                    }
+                    SectionCard {
+                        NotesSection(text: notesBinding(snapshot: snapshot))
                     }
                 }
             }
@@ -199,6 +204,8 @@ struct WordDefinitionView: View {
                 .navigationTitle("Token")
                 .navigationBarTitleDisplayMode(.inline)
             }
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
         }
         .alert("Create New List", isPresented: $isPromptingForNewListName) {
             TextField("List name", text: $pendingNewListName)
@@ -398,6 +405,7 @@ private extension WordDefinitionView {
         let grammarHints: [DetectedGrammarPattern]
         let similarWords: [String]
         let entryCards: [EntryCard]
+        let kanaKanjiCandidates: [String]
         let kanjiRows: [KanjiItem]
         let clippings: [Note]
         let examples: [ExampleItem]
@@ -433,6 +441,7 @@ private extension WordDefinitionView {
         let jpText: String
         let enText: String
         let attributedJP: NSAttributedString
+        let attributedEN: NSAttributedString
         let semanticSpans: [SemanticSpan]
     }
 
@@ -441,6 +450,37 @@ private extension WordDefinitionView {
             let trimmedSurface = request.term.surface.trimmingCharacters(in: .whitespacesAndNewlines)
             let trimmedKana = request.term.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedKana = (trimmedKana?.isEmpty == false) ? trimmedKana : nil
+
+            let savedWordMatch: Word? = {
+                guard trimmedSurface.isEmpty == false else { return nil }
+                return store.words.first { word in
+                    let candidateSurface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let candidateDictionarySurface = word.dictionarySurface?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let candidateKana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let normalizedCandidateKana = (candidateKana?.isEmpty == false) ? candidateKana : nil
+                    let surfaceMatches = (candidateDictionarySurface == trimmedSurface) || (candidateSurface == trimmedSurface)
+                    guard surfaceMatches else { return false }
+                    return normalizedCandidateKana == normalizedKana
+                }
+            }()
+
+            let preferredKanaHeadword: String? = {
+                if let normalizedKana { return normalizedKana }
+                guard let savedWordMatch else { return nil }
+                let savedSurface = savedWordMatch.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard savedSurface.isEmpty == false, isKanaOnly(savedSurface) else { return nil }
+                return savedSurface
+            }()
+
+            let preferKanaPresentation: Bool = {
+                guard let savedWordMatch else { return false }
+                let savedSurface = savedWordMatch.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard savedSurface.isEmpty == false else { return false }
+                if let preferredKanaHeadword, preferredKanaHeadword.isEmpty == false {
+                    return true
+                }
+                return isKanaOnly(savedSurface)
+            }()
 
             var queryTerms: [String] = []
             if trimmedSurface.isEmpty == false { queryTerms.append(trimmedSurface) }
@@ -486,6 +526,11 @@ private extension WordDefinitionView {
             let orderedDetails = details.filter { $0.isCommon } + details.filter { $0.isCommon == false }
 
             let headword: String = {
+                if let preferredKanaHeadword,
+                   preferredKanaHeadword.isEmpty == false,
+                   preferKanaPresentation {
+                    return preferredKanaHeadword
+                }
                 if let first = orderedDetails.first,
                    let text = first.kanjiForms.first?.text,
                    text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
@@ -503,23 +548,47 @@ private extension WordDefinitionView {
             }()
 
             let reading: String? = {
+                if let preferredKanaHeadword,
+                   preferredKanaHeadword.isEmpty == false,
+                   preferKanaPresentation {
+                    return preferredKanaHeadword
+                }
                 if let normalizedKana { return normalizedKana }
                 let fallback = orderedDetails.first?.kanaForms.first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 return (fallback?.isEmpty == false) ? fallback : nil
             }()
 
             let senses = buildSenses(from: orderedDetails)
-            let entryCards = buildEntryCards(from: orderedDetails, fallbackHeadword: headword)
+            let entryCards = buildEntryCards(from: orderedDetails, fallbackHeadword: headword, preferKanaHeadword: preferKanaPresentation)
+            let kanaKanjiCandidates = isKanaOnly(headword)
+                ? buildKanaKanjiCandidates(from: orderedDetails, excluding: headword)
+                : []
             let partOfSpeech = buildPartOfSpeech(from: orderedDetails)
             let isCommon = orderedDetails.first?.isCommon ?? mergedEntries.first?.isCommon ?? false
-            let conjugations = buildConjugations(from: orderedDetails, headword: headword)
+            let conjugations = buildConjugations(
+                from: orderedDetails,
+                headword: headword,
+                tokenPartOfSpeech: request.context.tokenPartOfSpeech
+            )
             let grammarHints = (request.context.sentence?.isEmpty == false) ? GrammarPatternDetector.detect(in: request.context.sentence ?? "") : []
-            let similarWords = JapaneseSimilarityService.neighbors(for: headword, maxCount: 10).filter { $0 != headword }
+            let similarWords = await loadSimilarWords(headword: headword, maxCount: 10)
             let pitchAccents = try await loadPitchAccents(from: orderedDetails)
-            let kanjiRows = try await loadKanjiRows(headword: headword)
+            let kanjiRows = preferKanaPresentation ? [] : (try await loadKanjiRows(headword: headword))
             let clippings = buildClippings(headword: headword, reading: reading, notesStore: notesStore, store: store, sourceNoteID: request.metadata.sourceNoteID)
-            let examples = try await loadExamples(headword: headword, reading: reading)
             let primaryMeaning = senses.first?.gloss ?? mergedEntries.first.map { firstGloss($0.gloss) } ?? ""
+            let exampleAnchors = exampleSearchAnchors(
+                requestSurface: trimmedSurface,
+                requestKana: normalizedKana,
+                headword: headword,
+                reading: reading,
+                details: orderedDetails
+            )
+            let examples = try await loadExamples(
+                headword: headword,
+                reading: reading,
+                primaryMeaning: primaryMeaning,
+                requiredAnchors: exampleAnchors
+            )
             let lemmaLine: String? = {
                 guard let lemma = resolvedLemma?.trimmingCharacters(in: .whitespacesAndNewlines), lemma.isEmpty == false else { return nil }
                 guard lemma != headword else { return nil }
@@ -545,6 +614,7 @@ private extension WordDefinitionView {
                 grammarHints: grammarHints,
                 similarWords: similarWords,
                 entryCards: entryCards,
+                kanaKanjiCandidates: kanaKanjiCandidates,
                 kanjiRows: kanjiRows,
                 clippings: clippings,
                 examples: examples,
@@ -552,32 +622,97 @@ private extension WordDefinitionView {
             )
         }
 
-        private static func buildConjugations(from details: [DictionaryEntryDetail], headword: String) -> [VerbConjugation] {
+        private static func buildConjugations(
+            from details: [DictionaryEntryDetail],
+            headword: String,
+            tokenPartOfSpeech: String?
+        ) -> [VerbConjugation] {
             let tags = details
                 .flatMap { $0.senses }
                 .flatMap { $0.partsOfSpeech }
 
-            guard let verbClass = VerbConjugator.detectVerbClass(fromJMDictPosTags: tags) else { return [] }
-
             let base: String = {
-                if let reading = details.first?.kanaForms.first?.text.trimmingCharacters(in: .whitespacesAndNewlines),
-                   reading.isEmpty == false {
-                    return reading
+                for detail in details {
+                    for form in detail.kanaForms {
+                        let reading = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if reading.isEmpty == false {
+                            return reading
+                        }
+                    }
                 }
                 return headword
             }()
 
+            guard base.isEmpty == false else { return [] }
+
+            guard let verbClass = VerbConjugator.inferVerbClass(
+                fromJMDictPosTags: tags,
+                dictionaryForm: base,
+                tokenPartOfSpeech: tokenPartOfSpeech
+            ) else {
+                return []
+            }
+
             return VerbConjugator.conjugations(for: base, verbClass: verbClass, set: .all)
         }
 
-        private static func buildEntryCards(from details: [DictionaryEntryDetail], fallbackHeadword: String) -> [EntryCard] {
+        private static func loadSimilarWords(headword: String, maxCount: Int) async -> [String] {
+            let trimmedHeadword = headword.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedHeadword.isEmpty == false else { return [] }
+
+            var out: [String] = []
+            var seen: Set<String> = []
+
+            let primary = JapaneseSimilarityService.neighbors(for: trimmedHeadword, maxCount: maxCount)
+            for candidate in primary {
+                let value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard value.isEmpty == false, value != trimmedHeadword else { continue }
+                if seen.insert(value).inserted {
+                    out.append(value)
+                }
+            }
+
+            if out.count >= maxCount {
+                return Array(out.prefix(maxCount))
+            }
+
+            if let fallback = await EmbeddingNeighborsService.shared.neighbors(for: trimmedHeadword, topN: max(20, maxCount * 3)) {
+                for neighbor in fallback {
+                    let value = neighbor.word.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard value.isEmpty == false, value != trimmedHeadword else { continue }
+                    if seen.insert(value).inserted {
+                        out.append(value)
+                    }
+                    if out.count >= maxCount {
+                        break
+                    }
+                }
+            }
+
+            return out
+        }
+
+        private static func buildEntryCards(from details: [DictionaryEntryDetail], fallbackHeadword: String, preferKanaHeadword: Bool) -> [EntryCard] {
             var cards: [EntryCard] = []
             cards.reserveCapacity(details.count)
 
             for detail in details {
                 let headwordRaw = detail.kanjiForms.first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 let readingRaw = detail.kanaForms.first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                let headword = (headwordRaw?.isEmpty == false) ? headwordRaw! : fallbackHeadword
+                let headword: String = {
+                    if preferKanaHeadword,
+                       let readingRaw,
+                       readingRaw.isEmpty == false {
+                        return readingRaw
+                    }
+                    if let headwordRaw, headwordRaw.isEmpty == false {
+                        return headwordRaw
+                    }
+                    if let readingRaw, readingRaw.isEmpty == false {
+                        return readingRaw
+                    }
+                    return fallbackHeadword
+                }()
                 let reading = (readingRaw?.isEmpty == false) ? readingRaw : nil
 
                 var formSet = Set<String>()
@@ -606,7 +741,7 @@ private extension WordDefinitionView {
                 cards.append(EntryCard(
                     id: "entry-card-\(detail.entryID)",
                     headword: headword,
-                    reading: reading,
+                    reading: (reading == headword) ? nil : reading,
                     isCommon: detail.isCommon,
                     forms: forms,
                     senses: senses
@@ -614,6 +749,25 @@ private extension WordDefinitionView {
             }
 
             return cards
+        }
+
+        private static func buildKanaKanjiCandidates(from details: [DictionaryEntryDetail], excluding kanaHeadword: String) -> [String] {
+            let excluded = kanaHeadword.trimmingCharacters(in: .whitespacesAndNewlines)
+            var seen: Set<String> = []
+            var out: [String] = []
+
+            for detail in details {
+                for form in detail.kanjiForms {
+                    let text = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard text.isEmpty == false, text != excluded else { continue }
+                    guard containsKanji(text) else { continue }
+                    if seen.insert(text).inserted {
+                        out.append(text)
+                    }
+                }
+            }
+
+            return out
         }
 
         private static func mapDeinflectionReason(_ raw: String) -> String {
@@ -685,7 +839,10 @@ private extension WordDefinitionView {
 
                 let rows = try await DictionarySQLiteStore.shared.fetchPitchAccents(surface: surface, reading: reading)
                 for row in rows {
-                    let key = "\(row.surface)|\(row.reading)|\(row.accent)|\(row.morae)|\(row.kind ?? "")"
+                    let normalizedReading = (row.readingMarked?.replacingOccurrences(of: "◦", with: "") ?? row.reading)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let normalizedKind = (row.kind ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let key = "\(normalizedReading)|\(row.accent)|\(row.morae)|\(normalizedKind)"
                     if seen.insert(key).inserted {
                         out.append(row)
                     }
@@ -760,17 +917,119 @@ private extension WordDefinitionView {
                 .sorted { $0.createdAt > $1.createdAt }
         }
 
-        private static func loadExamples(headword: String, reading: String?) async throws -> [ExampleItem] {
+        private static func exampleSearchAnchors(
+            requestSurface: String,
+            requestKana: String?,
+            headword: String,
+            reading: String?,
+            details: [DictionaryEntryDetail]
+        ) -> [String] {
+            var out: [String] = []
+            var seen: Set<String> = []
+
+            func push(_ value: String?) {
+                guard let value else { return }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.isEmpty == false else { return }
+                let key = trimmed.precomposedStringWithCanonicalMapping
+                guard seen.insert(key).inserted else { return }
+                out.append(key)
+            }
+
+            func shouldUseRequestSurface(_ value: String) -> Bool {
+                let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard normalized.isEmpty == false else { return false }
+                let length = (normalized as NSString).length
+                if length >= 2 { return true }
+                if isKanaOnly(normalized) { return true }
+                return false
+            }
+
+            if shouldUseRequestSurface(requestSurface) {
+                push(requestSurface)
+            }
+            push(requestKana)
+            push(headword)
+            push(reading)
+
+            for detail in details {
+                for form in detail.kanjiForms.prefix(3) {
+                    push(form.text)
+                }
+                for form in detail.kanaForms.prefix(3) {
+                    push(form.text)
+                }
+            }
+
+            return out
+        }
+
+        private static func loadExamples(
+            headword: String,
+            reading: String?,
+            primaryMeaning: String,
+            requiredAnchors: [String]
+        ) async throws -> [ExampleItem] {
             var terms: [String] = [headword]
             if let reading, terms.contains(reading) == false {
                 terms.append(reading)
             }
 
-            let examples = try await DictionarySQLiteStore.shared.fetchExampleSentences(containing: terms, limit: 8)
+            let requiredTerms = requiredAnchors
+                .map { $0.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.isEmpty == false }
+                .sorted { ($0 as NSString).length > ($1 as NSString).length }
+
+            let strongestLength = (requiredTerms.first as NSString?)?.length ?? 0
+            let strongRequiredTerms = requiredTerms.filter {
+                let length = ($0 as NSString).length
+                guard length >= 2 else { return false }
+                return length >= max(2, strongestLength - 1)
+            }
+
+            func foldKanaToHiragana(_ value: String) -> String {
+                value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
+            }
+
+            func containsAnyRequiredTerm(in jpText: String) -> Bool {
+                let normalizedJP = jpText.precomposedStringWithCanonicalMapping
+                let foldedJP = foldKanaToHiragana(normalizedJP)
+                let anchors = strongRequiredTerms.isEmpty ? requiredTerms : strongRequiredTerms
+                guard anchors.isEmpty == false else { return false }
+                return anchors.contains { anchor in
+                    if normalizedJP.contains(anchor) { return true }
+                    let foldedAnchor = foldKanaToHiragana(anchor)
+                    return foldedJP.contains(foldedAnchor)
+                }
+            }
+
+            let strictKanaTerm: String? = {
+                let trimmedHeadword = headword.trimmingCharacters(in: .whitespacesAndNewlines)
+                if isKanaOnly(trimmedHeadword) { return trimmedHeadword }
+                let trimmedReading = reading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if isKanaOnly(trimmedReading) { return trimmedReading }
+                return nil
+            }()
+
+            func containsStrictKanaTerm(in jpText: String) -> Bool {
+                guard let strictKanaTerm, strictKanaTerm.isEmpty == false else { return true }
+                let normalizedJP = jpText.precomposedStringWithCanonicalMapping
+                if normalizedJP.contains(strictKanaTerm) { return true }
+                let foldedJP = foldKanaToHiragana(normalizedJP)
+                let foldedKana = foldKanaToHiragana(strictKanaTerm)
+                return foldedJP.contains(foldedKana)
+            }
+
+            let englishTerms = englishHighlightCandidates(from: primaryMeaning)
+
+            let examples = try await DictionarySQLiteStore.shared.fetchExampleSentences(containing: terms, limit: 32)
             var output: [ExampleItem] = []
             output.reserveCapacity(examples.count)
 
             for sentence in examples {
+                guard containsAnyRequiredTerm(in: sentence.jpText) else { continue }
+                guard containsStrictKanaTerm(in: sentence.jpText) else { continue }
+
                 let rendered = await FuriganaPipelineService().render(
                     .init(
                         text: sentence.jpText,
@@ -796,12 +1055,104 @@ private extension WordDefinitionView {
                         id: sentence.id,
                         jpText: sentence.jpText,
                         enText: sentence.enText,
-                        attributedJP: rendered.attributedString ?? NSAttributedString(string: sentence.jpText),
+                        attributedJP: highlightedAttributedText(
+                            base: rendered.attributedString ?? NSAttributedString(string: sentence.jpText),
+                            terms: terms,
+                            caseInsensitive: false
+                        ),
+                        attributedEN: highlightedAttributedText(
+                            base: NSAttributedString(string: sentence.enText),
+                            terms: englishTerms,
+                            caseInsensitive: true
+                        ),
                         semanticSpans: rendered.semanticSpans
                     )
                 )
+
+                if output.count >= 8 {
+                    break
+                }
             }
             return output
+        }
+
+        private static func englishHighlightCandidates(from primaryMeaning: String) -> [String] {
+            let raw = primaryMeaning.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard raw.isEmpty == false else { return [] }
+
+            func normalizedPhrase(_ value: String) -> String {
+                value
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "  +", with: " ", options: .regularExpression)
+            }
+
+            let phraseSeparators = CharacterSet(charactersIn: ";/")
+            let phrases = raw
+                .components(separatedBy: phraseSeparators)
+                .map(normalizedPhrase)
+                .filter { $0.isEmpty == false }
+
+            guard let firstPhrase = phrases.first else { return [] }
+
+            var candidates: [String] = []
+            var seen: Set<String> = []
+
+            func push(_ candidate: String) {
+                let c = normalizedPhrase(candidate)
+                guard c.isEmpty == false else { return }
+                let key = c.lowercased()
+                guard seen.insert(key).inserted else { return }
+                candidates.append(c)
+            }
+
+            push(firstPhrase)
+
+            let withoutInfinitive = firstPhrase.hasPrefix("to ") ? String(firstPhrase.dropFirst(3)) : firstPhrase
+            push(withoutInfinitive)
+
+            let wordSeparators = CharacterSet(charactersIn: " ,()[]{}:.“”\"'").union(.whitespacesAndNewlines)
+            let words = withoutInfinitive
+                .components(separatedBy: wordSeparators)
+                .map(normalizedPhrase)
+                .filter { token in
+                    guard token.count >= 4 else { return false }
+                    return token.unicodeScalars.allSatisfy { CharacterSet.letters.contains($0) }
+                }
+            if let strongestWord = words.first {
+                push(strongestWord)
+            }
+
+            return Array(candidates.prefix(3))
+        }
+
+        private static func highlightedAttributedText(base: NSAttributedString, terms: [String], caseInsensitive: Bool) -> NSAttributedString {
+            guard terms.isEmpty == false else { return base }
+
+            let mutable = NSMutableAttributedString(attributedString: base)
+            let nsText = mutable.string as NSString
+            let fullLength = nsText.length
+            guard fullLength > 0 else { return base }
+
+            let options: NSString.CompareOptions = caseInsensitive ? [.caseInsensitive, .diacriticInsensitive] : []
+            let color = UIColor.systemYellow.withAlphaComponent(0.28)
+
+            for rawTerm in terms {
+                let term = rawTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard term.isEmpty == false else { continue }
+
+                var searchRange = NSRange(location: 0, length: fullLength)
+                while searchRange.length > 0 {
+                    let found = nsText.range(of: term, options: options, range: searchRange)
+                    guard found.location != NSNotFound, found.length > 0 else { break }
+                    mutable.addAttribute(.backgroundColor, value: color, range: found)
+
+                    let nextLocation = NSMaxRange(found)
+                    guard nextLocation < fullLength else { break }
+                    searchRange = NSRange(location: nextLocation, length: fullLength - nextLocation)
+                }
+            }
+
+            return mutable
         }
 
         private static func mapPartOfSpeech(_ raw: String) -> String {
@@ -844,6 +1195,15 @@ private extension WordDefinitionView {
             guard text.isEmpty == false else { return false }
             return text.unicodeScalars.allSatisfy {
                 (0x30A0...0x30FF).contains($0.value) || (0xFF66...0xFF9F).contains($0.value)
+            }
+        }
+
+        private static func isKanaOnly(_ text: String) -> Bool {
+            guard text.isEmpty == false else { return false }
+            return text.unicodeScalars.allSatisfy { scalar in
+                (0x3040...0x309F).contains(scalar.value) ||
+                (0x30A0...0x30FF).contains(scalar.value) ||
+                (0xFF66...0xFF9F).contains(scalar.value)
             }
         }
 
@@ -950,7 +1310,7 @@ private struct HeaderSection: View {
                 }
 
                 if snapshot.isCommon {
-                    Text("COMMON")
+                    Text("common")
                         .font(.caption2.weight(.bold))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
@@ -1108,7 +1468,7 @@ private struct ConjugationsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionTitle(text: "Conjugations")
-            ForEach(Array(visibleConjugations.enumerated()), id: \.offset) { index, item in
+            ForEach(Array(visibleConjugations.enumerated()), id: \.element.label) { index, item in
                 AlternatingRow(index: index) {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text(item.label)
@@ -1183,6 +1543,25 @@ private struct SimilarWordsSection: View {
     }
 }
 
+private struct KanaKanjiCandidatesSection: View {
+    let candidates: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionTitle(text: "Possible Kanji")
+            InlineWrapLayout(spacing: 8, lineSpacing: 8) {
+                ForEach(candidates, id: \.self) { candidate in
+                    Text(candidate)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(uiColor: .tertiarySystemBackground), in: Capsule())
+                }
+            }
+        }
+    }
+}
+
 private struct NotesSection: View {
     @Binding var text: String
     @State private var isExpanded: Bool = false
@@ -1231,7 +1610,7 @@ private struct ContainedInSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionTitle(text: "Contained In")
+            SectionTitle(text: "Contained in")
             ForEach(clippings) { clipping in
                 Button {
                     onTap(clipping)
@@ -1260,7 +1639,7 @@ private struct ExampleSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionTitle(text: "Example Sentences")
+            SectionTitle(text: "Examples")
 
             if examples.isEmpty {
                 Text("No example sentences found.")
@@ -1271,24 +1650,27 @@ private struct ExampleSection: View {
                 ForEach(Array(visibleExamples.enumerated()), id: \.element.id) { index, example in
                     AlternatingRow(index: index) {
                         VStack(alignment: .leading, spacing: 2) {
-                            HStack(alignment: .top, spacing: 8) {
-                                RubyText(
-                                    attributed: example.attributedJP,
-                                    fontSize: 20,
-                                    lineHeightMultiple: 1.0,
-                                    extraGap: 4,
-                                    isScrollEnabled: false,
-                                    allowSystemTextSelection: false,
-                                    wrapLines: true,
-                                    horizontalScrollEnabled: false,
-                                    semanticSpans: example.semanticSpans,
-                                    onSpanSelection: { selection in
-                                        guard let selection else { return }
-                                        onWordTap(selection.semanticSpan.surface)
-                                    }
-                                )
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            RubyText(
+                                attributed: example.attributedJP,
+                                fontSize: 20,
+                                lineHeightMultiple: 1.0,
+                                extraGap: 4,
+                                isScrollEnabled: false,
+                                allowSystemTextSelection: false,
+                                wrapLines: true,
+                                wrapByCharacter: true,
+                                horizontalScrollEnabled: false,
+                                semanticSpans: example.semanticSpans,
+                                onSpanSelection: { selection in
+                                    guard let selection else { return }
+                                    onWordTap(selection.semanticSpan.surface)
+                                }
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .layoutPriority(1)
 
+                            HStack(spacing: 8) {
+                                Spacer(minLength: 0)
                                 Button {
                                     SpeechManager.shared.speak(text: example.jpText, language: "ja-JP")
                                 } label: {
@@ -1299,14 +1681,23 @@ private struct ExampleSection: View {
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Play sentence audio")
-                                .padding(.top, 1)
                             }
 
-                            Text(example.enText)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if let attributed = try? AttributedString(example.attributedEN, including: \.uiKit) {
+                                Text(attributed)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(nil)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                Text(example.enText)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(nil)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
                     }
                 }
@@ -1331,9 +1722,12 @@ private struct AlternatingRow<Content: View>: View {
 
     var body: some View {
         content()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(index.isMultiple(of: 2) ? Color(uiColor: .tertiarySystemBackground) : Color(uiColor: .secondarySystemBackground))
+                    .fill(index.isMultiple(of: 2) ? Color(uiColor: .tertiarySystemFill) : Color.clear)
             )
     }
 }

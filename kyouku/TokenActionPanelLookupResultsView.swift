@@ -504,10 +504,12 @@ struct LookupResultsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(displayHeadword)
                     .font(.headline)
+                    .textSelection(.enabled)
                 if shouldShowHeaderReading {
                     Text(headerReadingText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
             }
 
@@ -630,6 +632,7 @@ struct LookupResultsView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(3)
+                                .textSelection(.enabled)
                         }
                     }
                 }

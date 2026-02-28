@@ -1,6 +1,7 @@
 import Foundation
 
 enum ReviewPersistence {
+    private static let defaultMinimumReviews: Int = 5
     private static let wrongKey = "wrongWordIDs"
     private static let lifetimeCorrectKey = "lifetimeCorrectCount"
     private static let lifetimeAgainKey = "lifetimeAgainCount"
@@ -109,7 +110,7 @@ enum ReviewPersistence {
     }
 
     /// Returns a 0..1 accuracy score, or nil if there isn't enough signal.
-    static func learnedScore(for id: UUID, minimumReviews: Int = FuriganaKnownWordSettings.defaultMinimumReviews) -> Double? {
+    static func learnedScore(for id: UUID, minimumReviews: Int = defaultMinimumReviews) -> Double? {
         if allWrong().contains(id) { return nil }
         guard let st = stats(for: id) else { return nil }
         let minReviews = max(1, minimumReviews)

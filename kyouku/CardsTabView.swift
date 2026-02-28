@@ -22,6 +22,7 @@ struct CardsTabView: View {
 
     @State private var selectedIndex: Int = CardsTabView.initialIndex(for: .flashcards)
     @State private var flashcardsWantsPageDotsHidden: Bool = false
+    @State private var studySessionActive: Bool = false
 
     private var currentPage: CardsPage {
         CardsTabView.pages[selectedIndex % CardsTabView.pages.count]
@@ -44,6 +45,7 @@ struct CardsTabView: View {
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
+        .gesture(studySessionActive ? DragGesture() : nil)
         .onChange(of: selectedIndex) { _, newValue in
             let pageCount = CardsTabView.pages.count
 
@@ -56,6 +58,9 @@ struct CardsTabView: View {
         }
         .onPreferenceChange(CardsPageDotsHiddenPreferenceKey.self) { newValue in
             flashcardsWantsPageDotsHidden = newValue
+        }
+        .onPreferenceChange(CardsStudySessionActivePreferenceKey.self) { newValue in
+            studySessionActive = newValue
         }
         .overlay {
             let shouldHideDots = (currentPage == .flashcards && flashcardsWantsPageDotsHidden)
@@ -77,6 +82,14 @@ struct CardsTabView: View {
 }
 
 struct CardsPageDotsHiddenPreferenceKey: PreferenceKey {
+    static var defaultValue: Bool = false
+
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
+struct CardsStudySessionActivePreferenceKey: PreferenceKey {
     static var defaultValue: Bool = false
 
     static func reduce(value: inout Bool, nextValue: () -> Bool) {

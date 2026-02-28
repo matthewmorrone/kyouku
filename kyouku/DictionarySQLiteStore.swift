@@ -31,7 +31,7 @@ actor DictionarySQLiteStore {
             return []
         }
 
-        // IMPORTANT: `term` must already be normalized by `DictionaryKeyPolicy.lookupKey`.
+        // IMPORTANT: `term` is expected to be normalized via `DictionaryKeyPolicy.lookupKey`.
         guard term.isEmpty == false else {
             return []
         }
@@ -67,8 +67,7 @@ actor DictionarySQLiteStore {
             return []
         }
 
-        // IMPORTANT: `term` must already be normalized by `DictionaryKeyPolicy.lookupKey`.
-        // No trimming/folding/normalization is performed here.
+        // IMPORTANT: `term` is expected to be normalized via `DictionaryKeyPolicy.lookupKey`.
         guard term.isEmpty == false else {
             return []
         }
@@ -166,13 +165,15 @@ actor DictionarySQLiteStore {
     /// This matches the existing `try await DictionarySQLiteStore.shared.lookup(...)` call sites.
     func lookup(term: String, limit: Int = 30) async throws -> [DictionaryEntry] {
         let start = CFAbsoluteTimeGetCurrent()
-        let result = try lookupSync(term: term, limit: limit, mode: .japanese)
+        let normalized = DictionaryKeyPolicy.lookupKey(for: term)
+        guard normalized.isEmpty == false else { return [] }
+        let result = try lookupSync(term: normalized, limit: limit, mode: .japanese)
         let elapsedMS = max(0, (CFAbsoluteTimeGetCurrent() - start) * 1000)
         await MainActor.run {
             CustomLogger.shared.perf(
                 "DictionarySQLiteStore.lookup",
                 elapsedMS: elapsedMS,
-                details: "mode=japanese termLen=\(term.utf16.count) limit=\(limit) rows=\(result.count)"
+                details: "mode=japanese termLen=\(normalized.utf16.count) limit=\(limit) rows=\(result.count)"
             )
         }
         return result
@@ -181,15 +182,11 @@ actor DictionarySQLiteStore {
     /// Variant that allows callers to influence how the query is interpreted
     /// (e.g., prefer English gloss matches for Latin input).
     func lookup(term: String, limit: Int = 30, mode: DictionarySearchMode) async throws -> [DictionaryEntry] {
-        let start = CFAbsoluteTimeGetCurrent()
-        let result = try lookupSync(term: term, limit: limit, mode: mode)
-        let elapsedMS = max(0, (CFAbsoluteTimeGetCurrent() - start) * 1000)
+        let normalized = DictionaryKeyPolicy.lookupKey(for: term)
+        guard normalized.isEmpty == false else { return [] }
+        let result = try lookupSync(term: normalized, limit: limit, mode: mode)
         await MainActor.run {
-            CustomLogger.shared.perf(
-                "DictionarySQLiteStore.lookup",
-                elapsedMS: elapsedMS,
-                details: "mode=\(String(describing: mode)) termLen=\(term.utf16.count) limit=\(limit) rows=\(result.count)"
-            )
+            // CustomLogger.shared.perf("DictionarySQLiteStore.lookup", elapsedMS: elapsedMS, details: "mode=\(String(describing: mode)) termLen=\(term.utf16.count) limit=\(limit) rows=\(result.count)")
         }
         return result
     }
@@ -197,15 +194,11 @@ actor DictionarySQLiteStore {
     /// Exact-only lookup (no substring/token fallback). Useful for Details views
     /// where we only want the selected surface and its lemma, not component hits.
     func lookupExact(term: String, limit: Int = 30, mode: DictionarySearchMode = .japanese) async throws -> [DictionaryEntry] {
-        let start = CFAbsoluteTimeGetCurrent()
-        let result = try lookupExactSync(term: term, limit: limit, mode: mode)
-        let elapsedMS = max(0, (CFAbsoluteTimeGetCurrent() - start) * 1000)
+        let normalized = DictionaryKeyPolicy.lookupKey(for: term)
+        guard normalized.isEmpty == false else { return [] }
+        let result = try lookupExactSync(term: normalized, limit: limit, mode: mode)
         await MainActor.run {
-            CustomLogger.shared.perf(
-                "DictionarySQLiteStore.lookupExact",
-                elapsedMS: elapsedMS,
-                details: "mode=\(String(describing: mode)) termLen=\(term.utf16.count) limit=\(limit) rows=\(result.count)"
-            )
+            // CustomLogger.shared.perf("DictionarySQLiteStore.lookupExact", elapsedMS: elapsedMS, details: "mode=\(String(describing: mode)) termLen=\(normalized.utf16.count) limit=\(limit) rows=\(result.count)")
         }
         return result
     }
@@ -390,12 +383,10 @@ actor DictionarySQLiteStore {
             return
         }
 
-        guard let url = Bundle.main.url(forResource: "dictionary", withExtension: "sqlite3") else {
-            throw DictionarySQLiteError.resourceNotFound
-        }
+        let url = try writableDictionaryURL()
 
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
 
         if sqlite3_open_v2(url.path, &handle, flags, nil) != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(handle))
@@ -403,8 +394,281 @@ actor DictionarySQLiteStore {
             throw DictionarySQLiteError.openFailed(msg)
         }
 
+        sqlite3_exec(handle, "PRAGMA foreign_keys = ON;", nil, nil, nil)
         self.db = handle
+        try ensureKanjiCharacterSchema()
+        try importKanjidicIfNeeded()
         refreshOptionalIndexes()
+    }
+
+    private func writableDictionaryURL() throws -> URL {
+        guard let bundledURL = Bundle.main.url(forResource: "dictionary", withExtension: "sqlite3") else {
+            throw DictionarySQLiteError.resourceNotFound
+        }
+
+        let fm = FileManager.default
+        let appSupportRoot = try fm.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let bundleFolderName = (Bundle.main.bundleIdentifier?.isEmpty == false)
+            ? Bundle.main.bundleIdentifier!
+            : "kyouku"
+        let targetDir = appSupportRoot.appendingPathComponent(bundleFolderName, isDirectory: true)
+        if fm.fileExists(atPath: targetDir.path) == false {
+            try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        }
+
+        let writableURL = targetDir.appendingPathComponent("dictionary.sqlite3", isDirectory: false)
+        if fm.fileExists(atPath: writableURL.path) == false {
+            try fm.copyItem(at: bundledURL, to: writableURL)
+        }
+
+        return writableURL
+    }
+
+    private func ensureKanjiCharacterSchema() throws {
+        guard let db else { return }
+
+        let statements: [String] = [
+            """
+            CREATE TABLE IF NOT EXISTS kanji_characters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                literal TEXT UNIQUE NOT NULL,
+                stroke_count INTEGER,
+                grade INTEGER,
+                jlpt INTEGER,
+                frequency INTEGER
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS kanji_character_meanings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kanji_id INTEGER NOT NULL REFERENCES kanji_characters(id) ON DELETE CASCADE,
+                meaning TEXT NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS kanji_character_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kanji_id INTEGER NOT NULL REFERENCES kanji_characters(id) ON DELETE CASCADE,
+                type TEXT CHECK(type IN ('on','kun','nanori')),
+                reading TEXT NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS kanji_character_radicals (
+                kanji_id INTEGER NOT NULL REFERENCES kanji_characters(id) ON DELETE CASCADE,
+                radical TEXT NOT NULL,
+                PRIMARY KEY (kanji_id, radical)
+            );
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_kanji_characters_literal ON kanji_characters(literal);",
+            "CREATE INDEX IF NOT EXISTS idx_kanji_characters_grade ON kanji_characters(grade);",
+            "CREATE INDEX IF NOT EXISTS idx_kanji_characters_stroke_count ON kanji_characters(stroke_count);"
+        ]
+
+        for sql in statements {
+            if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
+                throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    private func importKanjidicIfNeeded() throws {
+        guard let db else { return }
+
+        var countStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT COUNT(1) FROM kanji_characters;", -1, &countStmt, nil) != SQLITE_OK {
+            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(countStmt) }
+
+        guard sqlite3_step(countStmt) == SQLITE_ROW else { return }
+        let existingCount = sqlite3_column_int64(countStmt, 0)
+        if existingCount > 0 {
+            return
+        }
+
+        guard let sourceURL = Bundle.main.url(forResource: "kanjidic2-en-3.6.2", withExtension: "json")
+            ?? Bundle.main.url(forResource: "kanjidic2-en-3.6.2", withExtension: "json", subdirectory: "data")
+        else {
+            return
+        }
+
+        let data = try Data(contentsOf: sourceURL)
+        let payload = try decodeKanjidicPayload(from: data)
+
+        if sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) != SQLITE_OK {
+            throw DictionarySQLiteError.openFailed(String(cString: sqlite3_errmsg(db)))
+        }
+
+        var insertKanjiStmt: OpaquePointer?
+        var selectKanjiIDStmt: OpaquePointer?
+        var insertMeaningStmt: OpaquePointer?
+        var insertReadingStmt: OpaquePointer?
+        var insertRadicalStmt: OpaquePointer?
+
+        defer {
+            sqlite3_finalize(insertKanjiStmt)
+            sqlite3_finalize(selectKanjiIDStmt)
+            sqlite3_finalize(insertMeaningStmt)
+            sqlite3_finalize(insertReadingStmt)
+            sqlite3_finalize(insertRadicalStmt)
+        }
+
+        let insertKanjiSQL = "INSERT OR IGNORE INTO kanji_characters (literal, stroke_count, grade, jlpt, frequency) VALUES (?, ?, ?, ?, ?);"
+        let selectKanjiIDSQL = "SELECT id FROM kanji_characters WHERE literal = ? LIMIT 1;"
+        let insertMeaningSQL = "INSERT INTO kanji_character_meanings (kanji_id, meaning) VALUES (?, ?);"
+        let insertReadingSQL = "INSERT INTO kanji_character_readings (kanji_id, type, reading) VALUES (?, ?, ?);"
+        let insertRadicalSQL = "INSERT OR IGNORE INTO kanji_character_radicals (kanji_id, radical) VALUES (?, ?);"
+
+        guard sqlite3_prepare_v2(db, insertKanjiSQL, -1, &insertKanjiStmt, nil) == SQLITE_OK,
+              sqlite3_prepare_v2(db, selectKanjiIDSQL, -1, &selectKanjiIDStmt, nil) == SQLITE_OK,
+              sqlite3_prepare_v2(db, insertMeaningSQL, -1, &insertMeaningStmt, nil) == SQLITE_OK,
+              sqlite3_prepare_v2(db, insertReadingSQL, -1, &insertReadingStmt, nil) == SQLITE_OK,
+              sqlite3_prepare_v2(db, insertRadicalSQL, -1, &insertRadicalStmt, nil) == SQLITE_OK
+        else {
+            sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+            throw DictionarySQLiteError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+
+        do {
+            for character in payload.characters {
+                let literal = character.literal.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard literal.isEmpty == false else { continue }
+
+                sqlite3_reset(insertKanjiStmt)
+                sqlite3_clear_bindings(insertKanjiStmt)
+                sqlite3_bind_text(insertKanjiStmt, 1, literal, -1, SQLITE_TRANSIENT)
+
+                if let stroke = character.misc?.strokeCounts?.first {
+                    sqlite3_bind_int64(insertKanjiStmt, 2, Int64(stroke))
+                } else {
+                    sqlite3_bind_null(insertKanjiStmt, 2)
+                }
+
+                if let grade = character.misc?.grade {
+                    sqlite3_bind_int64(insertKanjiStmt, 3, Int64(grade))
+                } else {
+                    sqlite3_bind_null(insertKanjiStmt, 3)
+                }
+
+                if let jlpt = character.misc?.jlptLevel {
+                    sqlite3_bind_int64(insertKanjiStmt, 4, Int64(jlpt))
+                } else {
+                    sqlite3_bind_null(insertKanjiStmt, 4)
+                }
+
+                if let frequency = character.misc?.frequency {
+                    sqlite3_bind_int64(insertKanjiStmt, 5, Int64(frequency))
+                } else {
+                    sqlite3_bind_null(insertKanjiStmt, 5)
+                }
+
+                guard sqlite3_step(insertKanjiStmt) == SQLITE_DONE else {
+                    throw DictionarySQLiteError.openFailed(String(cString: sqlite3_errmsg(db)))
+                }
+
+                sqlite3_reset(selectKanjiIDStmt)
+                sqlite3_clear_bindings(selectKanjiIDStmt)
+                sqlite3_bind_text(selectKanjiIDStmt, 1, literal, -1, SQLITE_TRANSIENT)
+                guard sqlite3_step(selectKanjiIDStmt) == SQLITE_ROW else { continue }
+                let kanjiID = sqlite3_column_int64(selectKanjiIDStmt, 0)
+
+                var meaningsSeen: Set<String> = []
+                var readingsSeen: Set<String> = []
+                var radicalsSeen: Set<String> = []
+
+                if let groups = character.readingMeaning?.groups {
+                    for group in groups {
+                        for meaning in group.meanings ?? [] {
+                            let lang = meaning.lang?.lowercased() ?? ""
+                            guard lang.isEmpty || lang == "en" else { continue }
+                            let text = meaning.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard text.isEmpty == false else { continue }
+                            guard meaningsSeen.insert(text).inserted else { continue }
+
+                            sqlite3_reset(insertMeaningStmt)
+                            sqlite3_clear_bindings(insertMeaningStmt)
+                            sqlite3_bind_int64(insertMeaningStmt, 1, kanjiID)
+                            sqlite3_bind_text(insertMeaningStmt, 2, text, -1, SQLITE_TRANSIENT)
+                            guard sqlite3_step(insertMeaningStmt) == SQLITE_DONE else {
+                                throw DictionarySQLiteError.openFailed(String(cString: sqlite3_errmsg(db)))
+                            }
+                        }
+
+                        for reading in group.readings ?? [] {
+                            let mappedType: String
+                            switch reading.type {
+                            case "ja_on": mappedType = "on"
+                            case "ja_kun": mappedType = "kun"
+                            default: continue
+                            }
+
+                            let text = reading.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard text.isEmpty == false else { continue }
+                            let readingKey = "\(mappedType)|\(text)"
+                            guard readingsSeen.insert(readingKey).inserted else { continue }
+
+                            sqlite3_reset(insertReadingStmt)
+                            sqlite3_clear_bindings(insertReadingStmt)
+                            sqlite3_bind_int64(insertReadingStmt, 1, kanjiID)
+                            sqlite3_bind_text(insertReadingStmt, 2, mappedType, -1, SQLITE_TRANSIENT)
+                            sqlite3_bind_text(insertReadingStmt, 3, text, -1, SQLITE_TRANSIENT)
+                            guard sqlite3_step(insertReadingStmt) == SQLITE_DONE else {
+                                throw DictionarySQLiteError.openFailed(String(cString: sqlite3_errmsg(db)))
+                            }
+                        }
+                    }
+                }
+
+                for nanori in character.readingMeaning?.nanori ?? [] {
+                    let text = nanori.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard text.isEmpty == false else { continue }
+                    let readingKey = "nanori|\(text)"
+                    guard readingsSeen.insert(readingKey).inserted else { continue }
+
+                    sqlite3_reset(insertReadingStmt)
+                    sqlite3_clear_bindings(insertReadingStmt)
+                    sqlite3_bind_int64(insertReadingStmt, 1, kanjiID)
+                    sqlite3_bind_text(insertReadingStmt, 2, "nanori", -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(insertReadingStmt, 3, text, -1, SQLITE_TRANSIENT)
+                    guard sqlite3_step(insertReadingStmt) == SQLITE_DONE else {
+                        throw DictionarySQLiteError.openFailed(String(cString: sqlite3_errmsg(db)))
+                    }
+                }
+
+                for radical in character.radicals ?? [] {
+                    let value: String
+                    switch radical.value {
+                    case .integer(let v): value = String(v)
+                    case .string(let v): value = v
+                    }
+
+                    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard normalized.isEmpty == false else { continue }
+                    guard radicalsSeen.insert(normalized).inserted else { continue }
+
+                    sqlite3_reset(insertRadicalStmt)
+                    sqlite3_clear_bindings(insertRadicalStmt)
+                    sqlite3_bind_int64(insertRadicalStmt, 1, kanjiID)
+                    sqlite3_bind_text(insertRadicalStmt, 2, normalized, -1, SQLITE_TRANSIENT)
+                    guard sqlite3_step(insertRadicalStmt) == SQLITE_DONE else {
+                        throw DictionarySQLiteError.openFailed(String(cString: sqlite3_errmsg(db)))
+                    }
+                }
+            }
+
+            if sqlite3_exec(db, "COMMIT;", nil, nil, nil) != SQLITE_OK {
+                throw DictionarySQLiteError.openFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        } catch {
+            sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+            throw error
+        }
     }
 
     private func selectEntries(matching term: String, limit: Int) throws -> [DictionaryEntry] {
@@ -1359,5 +1623,89 @@ actor DictionarySQLiteStore {
         return out
     }
 
+}
+
+nonisolated private func decodeKanjidicPayload(from data: Data) throws -> KanjidicPayload {
+    try JSONDecoder().decode(KanjidicPayload.self, from: data)
+}
+
+private struct KanjidicPayload: Decodable {
+    let characters: [KanjidicCharacter]
+}
+
+private struct KanjidicCharacter: Decodable {
+    let literal: String
+    let radicals: [KanjidicRadical]?
+    let misc: KanjidicMisc?
+    let readingMeaning: KanjidicReadingMeaning?
+}
+
+private struct KanjidicRadical: Decodable {
+    let value: KanjidicValue
+}
+
+private enum KanjidicValue: Decodable {
+    case integer(Int)
+    case string(String)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let intValue = try? container.decode(Int.self) {
+            self = .integer(intValue)
+            return
+        }
+        self = .string(try container.decode(String.self))
+    }
+}
+
+private struct KanjidicMisc: Decodable {
+    let strokeCounts: [Int]?
+    let grade: Int?
+    let jlptLevel: Int?
+    let frequency: Int?
+}
+
+private struct KanjidicReadingMeaning: Decodable {
+    let groups: [KanjidicReadingGroup]?
+    let nanori: [String]?
+}
+
+private struct KanjidicReadingGroup: Decodable {
+    let readings: [KanjidicReading]?
+    let meanings: [KanjidicMeaning]?
+}
+
+private struct KanjidicReading: Decodable {
+    let type: String
+    let value: String
+}
+
+private struct KanjidicMeaning: Decodable {
+    let lang: String?
+    let value: String
+}
+
+private extension KanjidicCharacter {
+    enum CodingKeys: String, CodingKey {
+        case literal
+        case radicals
+        case misc
+        case readingMeaning
+    }
+}
+
+private extension KanjidicRadical {
+    enum CodingKeys: String, CodingKey {
+        case value
+    }
+}
+
+private extension KanjidicMisc {
+    enum CodingKeys: String, CodingKey {
+        case strokeCounts
+        case grade
+        case jlptLevel
+        case frequency
+    }
 }
 

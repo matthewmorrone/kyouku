@@ -30,6 +30,49 @@ struct VerbConjugator {
         return nil
     }
 
+    static func inferVerbClass(
+        fromJMDictPosTags tags: [String],
+        dictionaryForm: String,
+        tokenPartOfSpeech: String? = nil
+    ) -> VerbClass? {
+        if let detected = detectVerbClass(fromJMDictPosTags: tags) {
+            return detected
+        }
+
+        let normalizedTags = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { $0.isEmpty == false }
+        let hasVerbLikeTag = normalizedTags.contains(where: { $0.hasPrefix("v") })
+
+        let normalizedTokenPOS = tokenPartOfSpeech?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let tokenSuggestsVerb: Bool = {
+            guard let normalizedTokenPOS, normalizedTokenPOS.isEmpty == false else { return false }
+            if normalizedTokenPOS.contains("verb") { return true }
+            if normalizedTokenPOS.contains("動詞") { return true }
+            return false
+        }()
+
+        guard hasVerbLikeTag || tokenSuggestsVerb else {
+            return nil
+        }
+
+        let base = dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard base.isEmpty == false else { return nil }
+
+        if base == "くる" || base == "来る" || base.hasSuffix("くる") {
+            return .kuru
+        }
+        if base == "する" || base.hasSuffix("する") {
+            return .suru
+        }
+        if base.hasSuffix("る") {
+            return .ichidan
+        }
+        return .godan
+    }
+
     static func conjugations(for dictionaryForm: String, verbClass: VerbClass, set: ConjugationSet) -> [VerbConjugation] {
         let base = dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines)
         guard base.isEmpty == false else { return [] }

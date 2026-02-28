@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:kyouku}/third_party/whisper.spm",
+            "name": "Debug test-swift (third_party/whisper.spm)",
+            "target": "test-swift",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug test-swift (third_party/whisper.spm)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:kyouku}/third_party/whisper.spm",
+            "name": "Release test-swift (third_party/whisper.spm)",
+            "target": "test-swift",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release test-swift (third_party/whisper.spm)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:kyouku}/third_party/whisper.spm",
+            "name": "Debug test-objc (third_party/whisper.spm)",
+            "target": "test-objc",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug test-objc (third_party/whisper.spm)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:kyouku}/third_party/whisper.spm",
+            "name": "Release test-objc (third_party/whisper.spm)",
+            "target": "test-objc",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release test-objc (third_party/whisper.spm)"
+        }
+    ]
+}

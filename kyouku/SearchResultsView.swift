@@ -3,6 +3,7 @@ import UIKit
 
 struct SearchResultsView: View {
     @ObservedObject var viewModel: SearchViewModel
+    @State private var isFiltersExpanded: Bool = false
 
     let showCameraButton: Bool
     let onCameraTap: (() -> Void)?
@@ -23,6 +24,11 @@ struct SearchResultsView: View {
         List {
             Section {
                 searchBar
+            }
+            .listRowSeparator(.hidden)
+
+            Section {
+                filtersSection
             }
             .listRowSeparator(.hidden)
 
@@ -64,6 +70,98 @@ struct SearchResultsView: View {
             // Ensure results refresh when returning to this screen.
             viewModel.query = viewModel.query
         }
+    }
+
+    private var filtersSection: some View {
+        DisclosureGroup(isExpanded: $isFiltersExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Common words only", isOn: $viewModel.commonWordsOnly)
+
+                Picker("Sort", selection: $viewModel.sortMode) {
+                    ForEach(SearchViewModel.SortMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Part of speech")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Menu {
+                            ForEach(viewModel.availablePartsOfSpeech) { pos in
+                                Button {
+                                    viewModel.togglePartOfSpeech(pos)
+                                } label: {
+                                    Label(pos.title, systemImage: viewModel.selectedPartsOfSpeech.contains(pos) ? "checkmark" : "")
+                                }
+                            }
+                        } label: {
+                            Text(posSummary)
+                                .font(.caption)
+                        }
+                        .disabled(viewModel.availablePartsOfSpeech.isEmpty)
+                    }
+
+                    if viewModel.availablePartsOfSpeech.isEmpty {
+                        Text("Part-of-speech metadata is unavailable for current results.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("JLPT")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Picker("JLPT", selection: $viewModel.selectedJLPT) {
+                            ForEach(SearchViewModel.JLPTFilter.allCases) { level in
+                                Text(level.title).tag(level)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .disabled(viewModel.hasAvailableJLPTData == false)
+                    }
+
+                    if viewModel.hasAvailableJLPTData == false {
+                        Text("JLPT metadata is unavailable for current results.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Button("Reset Filters") {
+                    viewModel.resetFilters()
+                }
+                .disabled(viewModel.hasActiveControls == false)
+            }
+            .padding(.top, 4)
+        } label: {
+            HStack(spacing: 8) {
+                Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
+                Spacer()
+                if viewModel.hasActiveControls {
+                    Text("Active")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.subheadline.weight(.semibold))
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var posSummary: String {
+        let selected = viewModel.availablePartsOfSpeech.filter { viewModel.selectedPartsOfSpeech.contains($0) }
+        if selected.isEmpty {
+            return viewModel.availablePartsOfSpeech.isEmpty ? "Unavailable" : "Any"
+        }
+        return selected.map(\.title).joined(separator: ", ")
     }
 
     @ViewBuilder

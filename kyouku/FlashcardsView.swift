@@ -72,8 +72,8 @@ struct FlashcardsView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                /*ToolbarItem(placement: .principal) {
-                    HStack(spacing: 6) {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 3) {
                         Image(systemName: "rectangle.on.rectangle.angled")
                         Text("Flashcards")
                     }
@@ -81,7 +81,7 @@ struct FlashcardsView: View {
                     .foregroundStyle(.primary)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Flashcards")
-                }*/
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     if session.isEmpty == false {
                         Button {
@@ -130,6 +130,8 @@ struct FlashcardsView: View {
         .appThemedRoot()
         // Hide the Cards tab page dots while actively reviewing flashcards.
         .preference(key: CardsPageDotsHiddenPreferenceKey.self, value: session.isEmpty == false)
+        // Disable swiping between study modes while a flashcard session is active.
+        .preference(key: CardsStudySessionActivePreferenceKey.self, value: session.isEmpty == false)
     }
     
     private var header: some View {
@@ -282,9 +284,9 @@ struct FlashcardsView: View {
                 } else if scope == .fromNote {
                     NotePicker(selectedNoteID: $selectedNoteID)
                 }
-            } header: {
+            }/* header: {
                 Label("Flashcards", systemImage: "rectangle.on.rectangle.angled")
-            }
+            }*/
 
             Section {
                 Picker("Direction", selection: $direction) {

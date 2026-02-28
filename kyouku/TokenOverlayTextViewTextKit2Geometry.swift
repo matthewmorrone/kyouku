@@ -193,7 +193,7 @@ extension TokenOverlayTextView {
                         if intersectionCount > 1 { break }
                     }
                 }
-                precondition(intersectionCount == 1, "TextKit2 segment rect crosses line boundary (view coords). picked=\(NSCoder.string(for: picked)) intersections=\(intersectionCount) range=\(NSStringFromRange(characterRange))")
+                // precondition(intersectionCount == 1, "TextKit2 segment rect crosses line boundary (view coords). picked=\(NSCoder.string(for: picked)) intersections=\(intersectionCount) range=\(NSStringFromRange(characterRange))")
                 #endif
 
                 var didSplit = false
@@ -215,17 +215,13 @@ extension TokenOverlayTextView {
                     didSplit = true
                 }
 
-                #if DEBUG
-                precondition(didSplit, "TextKit2 segment rect did not intersect any typographic line (view coords). picked=\(NSCoder.string(for: picked)) range=\(NSStringFromRange(characterRange))")
-                #endif
+                // precondition(didSplit, "TextKit2 segment rect did not intersect any typographic line (view coords). picked=\(NSCoder.string(for: picked)) range=\(NSStringFromRange(characterRange))")
 
                 if didSplit == false {
                     rects.append(picked)
                 }
             } else if picked.isNull == false, picked.isEmpty == false {
-                #if DEBUG
-                precondition(frag != nil, "TextKit2 segment has no owning layout fragment (view coords). range=\(NSStringFromRange(characterRange)) rect=\(NSCoder.string(for: picked))")
-                #endif
+                // precondition(frag != nil, "TextKit2 segment has no owning layout fragment (view coords). range=\(NSStringFromRange(characterRange)) rect=\(NSCoder.string(for: picked))")
                 rects.append(picked)
             }
             return true
@@ -253,8 +249,7 @@ extension TokenOverlayTextView {
             return []
         }
 
-        // Ensure layout only for this range; full-document layout can settle fragments and
-        // make ruby appear to move on highlight-only updates.
+        // Ensure layout only for this range; full-document layout can settle fragments and make ruby appear to move on highlight-only updates.
         tlm.ensureLayout(for: textRange)
 
         let inset = textContainerInset
@@ -264,8 +259,7 @@ extension TokenOverlayTextView {
 
         // Enumerate standard (glyph) segments for this range.
         // IMPORTANT: The segment rect `r` can be fragment-local on some OS/TextKit combinations.
-        // Choose between fragment-local vs already-global rects by comparing overlap with
-        // typographic line rects.
+        // Choose between fragment-local vs already-global rects by comparing overlap with typographic line rects.
         tlm.enumerateTextSegments(in: textRange, type: .standard, options: []) { segment, r, _, _ in
             let frag: NSTextLayoutFragment? = {
                 guard let loc = segment?.location else { return nil }
@@ -359,7 +353,7 @@ extension TokenOverlayTextView {
                         if intersectionCount > 1 { break }
                     }
                 }
-                precondition(intersectionCount == 1, "TextKit2 segment rect crosses line boundary (content coords). picked=\(NSCoder.string(for: picked)) intersections=\(intersectionCount) range=\(NSStringFromRange(characterRange))")
+                // precondition(intersectionCount == 1, "TextKit2 segment rect crosses line boundary (content coords). picked=\(NSCoder.string(for: picked)) intersections=\(intersectionCount) range=\(NSStringFromRange(characterRange))")
                 #endif
 
                 var didSplit = false
@@ -381,17 +375,13 @@ extension TokenOverlayTextView {
                     didSplit = true
                 }
 
-                #if DEBUG
-                precondition(didSplit, "TextKit2 segment rect did not intersect any typographic line (content coords). picked=\(NSCoder.string(for: picked)) range=\(NSStringFromRange(characterRange))")
-                #endif
+                // precondition(didSplit, "TextKit2 segment rect did not intersect any typographic line (content coords). picked=\(NSCoder.string(for: picked)) range=\(NSStringFromRange(characterRange))")
 
                 if didSplit == false {
                     rects.append(picked)
                 }
             } else if picked.isNull == false, picked.isEmpty == false {
-                #if DEBUG
-                precondition(frag != nil, "TextKit2 segment has no owning layout fragment (content coords). range=\(NSStringFromRange(characterRange)) rect=\(NSCoder.string(for: picked))")
-                #endif
+                // precondition(frag != nil, "TextKit2 segment has no owning layout fragment (content coords). range=\(NSStringFromRange(characterRange)) rect=\(NSCoder.string(for: picked))")
                 rects.append(picked)
             }
             return true

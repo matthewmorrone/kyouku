@@ -74,6 +74,7 @@ final class DictionaryLookupViewModel: ObservableObject {
         let rows: [DictionaryEntry]
         let priority: [Int64: Int]
         let deinflectionTrace: String?
+        let preferredEntryIDs: Set<Int64>
     }
 
     private func lookupSurfaceThenDeinflect(displayKey: String, lookupKey: String, mode: DictionarySearchMode) async throws -> LookupHit? {
@@ -93,17 +94,32 @@ final class DictionaryLookupViewModel: ObservableObject {
             details: "mode=\(String(describing: mode)) display='\(displayKey)' lookup='\(lookupKey)' rows=\(surfacePayload.rows.count)"
         )
 
-        if surfacePayload.rows.isEmpty == false {
+        if mode != .japanese {
+            if surfacePayload.rows.isEmpty == false {
+                CustomLogger.shared.perf(
+                    "DictionaryLookup surfaceThenDeinflect",
+                    elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
+                    details: "mode=\(String(describing: mode)) resolved=surface display='\(displayKey)' rows=\(surfacePayload.rows.count)"
+                )
+                return LookupHit(
+                    displayKey: displayKey,
+                    lookupKey: lookupKey,
+                    rows: surfacePayload.rows,
+                    priority: surfacePayload.priority,
+                    deinflectionTrace: nil,
+                    preferredEntryIDs: []
+                )
+            }
             CustomLogger.shared.perf(
                 "DictionaryLookup surfaceThenDeinflect",
                 elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
-                details: "mode=\(String(describing: mode)) resolved=surface display='\(displayKey)' rows=\(surfacePayload.rows.count)"
+                details: "mode=\(String(describing: mode)) resolved=none display='\(displayKey)'"
             )
-            return LookupHit(displayKey: displayKey, lookupKey: lookupKey, rows: surfacePayload.rows, priority: surfacePayload.priority, deinflectionTrace: nil)
+            return nil
         }
 
-        // 2) Deinflection lookup
-        guard mode == .japanese else { return nil }
+        // 2) Deinflection lookup (Japanese mode only)
+        var deinflectionHit: (keys: DictionaryKeyPolicy.Keys, payload: (rows: [DictionaryEntry], priority: [Int64: Int]), trace: String)? = nil
         let deinflectionStart = CustomLogger.perfStart()
         let deinflected = await deinflectionCache.candidates(for: displayKey)
         CustomLogger.shared.perf(
@@ -131,13 +147,48 @@ final class DictionaryLookupViewModel: ObservableObject {
 
             if lemmaPayload.rows.isEmpty == false {
                 let trace = d.trace.map { "\($0.reason):\($0.rule.kanaIn)->\($0.rule.kanaOut)" }.joined(separator: ",")
-                CustomLogger.shared.perf(
-                    "DictionaryLookup surfaceThenDeinflect",
-                    elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
-                    details: "mode=\(String(describing: mode)) resolved=lemma lemma='\(keys.displayKey)' rows=\(lemmaPayload.rows.count)"
-                )
-                return LookupHit(displayKey: keys.displayKey, lookupKey: keys.lookupKey, rows: lemmaPayload.rows, priority: lemmaPayload.priority, deinflectionTrace: trace)
+                deinflectionHit = (keys: keys, payload: lemmaPayload, trace: trace)
+                break
             }
+        }
+
+        if let deinflectionHit {
+            let preferredEntryIDs = Set(deinflectionHit.payload.rows.map { $0.entryID })
+            var combinedRows: [DictionaryEntry] = deinflectionHit.payload.rows
+            if surfacePayload.rows.isEmpty == false {
+                combinedRows.append(contentsOf: surfacePayload.rows.filter { preferredEntryIDs.contains($0.entryID) == false })
+            }
+
+            var combinedPriority = surfacePayload.priority
+            for (entryID, score) in deinflectionHit.payload.priority {
+                combinedPriority[entryID] = score
+            }
+
+            CustomLogger.shared.perf(
+                "DictionaryLookup surfaceThenDeinflect",
+                elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart),
+                details: "mode=\(String(describing: mode)) resolved=lemma+surface lemma='\(deinflectionHit.keys.displayKey)' lemmaRows=\(deinflectionHit.payload.rows.count) surfaceRows=\(surfacePayload.rows.count)"
+            )
+            return LookupHit(
+                displayKey: deinflectionHit.keys.displayKey,
+                lookupKey: deinflectionHit.keys.lookupKey,
+                rows: combinedRows,
+                priority: combinedPriority,
+                deinflectionTrace: deinflectionHit.trace,
+                preferredEntryIDs: preferredEntryIDs
+            )
+        }
+
+        if surfacePayload.rows.isEmpty == false {
+            // CustomLogger.shared.perf("DictionaryLookup surfaceThenDeinflect", elapsedMS: CustomLogger.perfElapsedMS(since: lookupStart), details: "mode=\(String(describing: mode)) resolved=surface display='\(displayKey)' rows=\(surfacePayload.rows.count)")
+            return LookupHit(
+                displayKey: displayKey,
+                lookupKey: lookupKey,
+                rows: surfacePayload.rows,
+                priority: surfacePayload.priority,
+                deinflectionTrace: nil,
+                preferredEntryIDs: []
+            )
         }
 
         CustomLogger.shared.perf(
@@ -232,6 +283,7 @@ final class DictionaryLookupViewModel: ObservableObject {
         let displaySelection = (selectedRange.location != NSNotFound && selectedRange.length > 0 && selectedRange.location + selectedRange.length <= nsText.length)
             ? nsText.substring(with: selectedRange)
             : ""
+        let selectedToken = DictionaryKeyPolicy.token(forSurface: displaySelection, rangeInSurface: selectedRange)
 
         // Compute everything off to the side; publish exactly once at the end.
         let outcome: LookupOutcome
@@ -258,6 +310,30 @@ final class DictionaryLookupViewModel: ObservableObject {
             }
 
             var hitOutcome: LookupOutcome? = nil
+
+            func maybeSplitMiddleDotLookup(_ candidate: SelectionSpanCandidate) async throws -> LookupHit? {
+                guard mode == .japanese else { return nil }
+                guard candidate.lookupKey.contains("・") else { return nil }
+
+                let parts = candidate.lookupKey
+                    .split(separator: "・", omittingEmptySubsequences: true)
+                    .map(String.init)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { $0.isEmpty == false }
+
+                guard parts.count >= 2 else { return nil }
+
+                for part in parts {
+                    let partKey = DictionaryKeyPolicy.lookupKey(for: part)
+                    guard partKey.isEmpty == false else { continue }
+                    if let hit = try await lookupSurfaceThenDeinflect(displayKey: part, lookupKey: partKey, mode: mode) {
+                        return hit
+                    }
+                }
+
+                return nil
+            }
+
             if candidates.isEmpty == false {
                 for cand in candidates {
                     // Reduplication structural preference (same logic as legacy selection lookup).
@@ -293,11 +369,30 @@ final class DictionaryLookupViewModel: ObservableObject {
                     triedLookupKeys.insert(cand.lookupKey)
 
                     if let hit = try await lookupSurfaceThenDeinflect(displayKey: cand.displayKey, lookupKey: cand.lookupKey, mode: mode) {
-                        let ranked = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
+                        let ranked = prioritizePreferredEntries(
+                            in: rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority),
+                            preferredEntryIDs: hit.preferredEntryIDs
+                        )
                         hitOutcome = LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: hit.displayKey, results: ranked, errorMessage: nil)
                         break
                     }
+
+                    if let splitHit = try await maybeSplitMiddleDotLookup(cand) {
+                        let ranked = prioritizePreferredEntries(
+                            in: rankResults(splitHit.rows, for: splitHit.displayKey, mode: mode, entryPriority: splitHit.priority),
+                            preferredEntryIDs: splitHit.preferredEntryIDs
+                        )
+                        hitOutcome = LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: splitHit.displayKey, results: ranked, errorMessage: nil)
+                        break
+                    }
                 }
+            } else if selectedToken.lookupForm.isEmpty == false,
+                      let hit = try await lookupSurfaceThenDeinflect(displayKey: selectedToken.surface, lookupKey: selectedToken.lookupForm, mode: mode) {
+                let ranked = prioritizePreferredEntries(
+                    in: rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority),
+                    preferredEntryIDs: hit.preferredEntryIDs
+                )
+                hitOutcome = LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: hit.displayKey, results: ranked, errorMessage: nil)
             }
 
             // 2) If no hits, try MeCab lemma fallbacks (treated as part of the same transaction).
@@ -311,7 +406,10 @@ final class DictionaryLookupViewModel: ObservableObject {
                     let keys = DictionaryKeyPolicy.keys(forDisplayKey: lemma)
                     guard keys.lookupKey.isEmpty == false else { continue }
                     if let hit = try await lookupSurfaceThenDeinflect(displayKey: keys.displayKey, lookupKey: keys.lookupKey, mode: mode) {
-                        let ranked = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
+                        let ranked = prioritizePreferredEntries(
+                            in: rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority),
+                            preferredEntryIDs: hit.preferredEntryIDs
+                        )
                         hitOutcome = LookupOutcome(displayQuery: displaySelection, resolvedEmbeddingTerm: hit.displayKey, results: ranked, errorMessage: nil)
                         break
                     }
@@ -365,7 +463,10 @@ final class DictionaryLookupViewModel: ObservableObject {
             }
 
             if let hit = try await lookupSurfaceThenDeinflect(displayKey: primaryKeys.displayKey, lookupKey: primaryKeys.lookupKey, mode: mode) {
-                let ranked = rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority)
+                let ranked = prioritizePreferredEntries(
+                    in: rankResults(hit.rows, for: hit.displayKey, mode: mode, entryPriority: hit.priority),
+                    preferredEntryIDs: hit.preferredEntryIDs
+                )
                 outcome = LookupOutcome(displayQuery: primaryKeys.displayKey, resolvedEmbeddingTerm: hit.displayKey, results: ranked, errorMessage: nil)
 
                 if Self.lookupTraceEnabled {
@@ -492,6 +593,24 @@ private extension DictionaryLookupViewModel {
             return romajiScore(for: lhs, kanaCandidates: kanaCandidates, entryPriority: entryPriority)
                 < romajiScore(for: rhs, kanaCandidates: kanaCandidates, entryPriority: entryPriority)
         }
+    }
+
+    func prioritizePreferredEntries(in rows: [DictionaryEntry], preferredEntryIDs: Set<Int64>) -> [DictionaryEntry] {
+        guard preferredEntryIDs.isEmpty == false else { return rows }
+        var preferred: [DictionaryEntry] = []
+        var others: [DictionaryEntry] = []
+        preferred.reserveCapacity(rows.count)
+        others.reserveCapacity(rows.count)
+
+        for row in rows {
+            if preferredEntryIDs.contains(row.entryID) {
+                preferred.append(row)
+            } else {
+                others.append(row)
+            }
+        }
+
+        return preferred + others
     }
 
     func englishScore(for entry: DictionaryEntry, query: String, entryPriority: [Int64: Int]) -> EnglishScore {

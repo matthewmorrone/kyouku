@@ -254,7 +254,10 @@ private final class TrieInstrumentation {
         guard isActive else { return }
         isActive = false
         if Self.loggingEnabled {
-            CustomLogger.shared.info("Trie spans: cursors=\(self.cursorCount) traversals=\(self.traversalCount) steps=\(self.stepCount) childrenLookups=\(self.lookupCount) charAtCalls=\(self.charAccessCount) trieTime=\(self.trieTime * 1000)ms totalTime=\(totalDuration * 1000)ms")
+            let message = "Trie spans: cursors=\(self.cursorCount) traversals=\(self.traversalCount) steps=\(self.stepCount) childrenLookups=\(self.lookupCount) charAtCalls=\(self.charAccessCount) trieTime=\(self.trieTime * 1000)ms totalTime=\(totalDuration * 1000)ms"
+            Task { @MainActor in
+                CustomLogger.shared.info(message)
+            }
         }
     }
 

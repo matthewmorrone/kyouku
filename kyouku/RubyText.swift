@@ -32,6 +32,7 @@ struct RubyText: UIViewRepresentable {
     var headwordSpacingAmount: CGFloat = 1.0
     var rubyHorizontalAlignment: RubyHorizontalAlignment = .center
     var wrapLines: Bool = true
+    var wrapByCharacter: Bool = false
     var horizontalScrollEnabled: Bool = false
     var scrollSyncGroupID: String? = nil
     var tokenOverlays: [TokenOverlay] = []
@@ -96,7 +97,9 @@ struct RubyText: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = false
         textView.textContainer.maximumNumberOfLines = 0
-        textView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        textView.textContainer.lineBreakMode = wrapLines
+            ? (wrapByCharacter ? .byCharWrapping : .byWordWrapping)
+            : .byClipping
         if wrapLines == false {
             // Avoid an initial wrapped layout before SwiftUI's first `sizeThatFits` pass.
             textView.textContainer.size = CGSize(width: RubyTextConstants.noWrapContainerWidth, height: CGFloat.greatestFiniteMagnitude)
@@ -149,6 +152,7 @@ struct RubyText: UIViewRepresentable {
         // Any increases in how often `updateUIView` is triggered (e.g., selection/highlight changes) will amplify this cost.
         let priorWrapLines = uiView.wrapLines
         let priorHorizontalScrollEnabled = uiView.horizontalScrollEnabled
+        let priorLineBreakMode = uiView.textContainer.lineBreakMode
         let priorTextContainerInset = uiView.textContainerInset
         let wasSelectable = uiView.isSelectable
 
@@ -169,7 +173,9 @@ struct RubyText: UIViewRepresentable {
         uiView.horizontalScrollEnabled = horizontalScrollEnabled
         uiView.textContainer.widthTracksTextView = false
         uiView.textContainer.maximumNumberOfLines = 0
-        uiView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        uiView.textContainer.lineBreakMode = wrapLines
+            ? (wrapByCharacter ? .byCharWrapping : .byWordWrapping)
+            : .byClipping
         if wrapLines == false, uiView.textContainer.size.width < RubyTextConstants.noWrapContainerWidth {
             uiView.textContainer.size = CGSize(width: RubyTextConstants.noWrapContainerWidth, height: CGFloat.greatestFiniteMagnitude)
         }
@@ -309,6 +315,7 @@ struct RubyText: UIViewRepresentable {
         renderHasher.combine(padHeadwordSpacing ? 1 : 0)
         renderHasher.combine(Int((max(0, headwordSpacingAmount) * 1000).rounded(.toNearestOrEven)))
         renderHasher.combine(wrapLines ? 1 : 0)
+        renderHasher.combine(wrapByCharacter ? 1 : 0)
         // Ruby visibility affects layout, because we may reserve different vertical headroom
         // (paragraph spacing + top inset) depending on whether ruby should be shown.
         // Treat all visibility transitions as layout-affecting so toggling furigana cannot
@@ -368,7 +375,9 @@ struct RubyText: UIViewRepresentable {
             let mutable = NSMutableAttributedString(attributedString: attributed)
             let fullRange = NSRange(location: 0, length: mutable.length)
             let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+            paragraph.lineBreakMode = wrapLines
+                ? (wrapByCharacter ? .byCharWrapping : .byWordWrapping)
+                : .byClipping
             if #available(iOS 14.0, *) {
                 // Avoid `.pushOut`: it can push trailing punctuation onto the next line,
                 // creating leading commas/periods. TokenOverlayTextView already gates soft
@@ -480,7 +489,12 @@ struct RubyText: UIViewRepresentable {
         context.coordinator.attach(textView: uiView, scrollSyncGroupID: scrollSyncGroupID)
 
         // Only resync when layout-affecting config changes; do not resync on highlight-only updates.
-        let wrapModeChanged = (priorWrapLines != wrapLines) || (priorHorizontalScrollEnabled != horizontalScrollEnabled)
+        let expectedLineBreakMode: NSLineBreakMode = wrapLines
+            ? (wrapByCharacter ? .byCharWrapping : .byWordWrapping)
+            : .byClipping
+        let wrapModeChanged = (priorWrapLines != wrapLines)
+            || (priorHorizontalScrollEnabled != horizontalScrollEnabled)
+            || (priorLineBreakMode != expectedLineBreakMode)
         if shouldReapplyAttributedText || wrapModeChanged {
             context.coordinator.resyncToLatestSnapshotIfIdle()
         }

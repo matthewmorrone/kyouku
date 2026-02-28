@@ -1,0 +1,171 @@
+import Foundation
+import CoreFoundation
+import Mecab_Swift
+import IPADic
+import OSLog
+
+internal import StringTools
+
+extension SpanReadingAttacher {
+    private static func hardBoundaryCharacterSet() -> CharacterSet {
+        CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+    }
+
+    static func isHardBoundaryOnly(_ surface: String) -> Bool {
+        if surface.isEmpty { return true }
+        for scalar in surface.unicodeScalars {
+            if hardBoundaryCharacterSet().contains(scalar) == false {
+                return false
+            }
+        }
+        return true
+    }
+
+    static func tokenizer() -> Tokenizer? {
+        if let t = sharedTokenizer { return t }
+        sharedTokenizer = try? Tokenizer(dictionary: IPADic())
+        return sharedTokenizer
+    }
+
+    private typealias RetokenizedResult = (reading: String, lemmas: [String])
+
+    func sanitizeRubyReading(_ reading: String?) -> String? {
+        guard let reading else { return nil }
+        let trimmed = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return nil }
+        // Ruby should be kana. Drop anything that contains kanji or contains no kana.
+        guard containsKanji(trimmed) == false else { return nil }
+        guard trimmed.unicodeScalars.contains(where: { Self.isKana($0) }) else { return nil }
+        return trimmed
+    }
+
+    /// Contextual reading rewrites.
+    ///
+    /// Keep these narrow and predictable. They exist to match common phrase-level
+    /// realizations without doing phrase-aware tokenization.
+    static func applyContextualReadingRules(
+        surface: String,
+        reading: String?,
+        nsText: NSString,
+        range: NSRange
+    ) -> String? {
+        guard let reading else { return reading }
+        let trimmed = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return reading }
+
+        let normalized = Self.toHiragana(trimmed)
+
+        func composedCharacter(at utf16Index: Int) -> (surface: String, range: NSRange)? {
+            guard utf16Index >= 0, utf16Index < nsText.length else { return nil }
+            let r = nsText.rangeOfComposedCharacterSequence(at: utf16Index)
+            guard r.location != NSNotFound, r.length > 0, NSMaxRange(r) <= nsText.length else { return nil }
+            return (nsText.substring(with: r), r)
+        }
+
+        func composedCharacterString(at utf16Index: Int) -> String? {
+            composedCharacter(at: utf16Index)?.surface
+        }
+
+        func isNumericKanji(_ s: String) -> Bool {
+            // Covers common numeric kanji used in compounds like 二人三脚 / 一人二役.
+            // Keep this intentionally narrow and best-effort.
+            guard s.count == 1 else { return false }
+            return "一二三四五六七八九十百千".contains(s)
+        }
+
+        func isDigitLike(_ s: String) -> Bool {
+            guard s.count == 1, let scalar = s.unicodeScalars.first else { return false }
+            return (0x30...0x39).contains(scalar.value) || (0xFF10...0xFF19).contains(scalar.value)
+        }
+
+        func containsKanjiGlyph(_ s: String) -> Bool {
+            s.unicodeScalars.contains { scalar in
+                switch scalar.value {
+                case 0x3400...0x4DBF, // CJK Ext A
+                     0x4E00...0x9FFF: // CJK Unified
+                    return true
+                default:
+                    return false
+                }
+            }
+        }
+
+        switch surface {
+        case "一人":
+            if normalized == "いちにん" || normalized == "いちじん" {
+                let end = NSMaxRange(range)
+                if let next = composedCharacterString(at: end), containsKanjiGlyph(next), isNumericKanji(next) {
+                    return reading
+                }
+                return "ひとり"
+            }
+            return reading
+
+        case "二人":
+            if normalized == "ににん" {
+                let end = NSMaxRange(range)
+                if let next = composedCharacterString(at: end), containsKanjiGlyph(next), isNumericKanji(next) {
+                    return reading
+                }
+                return "ふたり"
+            }
+            return reading
+
+        case "中":
+            // In counter-like compounds (中 + <number> + 人), MeCab frequently prefers the
+            // on-yomi reading (ちゅう), but the common reading is なか (e.g. 中二人 → なかふたり).
+            // Keep this narrowly scoped to avoid changing standalone "中" defaults.
+            guard normalized == "ちゅう" else { return reading }
+            let end = NSMaxRange(range)
+            guard end >= 0, end < nsText.length else { return reading }
+
+            var cursor = end
+            var consumed = 0
+            var sawNumber = false
+            while cursor < nsText.length, consumed < 4 {
+                guard let next = composedCharacter(at: cursor) else { break }
+                if isNumericKanji(next.surface) || isDigitLike(next.surface) {
+                    sawNumber = true
+                    cursor = NSMaxRange(next.range)
+                    consumed += 1
+                    continue
+                }
+                break
+            }
+
+            guard sawNumber, cursor < nsText.length, let afterNumber = composedCharacterString(at: cursor), afterNumber == "人" else {
+                return reading
+            }
+
+            return "なか"
+
+        case "何":
+            // Only rewrite the common dictionary-like "なに".
+            guard normalized == "なに" else { return reading }
+
+            // Look ahead in the original text.
+            let end = NSMaxRange(range)
+            guard end >= 0, end < nsText.length else { return reading }
+            let lookaheadLen = min(6, nsText.length - end)
+            guard lookaheadLen > 0 else { return reading }
+            let remainder = nsText.substring(with: NSRange(location: end, length: lookaheadLen))
+
+            // Common "なん" contexts: 何で / 何でも / 何だ / 何て / 何と / 何の / 何なら.
+            if remainder.hasPrefix("で") ||
+                remainder.hasPrefix("だ") ||
+                remainder.hasPrefix("て") ||
+                remainder.hasPrefix("と") ||
+                remainder.hasPrefix("の") ||
+                remainder.hasPrefix("なら")
+            {
+                return "なん"
+            }
+
+            return reading
+
+        default:
+            return reading
+        }
+    }
