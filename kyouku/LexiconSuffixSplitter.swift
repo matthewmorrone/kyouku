@@ -21,11 +21,28 @@ enum LexiconSuffixSplitter {
     private static let candidateSuffixes: Set<String> = [
         // Common sentence-final particles / interjections.
         // Keep this intentionally small; expand only when tests demonstrate need.
-        "よ", "ね", "な", "ぞ", "ぜ", "さ", "わ", "か"
+        "よ", "ね", "な", "ぞ", "ぜ", "さ", "わ", "か",
+        // Case / topic / connective particles that are frequently glued to the previous span.
+        "が", "を", "に", "へ", "と", "は", "も", "の"
     ]
 
-    static func apply(text: NSString, spans: [TextSpan], trie: LexiconTrie) -> [TextSpan] {
+    private static let leadingParticlePrefixes: Set<String> = [
+        "が", "を", "に", "へ", "と", "は", "も", "の"
+    ]
+
+    private static let carryToPreviousBases: Set<String> = ["た", "だ", "さ"]
+
+    static func apply(text: NSString, spans: [TextSpan], trie: LexiconTrie, deinflector: Deinflector? = nil) -> [TextSpan] {
         guard spans.isEmpty == false else { return spans }
+
+        func hasLexiconOrLemmaHit(_ surface: String) -> Bool {
+            if trie.containsWord(surface, requireKanji: false) {
+                return true
+            }
+            guard let deinflector else { return false }
+            let candidates = deinflector.deinflect(surface, maxDepth: 6, maxResults: 24)
+            return candidates.contains { trie.containsWord($0.surface, requireKanji: false) }
+        }
 
         // Never split across explicit hard-stop surfaces.
         func isHardStopSurface(_ surface: String) -> Bool {
@@ -51,62 +68,105 @@ enum LexiconSuffixSplitter {
                 continue
             }
 
-            // If this is already a lexicon word, do not split.
-            if trie.containsWord(surface, requireKanji: false) {
-                out.append(span)
-                continue
-            }
-
             let endIndex = NSMaxRange(r) - 1
             guard endIndex >= r.location else {
                 out.append(span)
                 continue
             }
 
+            let firstCharRange = text.rangeOfComposedCharacterSequence(at: r.location)
             let lastCharRange = text.rangeOfComposedCharacterSequence(at: endIndex)
-            // Be conservative: only split when the trailing composed char is a single UTF-16 unit.
-            guard lastCharRange.length == 1 else {
+
+            let firstIsSingleUnit = firstCharRange.length == 1
+            let lastIsSingleUnit = lastCharRange.length == 1
+            let firstSurface = firstIsSingleUnit ? text.substring(with: firstCharRange) : ""
+            let suffix = lastIsSingleUnit ? text.substring(with: lastCharRange) : ""
+
+            let canTryPrefixParticleSplit: Bool = {
+                guard firstIsSingleUnit else { return false }
+                guard leadingParticlePrefixes.contains(firstSurface) else { return false }
+                return NSMaxRange(firstCharRange) < NSMaxRange(r)
+            }()
+
+            let canTrySuffixSplit = lastIsSingleUnit && candidateSuffixes.contains(suffix)
+
+            if canTryPrefixParticleSplit == false,
+               canTrySuffixSplit == false,
+               trie.containsWord(surface, requireKanji: false) {
                 out.append(span)
                 continue
             }
 
-            let suffixRange = lastCharRange
-            let baseEnd = suffixRange.location
-            guard baseEnd > r.location else {
-                out.append(span)
-                continue
+            // Prefix carry-to-previous for glued auxiliary starts (e.g. ひい + たみたい -> ひいた + みたい).
+            if firstIsSingleUnit,
+               carryToPreviousBases.contains(firstSurface),
+               NSMaxRange(firstCharRange) < NSMaxRange(r),
+               let previous = out.last,
+               NSMaxRange(previous.range) == r.location {
+                let remainderRange = NSRange(location: NSMaxRange(firstCharRange), length: NSMaxRange(r) - NSMaxRange(firstCharRange))
+                if remainderRange.length > 0, NSMaxRange(remainderRange) <= text.length {
+                    let remainderSurface = text.substring(with: remainderRange)
+                    let combinedRange = NSRange(location: previous.range.location, length: previous.range.length + firstCharRange.length)
+                    let combinedSurface = text.substring(with: combinedRange)
+                    if hasLexiconOrLemmaHit(combinedSurface), hasLexiconOrLemmaHit(remainderSurface) {
+                        _ = out.removeLast()
+                        out.append(TextSpan(range: combinedRange, surface: combinedSurface, isLexiconMatch: true))
+                        out.append(TextSpan(range: remainderRange, surface: remainderSurface, isLexiconMatch: true))
+                        continue
+                    }
+                }
             }
 
-            let baseRange = NSRange(location: r.location, length: baseEnd - r.location)
-            guard baseRange.length >= 1 else {
-                out.append(span)
-                continue
+            // Prefix particle peel (e.g. はく -> は + く, のす -> の + す)
+            if canTryPrefixParticleSplit {
+                let remainderRange = NSRange(location: NSMaxRange(firstCharRange), length: NSMaxRange(r) - NSMaxRange(firstCharRange))
+                if remainderRange.length > 0, NSMaxRange(remainderRange) <= text.length {
+                    let remainderSurface = text.substring(with: remainderRange)
+                    if trie.containsWord(firstSurface, requireKanji: false), hasLexiconOrLemmaHit(remainderSurface) {
+                        out.append(TextSpan(range: firstCharRange, surface: firstSurface, isLexiconMatch: true))
+                        out.append(TextSpan(range: remainderRange, surface: remainderSurface, isLexiconMatch: true))
+                        continue
+                    }
+                }
             }
 
-            let suffix = text.substring(with: suffixRange)
-            guard candidateSuffixes.contains(suffix) else {
-                out.append(span)
-                continue
+            // Suffix particle peel (e.g. さが -> さ + が), with optional carry of a one-char base
+            // into the previous span (e.g. 愛し + さが -> 愛しさ + が).
+            if canTrySuffixSplit {
+                let suffixRange = lastCharRange
+                let baseEnd = suffixRange.location
+                if baseEnd > r.location {
+                    let baseRange = NSRange(location: r.location, length: baseEnd - r.location)
+                    if baseRange.length >= 1 {
+                        let baseSurface = text.substring(with: baseRange)
+                        if baseSurface.isEmpty == false,
+                           trie.containsWord(suffix, requireKanji: false),
+                           hasLexiconOrLemmaHit(baseSurface) {
+                            if baseRange.length == 1,
+                               carryToPreviousBases.contains(baseSurface),
+                               let previous = out.last,
+                               NSMaxRange(previous.range) == r.location {
+                                let combinedRange = NSRange(location: previous.range.location, length: previous.range.length + baseRange.length)
+                                if combinedRange.length > 0, NSMaxRange(combinedRange) <= text.length {
+                                    let combinedSurface = text.substring(with: combinedRange)
+                                    if hasLexiconOrLemmaHit(combinedSurface) {
+                                        _ = out.removeLast()
+                                        out.append(TextSpan(range: combinedRange, surface: combinedSurface, isLexiconMatch: true))
+                                        out.append(TextSpan(range: suffixRange, surface: suffix, isLexiconMatch: true))
+                                        continue
+                                    }
+                                }
+                            }
+
+                            out.append(TextSpan(range: baseRange, surface: baseSurface, isLexiconMatch: true))
+                            out.append(TextSpan(range: suffixRange, surface: suffix, isLexiconMatch: true))
+                            continue
+                        }
+                    }
+                }
             }
 
-            let baseSurface = text.substring(with: baseRange)
-            guard baseSurface.isEmpty == false else {
-                out.append(span)
-                continue
-            }
-
-            // Require both base and suffix to be lexicon words.
-            guard trie.containsWord(baseSurface, requireKanji: false) else {
-                out.append(span)
-                continue
-            }
-            guard trie.containsWord(suffix, requireKanji: false) else {
-                out.append(span)
-                continue
-            }
-
-            out.append(TextSpan(range: baseRange, surface: baseSurface, isLexiconMatch: true))
-            out.append(TextSpan(range: suffixRange, surface: suffix, isLexiconMatch: true))
+            out.append(span)
         }
 
         return out

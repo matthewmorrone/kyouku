@@ -618,12 +618,21 @@ struct SpanReadingAttacher {
                     let left = surface(of: leftSeg)
                     let right = surface(of: rightSeg)
 
+                    let negativeKuChainCandidate: Bool = {
+                        guard containsKanji(left) else { return false }
+                        guard left.hasSuffix("な") else { return false }
+                        guard right == "く" else { return false }
+                        guard i + 2 < segments.count else { return false }
+                        let nextSurface = surface(of: segments[i + 2])
+                        return nextSurface.hasPrefix("な")
+                    }()
+
                     let contiguous = NSMaxRange(leftSeg.range) == rightSeg.range.location
                     if contiguous == false {
                         counters.kanjiKanaRejected_notContiguous += 1
                     } else if isHardBoundarySurface(left) || isHardBoundarySurface(right) {
                         counters.kanjiKanaRejected_hardBoundary += 1
-                    } else if endsWithKanji(leftSeg) == false {
+                    } else if endsWithKanji(leftSeg) == false && negativeKuChainCandidate == false {
                         counters.kanjiKanaRejected_leftEndNotKanji += 1
                     } else if isHiraganaOnly(right) == false {
                         counters.kanjiKanaRejected_rightNotAllHiragana += 1

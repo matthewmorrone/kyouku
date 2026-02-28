@@ -24,13 +24,57 @@ actor ReadingOverridePolicy {
 
     func overrideReading(for surface: String, mecabReading: String?) async -> String? {
         guard surface.isEmpty == false else { return nil }
-        guard let overrides = await cachedOverridesOrStartWarmUp() else { return nil }
+        let rawSurface = surface.precomposedStringWithCanonicalMapping
         let key = Self.normalizeSurface(surface)
-        guard let dictionaryReading = overrides[key] else { return nil }
+        if let overrides = await cachedOverridesOrStartWarmUp(),
+           let dictionaryReading = overrides[key] {
+            if let mecabNormalized = Self.normalizeReading(mecabReading), mecabNormalized == dictionaryReading {
+                return nil
+            }
+            return dictionaryReading
+        }
+
+        // Generic fallback for glyph-variant surfaces when cache is not ready yet.
+        // Example: 噓 -> 嘘 via normalizeForLookup.
+        guard key != rawSurface else { return nil }
+        guard let dictionaryReading = await fallbackCanonicalReading(for: key) else { return nil }
         if let mecabNormalized = Self.normalizeReading(mecabReading), mecabNormalized == dictionaryReading {
             return nil
         }
         return dictionaryReading
+    }
+
+    private func fallbackCanonicalReading(for canonicalSurface: String) async -> String? {
+        guard canonicalSurface.isEmpty == false else { return nil }
+
+        let rows = (try? await DictionarySQLiteStore.shared.lookupExact(term: canonicalSurface, limit: 20)) ?? []
+        guard rows.isEmpty == false else { return nil }
+
+        var normalizedReadings: Set<String> = []
+        normalizedReadings.reserveCapacity(rows.count)
+
+        for row in rows {
+            if let reading = Self.normalizeReading(row.kana) {
+                normalizedReadings.insert(reading)
+            }
+        }
+
+        if normalizedReadings.count == 1 {
+            return normalizedReadings.first
+        }
+
+        let entryIDs = rows.map(\.entryID)
+        let details = (try? await DictionarySQLiteStore.shared.fetchEntryDetails(for: entryIDs)) ?? []
+        for detail in details {
+            for form in detail.kanaForms {
+                if let reading = Self.normalizeReading(form.text) {
+                    normalizedReadings.insert(reading)
+                }
+            }
+        }
+
+        guard normalizedReadings.count == 1 else { return nil }
+        return normalizedReadings.first
     }
 
     private func cachedOverridesOrStartWarmUp() async -> [String: String]? {
@@ -73,12 +117,24 @@ actor ReadingOverridePolicy {
         let task = Task<[String: String], Error> {
             let records = try await loader()
             var map: [String: String] = [:]
+            var conflicted: Set<String> = []
             map.reserveCapacity(records.count)
             for record in records {
                 let surface = Self.normalizeSurface(record.surface)
                 guard surface.isEmpty == false else { continue }
                 guard let reading = Self.normalizeReading(record.reading) else { continue }
-                map[surface] = reading
+
+                if let existing = map[surface] {
+                    if existing != reading {
+                        conflicted.insert(surface)
+                        map[surface] = nil
+                    }
+                    continue
+                }
+
+                if conflicted.contains(surface) == false {
+                    map[surface] = reading
+                }
             }
             return map
         }
@@ -86,7 +142,7 @@ actor ReadingOverridePolicy {
     }
 
     private static func normalizeSurface(_ surface: String) -> String {
-        surface.precomposedStringWithCanonicalMapping
+        normalizeForLookup(surface)
     }
 
     private static func normalizeReading(_ reading: String?) -> String? {

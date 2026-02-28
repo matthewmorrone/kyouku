@@ -9,6 +9,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
     let onResetSpans: () -> Void
     let onCameraOCRTap: () -> Void
     let onKaraokePrimaryTap: () -> Void
+    let onKaraokeRestartFromBeginning: () -> Void
     let onChooseAudio: () -> Void
     let onChooseSubtitles: () -> Void
     let onClearKaraoke: () -> Void
@@ -21,6 +22,8 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
     let isKaraokeReady: Bool
     let isKaraokePlaying: Bool
 
+    @State private var didTriggerKaraokeLongPress = false
+
     @Binding var showTokensSheet: Bool
     let tokenListSheet: () -> TokenListSheet
 
@@ -31,6 +34,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         onResetSpans: @escaping () -> Void,
         onCameraOCRTap: @escaping () -> Void,
         onKaraokePrimaryTap: @escaping () -> Void,
+        onKaraokeRestartFromBeginning: @escaping () -> Void,
         onChooseAudio: @escaping () -> Void,
         onChooseSubtitles: @escaping () -> Void,
         onClearKaraoke: @escaping () -> Void,
@@ -51,6 +55,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         self.onResetSpans = onResetSpans
         self.onCameraOCRTap = onCameraOCRTap
         self.onKaraokePrimaryTap = onKaraokePrimaryTap
+        self.onKaraokeRestartFromBeginning = onKaraokeRestartFromBeginning
         self.onChooseAudio = onChooseAudio
         self.onChooseSubtitles = onChooseSubtitles
         self.onClearKaraoke = onClearKaraoke
@@ -94,6 +99,10 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                 .accessibilityHint("Opens the iPhone camera and scans text")
 
                 Button {
+                    if didTriggerKaraokeLongPress {
+                        didTriggerKaraokeLongPress = false
+                        return
+                    }
                     onKaraokePrimaryTap()
                 } label: {
                     ZStack {
@@ -122,6 +131,13 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
                         }
                     }
                 }
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.45)
+                        .onEnded { _ in
+                            didTriggerKaraokeLongPress = true
+                            onKaraokeRestartFromBeginning()
+                        }
+                )
                 .accessibilityLabel(
                     isKaraokeBusy
                     ? "Generating karaoke sync"

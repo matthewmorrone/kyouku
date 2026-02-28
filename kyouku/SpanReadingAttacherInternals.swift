@@ -274,6 +274,20 @@ extension SpanReadingAttacher {
             }
         }
 
+        // If the primary attachment path produced no usable ruby, force one final
+        // retokenization fallback. This path now includes lookup-normalized variant
+        // fallback (e.g. 噓 -> 嘘), so variant glyphs can still obtain kana readings.
+        if requiresReading,
+           readingResult == nil,
+           let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
+            let normalized = Self.toHiragana(retokenized.reading).trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalized.isEmpty == false,
+               containsKanji(normalized) == false,
+               normalized.unicodeScalars.contains(where: { Self.isKana($0) }) {
+                readingResult = normalized
+            }
+        }
+
         if lemmaCandidates.isEmpty,
            let retokenized = retokenizedResult(for: span, tokenizer: tokenizer, cache: &retokenizedCache) {
             lemmaCandidates = retokenized.lemmas
@@ -328,21 +342,50 @@ extension SpanReadingAttacher {
 
     private func readingByRetokenizingSurface(_ surface: String, tokenizer: Tokenizer) -> RetokenizedResult? {
         guard surface.isEmpty == false else { return nil }
-        let tokens = tokenizer.tokenize(text: surface)
-        guard tokens.isEmpty == false else { return nil }
-        var builder = ""
-        var lemmas: [String] = []
-        for token in tokens {
-            let chunk: String
-            if token.reading.isEmpty {
-                chunk = String(surface[token.range])
-            } else {
-                chunk = token.reading
+        func tokenizeAndBuild(_ text: String) -> RetokenizedResult? {
+            let tokens = tokenizer.tokenize(text: text)
+            guard tokens.isEmpty == false else { return nil }
+
+            var builder = ""
+            var lemmas: [String] = []
+            for token in tokens {
+                let chunk: String = {
+                    if token.reading.isEmpty == false {
+                        return token.reading
+                    }
+                    let lemma = token.dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if lemma.isEmpty == false,
+                       lemma.unicodeScalars.allSatisfy({ Self.isKana($0) }) {
+                        return lemma
+                    }
+                    return String(text[token.range])
+                }()
+                builder.append(chunk)
+                Self.appendLemmaCandidate(token.dictionaryForm, to: &lemmas)
             }
-            builder.append(chunk)
-            Self.appendLemmaCandidate(token.dictionaryForm, to: &lemmas)
+            return builder.isEmpty ? nil : (builder, lemmas)
         }
-        return builder.isEmpty ? nil : (builder, lemmas)
+
+        func isUsableReading(_ reading: String) -> Bool {
+            let trimmed = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return false }
+            guard containsKanji(trimmed) == false else { return false }
+            return trimmed.unicodeScalars.contains(where: { Self.isKana($0) })
+        }
+
+        let primary = tokenizeAndBuild(surface)
+        if let primary, isUsableReading(primary.reading) {
+            return primary
+        }
+
+        let normalizedSurface = normalizeForLookup(surface)
+        if normalizedSurface != surface,
+           let normalized = tokenizeAndBuild(normalizedSurface),
+           isUsableReading(normalized.reading) {
+            return normalized
+        }
+
+        return primary
     }
 
     static func kanjiReadingFromToken(tokenSurface: String, tokenReadingKatakana: String) -> String? {

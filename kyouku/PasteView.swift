@@ -1647,6 +1647,47 @@ struct PasteView: View {
         }
     }
 
+    private func restartKaraokePlaybackFromBeginning() {
+        guard karaokePlaybackAvailable else {
+            showToast("Import karaoke audio first")
+            return
+        }
+
+        guard let note = currentNote,
+              let fileName = note.karaokeAudioFileName,
+              let audioURL = karaokeAudioURL(fileName: fileName) else {
+            showToast("Karaoke audio file not found")
+            return
+        }
+
+        do {
+            if karaokeAudioPlayer == nil || karaokeAudioPlayer?.url != audioURL {
+                karaokeAudioPlayer = try AVAudioPlayer(contentsOf: audioURL)
+                karaokeAudioPlayer?.prepareToPlay()
+            }
+            guard let player = karaokeAudioPlayer else { return }
+
+            player.pause()
+            player.currentTime = 0
+            karaokeStartOffsetSeconds = 0
+
+            let session = AVAudioSession.sharedInstance()
+            let leadTime = max(0.08, session.outputLatency)
+            let scheduledStart = player.deviceCurrentTime + leadTime
+            if player.play(atTime: scheduledStart) {
+                karaokeScheduledStartDeviceTime = scheduledStart
+            } else {
+                player.play()
+                karaokeScheduledStartDeviceTime = nil
+            }
+
+            updateKaraokeHighlight(at: 0)
+            startKaraokePlaybackTimer()
+        } catch {
+            showToast(error.localizedDescription)
+        }
+    }
+
     @MainActor
     private func recomputeKaraokeFromCurrentAudio() async {
         guard isGeneratingKaraokeAlignment == false else { return }
@@ -2056,6 +2097,9 @@ struct PasteView: View {
             },
             onKaraokePrimaryTap: {
                 handleKaraokePrimaryAction()
+            },
+            onKaraokeRestartFromBeginning: {
+                restartKaraokePlaybackFromBeginning()
             },
             onChooseAudio: {
                 chooseKaraokeAudio()

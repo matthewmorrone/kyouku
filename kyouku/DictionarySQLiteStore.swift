@@ -340,21 +340,13 @@ actor DictionarySQLiteStore {
             UNION ALL
             SELECT r.text AS surface, r.text AS reading
             FROM kana_forms r
-        ),
-        aggregated AS (
-            SELECT surface,
-                   MIN(reading) AS reading,
-                   COUNT(DISTINCT reading) AS reading_count
-            FROM surface_pairs
-            WHERE surface IS NOT NULL
-              AND reading IS NOT NULL
-              AND surface <> ''
-              AND reading <> ''
-            GROUP BY surface
         )
-        SELECT surface, reading
-        FROM aggregated
-        WHERE reading_count = 1;
+                SELECT surface, reading
+                FROM surface_pairs
+                WHERE surface IS NOT NULL
+                    AND reading IS NOT NULL
+                    AND surface <> ''
+                    AND reading <> '';
         """
 
         var stmt: OpaquePointer?

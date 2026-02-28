@@ -323,10 +323,75 @@ struct TokenActionPanel: View {
 
     private func preferredResultIndex() -> Int? {
         guard let raw = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines), raw.isEmpty == false else { return nil }
-        return effectiveResults.firstIndex { entry in
+        if let exact = effectiveResults.firstIndex(where: { entry in
             let candidate = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
             return candidate == raw
+        }) {
+            return exact
         }
+
+        let tokenSurface = effectiveSelection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard tokenSurface.isEmpty == false else { return nil }
+
+        return effectiveResults.firstIndex { entry in
+            let lemmaSurface = (entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? ""))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let lemmaReading = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard lemmaSurface.isEmpty == false, lemmaReading.isEmpty == false else { return false }
+            let projected = projectedOverrideKana(tokenSurface: tokenSurface, lemmaSurface: lemmaSurface, lemmaReading: lemmaReading)
+            return projected == raw
+        }
+    }
+
+    private func isKanaOnlySurface(_ surface: String) -> Bool {
+        guard surface.isEmpty == false else { return false }
+        return surface.unicodeScalars.allSatisfy { scalar in
+            (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
+        }
+    }
+
+    /// Mirrors LookupResultsView projection logic so preferred-reading stems map back
+    /// to the correct entry when reopening the popup.
+    private func projectedOverrideKana(tokenSurface: String, lemmaSurface: String, lemmaReading: String) -> String {
+        let baseReading = lemmaReading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard baseReading.isEmpty == false else { return "" }
+
+        func trailingKanaRun(in surface: String) -> String {
+            guard surface.isEmpty == false else { return "" }
+            let allScalars = Array(surface.unicodeScalars)
+            guard allScalars.isEmpty == false else { return "" }
+            var trailing: [UnicodeScalar] = []
+            for scalar in allScalars.reversed() {
+                let isKana = (0x3040...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
+                if isKana {
+                    trailing.append(scalar)
+                } else {
+                    break
+                }
+            }
+            guard trailing.isEmpty == false, trailing.count < allScalars.count else { return "" }
+            return String(String.UnicodeScalarView(trailing.reversed()))
+        }
+
+        let tokenSuffix = trailingKanaRun(in: tokenSurface)
+        let lemmaSuffix = trailingKanaRun(in: lemmaSurface)
+
+        let surfaceReading: String = {
+            guard tokenSuffix.isEmpty == false else { return baseReading }
+            guard lemmaSuffix.isEmpty == false else { return baseReading }
+            guard baseReading.hasSuffix(lemmaSuffix) else { return baseReading }
+            let stem = String(baseReading.dropLast(lemmaSuffix.count))
+            return stem + tokenSuffix
+        }()
+
+        if tokenSuffix.isEmpty == false,
+           surfaceReading.hasSuffix(tokenSuffix),
+           isKanaOnlySurface(tokenSurface) == false,
+           tokenSurface.utf16.count > tokenSuffix.utf16.count {
+            return String(surfaceReading.dropLast(tokenSuffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return surfaceReading.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func lemmaPreferredResultIndex() -> Int? {

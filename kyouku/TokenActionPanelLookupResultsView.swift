@@ -17,6 +17,7 @@ struct LookupResultsView: View {
 
     @State private var isCustomReadingPromptPresented = false
     @State private var customReadingText = ""
+    @State private var readingIndexByEntryID: [Int64: Int] = [:]
 
     @State private var highlightedEntryDetail: DictionaryEntryDetail? = nil
     @State private var highlightedEntryDetailTask: Task<Void, Never>? = nil
@@ -219,16 +220,22 @@ struct LookupResultsView: View {
         }
         .contentShape(Rectangle())
         .onAppear {
+            applyPreferredResultSelectionIfNeeded()
             refreshHighlightedEntryDetail()
             resetReadingIndexIfNeeded()
         }
         .onChange(of: highlightedResultIndex) { _, _ in
-            highlightedReadingIndex = 0
             refreshHighlightedEntryDetail()
             resetReadingIndexIfNeeded()
         }
+        .onChange(of: highlightedReadingIndex) { _, newValue in
+            guard let entryID = highlightedEntry?.entry.entryID else { return }
+            readingIndexByEntryID[entryID] = max(0, newValue)
+        }
         .onChange(of: lookup.presented?.requestID) { _, _ in
+            applyPreferredResultSelectionIfNeeded()
             highlightedReadingIndex = 0
+            readingIndexByEntryID.removeAll()
             refreshHighlightedEntryDetail()
             resetReadingIndexIfNeeded()
         }
@@ -345,6 +352,11 @@ struct LookupResultsView: View {
             return
         }
 
+        if let persistedIndex = readingIndexByEntryID[entry.entryID], variants.indices.contains(persistedIndex) {
+            highlightedReadingIndex = persistedIndex
+            return
+        }
+
         let preferred = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if preferred.isEmpty == false {
             if let idx = variants.firstIndex(of: preferred) {
@@ -394,6 +406,37 @@ struct LookupResultsView: View {
         guard let entry = highlightedEntry?.entry else { return nil }
         guard let detail = highlightedEntryDetail, detail.entryID == entry.entryID else { return nil }
         return detail
+    }
+
+    private func applyPreferredResultSelectionIfNeeded() {
+        guard let preferred = preferredReading?.trimmingCharacters(in: .whitespacesAndNewlines), preferred.isEmpty == false else { return }
+        guard effectiveResults.isEmpty == false else { return }
+
+        if let exact = effectiveResults.firstIndex(where: { entry in
+            let candidate = (entry.kana ?? entry.kanji).trimmingCharacters(in: .whitespacesAndNewlines)
+            return candidate == preferred
+        }) {
+            if highlightedResultIndex != exact {
+                highlightedResultIndex = exact
+            }
+            return
+        }
+
+        let tokenSurface = effectiveSelection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard tokenSurface.isEmpty == false else { return }
+
+        if let projected = effectiveResults.firstIndex(where: { entry in
+            let lemmaSurface = (entry.kanji.isEmpty == false ? entry.kanji : (entry.kana ?? ""))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let lemmaReading = (entry.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard lemmaSurface.isEmpty == false, lemmaReading.isEmpty == false else { return false }
+            let projected = projectedOverrideKana(tokenSurface: tokenSurface, lemmaSurface: lemmaSurface, lemmaReading: lemmaReading)
+            return projected == preferred
+        }) {
+            if highlightedResultIndex != projected {
+                highlightedResultIndex = projected
+            }
+        }
     }
 
     private func readingVariants(for entry: DictionaryEntry, detail: DictionaryEntryDetail?) -> [String] {

@@ -36,6 +36,10 @@ struct AuxiliaryChainMerger {
             dictionaryForm.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        var lemma: String {
+            normalizedDictionaryForm
+        }
+
         private var coarsePOSNormalized: String {
             coarsePOS.lowercased()
         }
@@ -91,6 +95,17 @@ struct AuxiliaryChainMerger {
         /// Mecab-Swift can surface negatives like ない/なく as `unknown` with lemma `ない`.
         var isNegativeAuxiliaryLike: Bool {
             normalizedDictionaryForm == "ない"
+        }
+
+        var isKuConjunctiveLike: Bool {
+            normalizedDictionaryForm == "く" || surface == "く"
+        }
+
+        var isNegativeStemLike: Bool {
+            if isNegativeAuxiliaryLike { return true }
+            if normalizedDictionaryForm == "な" { return true }
+            if surface.hasSuffix("な") { return true }
+            return false
         }
 
         /// Aux-like follower tokens based on POS metadata, with a narrow lemma fallback for coarse POS.
@@ -416,6 +431,12 @@ struct AuxiliaryChainMerger {
                     if leftTok.isNominalizer && rightTok.isParticle { break }
 
                     func allowsInflectionalContinuation(left: MorphToken, right: MorphToken) -> Bool {
+                        // Negative-chain repair:
+                        // Merge ...な + く into ...なく (e.g. 逢えな + く + なる).
+                        if right.isKuConjunctiveLike,
+                           (left.isNegativeStemLike || left.isAuxiliary || left.isAdjective) {
+                            return true
+                        }
                         // Primary allowance: head → follower.
                         if (left.isVerb || left.isAdjective) && right.isAuxChainFollower { return true }
                         // Allow auxiliary stacking and connective→aux transitions.
