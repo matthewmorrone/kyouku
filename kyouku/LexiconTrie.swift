@@ -71,7 +71,7 @@ final class LexiconTrie: @unchecked Sendable {
     }
 
     /// Returns the end index of the longest lexicon match that begins at `index`.
-    func longestMatchEnd(in text: NSString, from index: Int, requireKanji: Bool = true) -> Int? {
+    nonisolated func longestMatchEnd(in text: NSString, from index: Int, requireKanji: Bool = true) -> Int? {
         instrumentation.recordCursor()
         let length = text.length
         guard index < length else { return nil }
@@ -218,11 +218,11 @@ final class LexiconTrie: @unchecked Sendable {
         return requireKanji == false || hasKanji
     }
 
-    func beginProfiling() {
+    nonisolated func beginProfiling() {
         instrumentation.begin()
     }
 
-    func endProfiling(totalDuration: CFTimeInterval) {
+    nonisolated func endProfiling(totalDuration: CFTimeInterval) {
         instrumentation.end(totalDuration: totalDuration)
     }
 

@@ -47,6 +47,8 @@ struct FuriganaRenderingHost: View {
     var onContextMenuAction: ((RubyContextMenuAction) -> Void)? = nil
     var viewMetricsContext: RubyText.ViewMetricsContext? = nil
     var onDebugTokenListTextChange: ((String) -> Void)? = nil
+    var endEditingRequestID: Int = 0
+    var onDidCommitEndEditing: (() -> Void)? = nil
 
     var body: some View {
         GeometryReader { proxy in
@@ -147,7 +149,9 @@ struct FuriganaRenderingHost: View {
                     left: insets.leading,
                     bottom: insets.bottom,
                     right: insets.trailing
-                )
+                ),
+                endEditingRequestID: endEditingRequestID,
+                onDidCommitEndEditing: onDidCommitEndEditing
             )
             .padding(0)
         }
@@ -517,6 +521,8 @@ private struct EditingTextView: UIViewRepresentable {
     let wrapLines: Bool
     let scrollSyncGroupID: String
     let insets: UIEdgeInsets
+    let endEditingRequestID: Int
+    let onDidCommitEndEditing: (() -> Void)?
 
     // Keep this large enough for real-world long lines when wrapping is disabled.
     private static let noWrapContainerWidth: CGFloat = 200_000
@@ -618,6 +624,18 @@ private struct EditingTextView: UIViewRepresentable {
 
     func updateUIView(_ uiView: UITextView, context: Context) {
         context.coordinator.attach(textView: uiView, scrollSyncGroupID: scrollSyncGroupID)
+
+        if endEditingRequestID != context.coordinator.lastHandledEndEditingRequestID {
+            context.coordinator.lastHandledEndEditingRequestID = endEditingRequestID
+            if uiView.isFirstResponder {
+                uiView.resignFirstResponder()
+            } else {
+                DispatchQueue.main.async {
+                    onDidCommitEndEditing?()
+                }
+            }
+        }
+
         // When an IME (e.g. Japanese QWERTY keyboard) is composing text, `markedTextRange`
         // is non-nil and UIKit expects to own the text storage. Re-applying `attributedText`
         // during this phase can corrupt the composition (e.g. "keshin" → "kえしn").
@@ -657,6 +675,9 @@ private struct EditingTextView: UIViewRepresentable {
         }
 
         uiView.isEditable = isEditable
+        if isEditable == false, uiView.isFirstResponder {
+            uiView.resignFirstResponder()
+        }
         uiView.font = resolvedBaseFont(ofSize: fontSize)
         uiView.textColor = UIColor.label
         uiView.textContainerInset = insets
@@ -720,7 +741,7 @@ private struct EditingTextView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, selectedRange: $selectedRange)
+        Coordinator(text: $text, selectedRange: $selectedRange, onDidCommitEndEditing: onDidCommitEndEditing)
     }
 
     private func applyTypingAttributes(to textView: UITextView) {
@@ -778,16 +799,23 @@ private struct EditingTextView: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         @Binding var text: String
         @Binding var selectedRange: NSRange?
+        private let onDidCommitEndEditing: (() -> Void)?
 
         private weak var textView: UITextView?
+        var lastHandledEndEditingRequestID: Int = 0
         private var scrollSyncGroupID: String? = nil
         private let scrollSyncSourceID: String = UUID().uuidString
         private var scrollObserver: NSObjectProtocol? = nil
         private var isApplyingExternalScroll: Bool = false
 
-        init(text: Binding<String>, selectedRange: Binding<NSRange?>) {
+        init(
+            text: Binding<String>,
+            selectedRange: Binding<NSRange?>,
+            onDidCommitEndEditing: (() -> Void)?
+        ) {
             _text = text
             _selectedRange = selectedRange
+            self.onDidCommitEndEditing = onDidCommitEndEditing
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
@@ -1015,6 +1043,19 @@ private struct EditingTextView: UIViewRepresentable {
 
         func textViewDidChange(_ textView: UITextView) {
             text = textView.text
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            text = textView.text
+            let r = textView.selectedRange
+            if r.location == NSNotFound {
+                selectedRange = nil
+            } else {
+                selectedRange = r
+            }
+            DispatchQueue.main.async {
+                self.onDidCommitEndEditing?()
+            }
         }
     }
 }

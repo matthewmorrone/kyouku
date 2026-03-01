@@ -1,6 +1,12 @@
 import Foundation
 import UserNotifications
 
+private struct WordOfTheDayLiveContent {
+    let surface: String
+    let kana: String?
+    let meaning: String
+}
+
 enum WordOfTheDayScheduler {
     static let enabledKey = "wordOfTheDay.enabled"
     static let hourKey = "wordOfTheDay.hour"
@@ -53,7 +59,9 @@ enum WordOfTheDayScheduler {
 
     static func sendTestNotification(word: Word?) async {
         guard let word else { return }
-        let content = makeContent(for: word)
+        let live = await resolveLiveContent(for: [word])
+        guard let liveContent = live[word.dictionaryEntryID] else { return }
+        let content = makeContent(for: word, liveContent: liveContent)
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
         let request = UNNotificationRequest(identifier: requestPrefix + "test_\(UUID().uuidString)", content: content, trigger: trigger)
         _ = await addRequest(request)
@@ -64,6 +72,7 @@ enum WordOfTheDayScheduler {
     private static func scheduleUpcoming(words: [Word], hour: Int, minute: Int, daysToSchedule: Int) async {
         await clearPendingWordOfTheDayRequests()
         guard words.isEmpty == false else { return }
+        let liveContentByEntryID = await resolveLiveContent(for: words)
 
         // Randomize selection across the full saved word list.
         // We shuffle once per scheduling run to keep the upcoming batch varied while
@@ -83,7 +92,8 @@ enum WordOfTheDayScheduler {
             comps.minute = max(0, min(59, minute))
 
             let word = pickWord(forDayOffset: dayOffset, from: shuffled)
-            let content = makeContent(for: word)
+            guard let liveContent = liveContentByEntryID[word.dictionaryEntryID] else { continue }
+            let content = makeContent(for: word, liveContent: liveContent)
             let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
             let id = requestPrefix + identifierDateString(from: comps)
             let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
@@ -93,7 +103,7 @@ enum WordOfTheDayScheduler {
 
     private static func pickWord(forDayOffset dayOffset: Int, from words: [Word]) -> Word {
         guard words.isEmpty == false else {
-            return Word(surface: "", kana: nil, meaning: "")
+            return Word(dictionaryEntryID: 0, surface: "", kana: nil, meaning: "")
         }
         // Randomized upstream; rotate through shuffled order to reduce duplicates
         // within the scheduled batch.
@@ -101,13 +111,13 @@ enum WordOfTheDayScheduler {
         return words[idx]
     }
 
-    private static func makeContent(for word: Word) -> UNMutableNotificationContent {
+    private static func makeContent(for word: Word, liveContent: WordOfTheDayLiveContent) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         content.title = "Word of the Day"
 
-        let surface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        let meaning = word.meaning.trimmingCharacters(in: .whitespacesAndNewlines)
-        let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let surface = liveContent.surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        let meaning = liveContent.meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kana = liveContent.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let kana, kana.isEmpty == false, kana != surface {
             content.body = "\(surface)【\(kana)】 \(meaning)"
@@ -116,12 +126,64 @@ enum WordOfTheDayScheduler {
         }
         content.sound = .default
 
-        content.userInfo["surface"] = word.surface
+        content.userInfo["surface"] = surface
         if let kana { content.userInfo["kana"] = kana }
-        content.userInfo["meaning"] = word.meaning
+        content.userInfo["meaning"] = meaning
         content.userInfo["wordID"] = word.id.uuidString
+        content.userInfo["dictionaryEntryID"] = word.dictionaryEntryID
 
         return content
+    }
+
+    private static func resolveLiveContent(for words: [Word]) async -> [Int64: WordOfTheDayLiveContent] {
+        let entryIDs = Array(Set(words.map(\.dictionaryEntryID)))
+        guard entryIDs.isEmpty == false else { return [:] }
+
+        let details = (try? await DictionaryEntryDetailsCache.shared.details(for: entryIDs)) ?? []
+        var out: [Int64: WordOfTheDayLiveContent] = [:]
+        out.reserveCapacity(details.count)
+
+        for detail in details {
+            var surface = ""
+            for form in detail.kanjiForms {
+                let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty == false {
+                    surface = trimmed
+                    break
+                }
+            }
+            if surface.isEmpty {
+                for form in detail.kanaForms {
+                    let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty == false {
+                        surface = trimmed
+                        break
+                    }
+                }
+            }
+
+            var kana: String?
+            for form in detail.kanaForms {
+                let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty == false {
+                    kana = trimmed
+                    break
+                }
+            }
+
+            let sortedSenses = detail.senses.sorted(by: { $0.orderIndex < $1.orderIndex })
+            var meaning = ""
+            if let firstSense = sortedSenses.first {
+                let sortedGlosses = firstSense.glosses.sorted(by: { $0.orderIndex < $1.orderIndex })
+                if let firstGloss = sortedGlosses.first {
+                    meaning = firstGloss.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+
+            out[detail.entryID] = WordOfTheDayLiveContent(surface: surface, kana: kana, meaning: meaning)
+        }
+
+        return out
     }
 
     private static func pendingWordOfTheDayIdentifiers() async -> [String] {

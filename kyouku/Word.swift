@@ -15,6 +15,8 @@ import Foundation
 ///   It is never populated from pasted text or heuristic furigana.
 struct Word: Identifiable, Codable, Hashable {
     let id: UUID
+    /// Canonical dictionary entry identifier. Saved words are references to this entry.
+    let dictionaryEntryID: Int64
     var surface: String
     /// Optional dictionary headword surface used for lookups (can differ from `surface`
     /// when the note contains an inflected form). Kept optional for backward compatibility.
@@ -33,6 +35,7 @@ struct Word: Identifiable, Codable, Hashable {
     
     init(
         id: UUID = UUID(),
+        dictionaryEntryID: Int64,
         surface: String,
         dictionarySurface: String? = nil,
         kana: String? = nil,
@@ -43,6 +46,7 @@ struct Word: Identifiable, Codable, Hashable {
         createdAt: Date = Date()
     ) {
         self.id = id
+        self.dictionaryEntryID = dictionaryEntryID
         self.surface = surface
         self.dictionarySurface = dictionarySurface
         self.kana = kana
@@ -69,6 +73,7 @@ struct Word: Identifiable, Codable, Hashable {
 extension Word {
     private enum CodingKeys: String, CodingKey {
         case id
+        case dictionaryEntryID
         case surface
         case dictionarySurface
         case kana
@@ -83,6 +88,7 @@ extension Word {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
+        dictionaryEntryID = try container.decode(Int64.self, forKey: .dictionaryEntryID)
         surface = try container.decode(String.self, forKey: .surface)
         dictionarySurface = try container.decodeIfPresent(String.self, forKey: .dictionarySurface)
         kana = try container.decodeIfPresent(String.self, forKey: .kana)
@@ -103,6 +109,7 @@ extension Word {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
+        try container.encode(dictionaryEntryID, forKey: .dictionaryEntryID)
         try container.encode(surface, forKey: .surface)
         try container.encodeIfPresent(dictionarySurface, forKey: .dictionarySurface)
         try container.encodeIfPresent(kana, forKey: .kana)

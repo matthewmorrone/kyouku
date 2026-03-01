@@ -184,7 +184,7 @@ final class SearchViewModel: ObservableObject {
             }
 
             let entryIDs = Array(Set(self.lookup.results.map(\.entryID)))
-            let details = (try? await DictionarySQLiteStore.shared.fetchEntryDetails(for: entryIDs)) ?? []
+            let details = (try? await DictionaryEntryDetailsCache.shared.details(for: entryIDs)) ?? []
             let detailsByEntryID = Dictionary(uniqueKeysWithValues: details.map { ($0.entryID, $0) })
 
             await MainActor.run {

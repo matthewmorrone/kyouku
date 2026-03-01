@@ -170,7 +170,7 @@ struct SearchResultsView: View {
             NavigationLink {
                 WordDefinitionView(
                     request: .init(
-                        term: .init(surface: row.surface, kana: row.kana),
+                        term: .init(entryID: row.entryID, surface: row.surface, kana: row.kana),
                         context: .init(sentence: nil, lemmaCandidates: [], tokenPartOfSpeech: nil, tokenParts: []),
                         metadata: .init(sourceNoteID: nil)
                     )

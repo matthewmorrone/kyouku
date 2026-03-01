@@ -64,7 +64,7 @@ actor ReadingOverridePolicy {
         }
 
         let entryIDs = rows.map(\.entryID)
-        let details = (try? await DictionarySQLiteStore.shared.fetchEntryDetails(for: entryIDs)) ?? []
+        let details = (try? await DictionaryEntryDetailsCache.shared.details(for: entryIDs)) ?? []
         for detail in details {
             for form in detail.kanaForms {
                 if let reading = Self.normalizeReading(form.text) {

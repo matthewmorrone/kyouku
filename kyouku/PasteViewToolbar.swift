@@ -21,6 +21,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
     let karaokeProgress: Double
     let isKaraokeReady: Bool
     let isKaraokePlaying: Bool
+    let karaokePlaybackTimeText: String?
 
     @State private var didTriggerKaraokeLongPress = false
 
@@ -46,6 +47,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         karaokeProgress: Double,
         isKaraokeReady: Bool,
         isKaraokePlaying: Bool,
+        karaokePlaybackTimeText: String?,
         showTokensSheet: Binding<Bool>,
         tokenListSheet: @escaping () -> TokenListSheet
     ) {
@@ -67,6 +69,7 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
         self.karaokeProgress = karaokeProgress
         self.isKaraokeReady = isKaraokeReady
         self.isKaraokePlaying = isKaraokePlaying
+        self.karaokePlaybackTimeText = karaokePlaybackTimeText
         self._showTokensSheet = showTokensSheet
         self.tokenListSheet = tokenListSheet
     }
@@ -90,6 +93,13 @@ struct PasteCoreToolbar<TokenListSheet: View>: ToolbarContent {
 
         ToolbarItem(placement: .topBarTrailing) {
             HStack(spacing: 12) {
+                if let karaokePlaybackTimeText, isKaraokePlaying {
+                    Text(karaokePlaybackTimeText)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Karaoke playback time")
+                }
+
                 Button {
                     onCameraOCRTap()
                 } label: {

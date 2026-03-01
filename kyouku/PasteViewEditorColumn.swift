@@ -63,6 +63,8 @@ struct PasteEditorColumnBody: View {
     let onShowToast: (String) -> Void
     let onHaptic: () -> Void
     let onResetDefaultSegmentationReading: () -> Void
+    let endEditingRequestID: Int
+    let onEditingCommitCompleted: () -> Void
 
     private var effectiveShowFurigana: Bool {
         incrementalLookupEnabled ? false : showFurigana
@@ -113,7 +115,9 @@ struct PasteEditorColumnBody: View {
                 interTokenSpacing: interTokenSpacing,
                 tokenSpacingValueProvider: tokenSpacingValueProvider,
                 onTokenSpacingChanged: onTokenSpacingChanged,
-                coordinateSpaceName: coordinateSpaceName
+                coordinateSpaceName: coordinateSpaceName,
+                endEditingRequestID: endEditingRequestID,
+                onEditingCommitCompleted: onEditingCommitCompleted
             )
 
             PasteControlsBar(

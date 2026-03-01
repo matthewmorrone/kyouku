@@ -253,13 +253,64 @@ struct WordsCSVImportView: View {
     private func importWords() {
         let listIDs = resolveImportListIDsCreatingIfNeeded().ids
 
-        let payload: [WordsStore.WordToAdd] = importableItems.compactMap { item in
-            guard let surface = item.finalSurface, surface.isEmpty == false else { return nil }
-            guard let meaning = item.finalMeaning, meaning.isEmpty == false else { return nil }
-            return WordsStore.WordToAdd(surface: surface, dictionarySurface: nil, kana: item.finalKana, meaning: meaning, note: item.finalNote)
+        let rows = importableItems
+        Task {
+            var payload: [WordsStore.WordToAdd] = []
+            payload.reserveCapacity(rows.count)
+
+            for item in rows {
+                guard let surface = item.finalSurface, surface.isEmpty == false else { continue }
+                guard let meaning = item.finalMeaning, meaning.isEmpty == false else { continue }
+                guard let entry = await resolveEntryForImport(surface: surface, kana: item.finalKana) else { continue }
+                payload.append(
+                    WordsStore.WordToAdd(
+                        dictionaryEntryID: entry.entryID,
+                        surface: surface,
+                        dictionarySurface: nil,
+                        kana: item.finalKana,
+                        meaning: meaning,
+                        note: item.finalNote
+                    )
+                )
+            }
+
+            await MainActor.run {
+                store.addMany(payload, sourceNoteID: nil, listIDs: listIDs)
+            }
+        }
+    }
+
+    private func resolveEntryForImport(surface: String, kana: String?) async -> DictionaryEntry? {
+        var candidates: [String] = [surface]
+        if let kana, kana.isEmpty == false {
+            candidates.append(kana)
         }
 
-        store.addMany(payload, sourceNoteID: nil, listIDs: listIDs)
+        var seen: Set<String> = []
+        for candidate in candidates {
+            guard seen.insert(candidate).inserted else { continue }
+            let key = DictionaryKeyPolicy.keys(forDisplayKey: candidate).lookupKey
+            guard key.isEmpty == false else { continue }
+            guard let rows = try? await DictionarySQLiteStore.shared.lookupExact(term: key, limit: 32), rows.isEmpty == false else {
+                continue
+            }
+            if let kana, kana.isEmpty == false {
+                let folded = kanaFoldToHiragana(kana)
+                if let matched = rows.first(where: {
+                    let reading = ($0.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    return reading.isEmpty == false && kanaFoldToHiragana(reading) == folded
+                }) {
+                    return matched
+                }
+            }
+            return rows.first
+        }
+
+        return nil
+    }
+
+    private func kanaFoldToHiragana(_ value: String) -> String {
+        value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
     }
 
     private var importSelectionIsValid: Bool {

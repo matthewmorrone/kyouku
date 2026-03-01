@@ -42,8 +42,15 @@ struct WordDefinitionView: View {
         let metadata: Metadata
 
         struct Term: Hashable {
+            let entryID: Int64?
             let surface: String
             let kana: String?
+
+            init(entryID: Int64? = nil, surface: String, kana: String?) {
+                self.entryID = entryID
+                self.surface = surface
+                self.kana = kana
+            }
         }
 
         struct Context: Hashable {
@@ -227,7 +234,7 @@ struct WordDefinitionView: View {
     }
 
     private var loadTaskKey: String {
-        "\(request.term.surface.trimmingCharacters(in: .whitespacesAndNewlines))|\((request.term.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines))"
+        "\(request.term.entryID.map(String.init) ?? "")|\(request.term.surface.trimmingCharacters(in: .whitespacesAndNewlines))|\((request.term.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines))"
     }
 
     @MainActor
@@ -261,7 +268,9 @@ struct WordDefinitionView: View {
                     )
                 } else if trimmed.isEmpty == false {
                     let reading = snapshot.reading?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard let entryID = snapshot.entryID else { return }
                     store.add(
+                        dictionaryEntryID: entryID,
                         surface: snapshot.headword,
                         dictionarySurface: snapshot.headword,
                         kana: (reading?.isEmpty == false) ? reading : nil,
@@ -275,6 +284,9 @@ struct WordDefinitionView: View {
     }
 
     private var currentWord: Word? {
+        if let entryID = request.term.entryID {
+            return store.words.first { $0.dictionaryEntryID == entryID }
+        }
         let surface = request.term.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let kana = request.term.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKana = (kana?.isEmpty == false) ? kana : nil
@@ -305,6 +317,9 @@ struct WordDefinitionView: View {
     }
 
     private func wordForMembership(snapshot: Snapshot) -> Word? {
+        if let entryID = snapshot.entryID {
+            return store.words.first { $0.dictionaryEntryID == entryID }
+        }
         let headword = snapshot.headword.trimmingCharacters(in: .whitespacesAndNewlines)
         let reading = snapshot.reading?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedReading = (reading?.isEmpty == false) ? reading : nil
@@ -323,7 +338,9 @@ struct WordDefinitionView: View {
         }
 
         let reading = snapshot.reading?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let entryID = snapshot.entryID else { return nil }
         store.add(
+            dictionaryEntryID: entryID,
             surface: snapshot.headword,
             dictionarySurface: snapshot.headword,
             kana: (reading?.isEmpty == false) ? reading : nil,
@@ -393,6 +410,7 @@ struct WordDefinitionView: View {
 
 private extension WordDefinitionView {
     struct Snapshot {
+        let entryID: Int64?
         let headword: String
         let reading: String?
         let lemmaLine: String?
@@ -450,8 +468,12 @@ private extension WordDefinitionView {
             let trimmedSurface = request.term.surface.trimmingCharacters(in: .whitespacesAndNewlines)
             let trimmedKana = request.term.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedKana = (trimmedKana?.isEmpty == false) ? trimmedKana : nil
+            let requestedEntryID = request.term.entryID
 
             let savedWordMatch: Word? = {
+                if let requestedEntryID {
+                    return store.words.first { $0.dictionaryEntryID == requestedEntryID }
+                }
                 guard trimmedSurface.isEmpty == false else { return nil }
                 return store.words.first { word in
                     let candidateSurface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -490,12 +512,29 @@ private extension WordDefinitionView {
 
             var mergedEntries: [DictionaryEntry] = []
             var seen = Set<String>()
-            for term in queryTerms {
-                let key = DictionaryKeyPolicy.keys(forDisplayKey: term).lookupKey
-                guard key.isEmpty == false else { continue }
-                let rows = try await DictionarySQLiteStore.shared.lookupExact(term: key, limit: 64)
-                for row in rows where seen.insert(row.id).inserted {
-                    mergedEntries.append(row)
+            if let requestedEntryID {
+                let details = try await DictionaryEntryDetailsCache.shared.details(for: [requestedEntryID])
+                if let detail = details.first {
+                    let headword = detail.kanjiForms.first?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let reading = detail.kanaForms.first?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let gloss = detail.senses
+                        .sorted(by: { $0.orderIndex < $1.orderIndex })
+                        .first?
+                        .glosses
+                        .sorted(by: { $0.orderIndex < $1.orderIndex })
+                        .first?
+                        .text
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    mergedEntries = [DictionaryEntry(entryID: detail.entryID, kanji: headword, kana: reading, gloss: gloss, isCommon: detail.isCommon)]
+                }
+            } else {
+                for term in queryTerms {
+                    let key = DictionaryKeyPolicy.keys(forDisplayKey: term).lookupKey
+                    guard key.isEmpty == false else { continue }
+                    let rows = try await DictionarySQLiteStore.shared.lookupExact(term: key, limit: 64)
+                    for row in rows where seen.insert(row.id).inserted {
+                        mergedEntries.append(row)
+                    }
                 }
             }
 
@@ -522,8 +561,9 @@ private extension WordDefinitionView {
             mergedEntries = mergedEntries.filter { $0.isCommon } + mergedEntries.filter { $0.isCommon == false }
 
             let entryIDs = mergedEntries.map(\.entryID)
-            let details = try await DictionarySQLiteStore.shared.fetchEntryDetails(for: entryIDs)
+            let details = try await DictionaryEntryDetailsCache.shared.details(for: entryIDs)
             let orderedDetails = details.filter { $0.isCommon } + details.filter { $0.isCommon == false }
+            let resolvedEntryID = requestedEntryID ?? orderedDetails.first?.entryID
 
             let headword: String = {
                 if let preferredKanaHeadword,
@@ -602,6 +642,7 @@ private extension WordDefinitionView {
             }()
 
             return Snapshot(
+                entryID: resolvedEntryID,
                 headword: headword,
                 reading: reading,
                 lemmaLine: lemmaLine,
@@ -870,7 +911,7 @@ private extension WordDefinitionView {
                     continue
                 }
 
-                let details = try await DictionarySQLiteStore.shared.fetchEntryDetails(for: [first.entryID])
+                let details = try await DictionaryEntryDetailsCache.shared.details(for: [first.entryID])
                 let detail = details.first
                 let readingSummary = detail?.kanaForms
                     .prefix(3)

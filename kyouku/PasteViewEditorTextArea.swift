@@ -49,6 +49,8 @@ struct PasteEditorTextArea: View {
     let onTokenSpacingChanged: ((Int, CGFloat, Bool) -> Void)?
 
     let coordinateSpaceName: String
+    let endEditingRequestID: Int
+    let onEditingCommitCompleted: () -> Void
 
     var body: some View {
         FuriganaRenderingHost(
@@ -86,7 +88,9 @@ struct PasteEditorTextArea: View {
             contextMenuStateProvider: contextMenuStateProvider,
             onContextMenuAction: onContextMenuAction,
             viewMetricsContext: viewMetricsContext,
-            onDebugTokenListTextChange: onDebugTokenListTextChange
+            onDebugTokenListTextChange: onDebugTokenListTextChange,
+            endEditingRequestID: endEditingRequestID,
+            onDidCommitEndEditing: onEditingCommitCompleted
         )
         .background(
             GeometryReader { proxy in

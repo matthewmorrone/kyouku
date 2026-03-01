@@ -483,7 +483,7 @@ struct LookupResultsView: View {
         }
 
         highlightedEntryDetailTask = Task {
-            let detail = (try? await DictionarySQLiteStore.shared.fetchEntryDetails(for: [entry.entryID]).first)
+            let detail = (try? await DictionaryEntryDetailsCache.shared.detail(for: entry.entryID))
             if Task.isCancelled { return }
             highlightedEntryDetail = detail
         }

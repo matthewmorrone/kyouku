@@ -663,6 +663,10 @@ actor DictionarySQLiteStore {
         }
     }
 
+    private func decodeKanjidicPayload(from data: Data) throws -> KanjidicPayload {
+        try JSONDecoder().decode(KanjidicPayload.self, from: data)
+    }
+
     private func selectEntries(matching term: String, limit: Int) throws -> [DictionaryEntry] {
         guard let db else { return [] }
         let sql = """
@@ -1617,26 +1621,22 @@ actor DictionarySQLiteStore {
 
 }
 
-nonisolated private func decodeKanjidicPayload(from data: Data) throws -> KanjidicPayload {
-    try JSONDecoder().decode(KanjidicPayload.self, from: data)
-}
-
-private struct KanjidicPayload: Decodable {
+nonisolated private struct KanjidicPayload: Decodable {
     let characters: [KanjidicCharacter]
 }
 
-private struct KanjidicCharacter: Decodable {
+nonisolated private struct KanjidicCharacter: Decodable {
     let literal: String
     let radicals: [KanjidicRadical]?
     let misc: KanjidicMisc?
     let readingMeaning: KanjidicReadingMeaning?
 }
 
-private struct KanjidicRadical: Decodable {
+nonisolated private struct KanjidicRadical: Decodable {
     let value: KanjidicValue
 }
 
-private enum KanjidicValue: Decodable {
+nonisolated private enum KanjidicValue: Decodable {
     case integer(Int)
     case string(String)
 
@@ -1650,29 +1650,29 @@ private enum KanjidicValue: Decodable {
     }
 }
 
-private struct KanjidicMisc: Decodable {
+nonisolated private struct KanjidicMisc: Decodable {
     let strokeCounts: [Int]?
     let grade: Int?
     let jlptLevel: Int?
     let frequency: Int?
 }
 
-private struct KanjidicReadingMeaning: Decodable {
+nonisolated private struct KanjidicReadingMeaning: Decodable {
     let groups: [KanjidicReadingGroup]?
     let nanori: [String]?
 }
 
-private struct KanjidicReadingGroup: Decodable {
+nonisolated private struct KanjidicReadingGroup: Decodable {
     let readings: [KanjidicReading]?
     let meanings: [KanjidicMeaning]?
 }
 
-private struct KanjidicReading: Decodable {
+nonisolated private struct KanjidicReading: Decodable {
     let type: String
     let value: String
 }
 
-private struct KanjidicMeaning: Decodable {
+nonisolated private struct KanjidicMeaning: Decodable {
     let lang: String?
     let value: String
 }

@@ -35,7 +35,7 @@ extension PasteView {
         let surface = selection.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let gloss = entry.gloss.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? entry.gloss
         guard surface.isEmpty == false, gloss.isEmpty == false else { return }
-        words.add(surface: surface, kana: entry.kana, meaning: gloss, note: nil, sourceNoteID: currentNote?.id)
+        words.add(dictionaryEntryID: entry.entryID, surface: surface, kana: entry.kana, meaning: gloss, note: nil, sourceNoteID: currentNote?.id)
     }
 
     func neighborIndex(for index: Int, direction: MergeDirection) -> Int? {

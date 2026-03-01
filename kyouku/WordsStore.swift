@@ -24,6 +24,7 @@ final class WordsStore: ObservableObject {
     /// The one and only add method.
     ///
     /// - Parameters:
+    ///   - dictionaryEntryID: Stable dictionary entry identifier.
     ///   - surface: The written form captured from a dictionary lookup.
     ///   - kana: The reading to store for the saved word. This is typically the
     ///     dictionary kana, but may be a user-confirmed reading override.
@@ -31,6 +32,7 @@ final class WordsStore: ObservableObject {
     ///   - meaning: Required localized gloss.
     /// Callers must provide a non-empty meaning/definition.
     func add(
+        dictionaryEntryID: Int64,
         surface: String,
         dictionarySurface: String? = nil,
         kana: String?,
@@ -60,7 +62,7 @@ final class WordsStore: ObservableObject {
         guard !m.isEmpty else { return }
 
         let normalizedLists = normalizedListIDs(listIDs)
-        if let idx = words.firstIndex(where: { $0.surface == s && $0.kana == normalizedKana }) {
+        if let idx = words.firstIndex(where: { $0.dictionaryEntryID == dictionaryEntryID }) {
             var changed = false
 
             if words[idx].dictionarySurface == nil, let normalizedDictionarySurface {
@@ -94,6 +96,7 @@ final class WordsStore: ObservableObject {
         }
 
         let word = Word(
+            dictionaryEntryID: dictionaryEntryID,
             surface: s,
             dictionarySurface: normalizedDictionarySurface,
             kana: normalizedKana,
@@ -107,13 +110,15 @@ final class WordsStore: ObservableObject {
     }
 
     struct WordToAdd: Hashable {
+        let dictionaryEntryID: Int64
         let surface: String
         let dictionarySurface: String?
         let kana: String?
         let meaning: String
         let note: String?
 
-        init(surface: String, dictionarySurface: String? = nil, kana: String?, meaning: String, note: String? = nil) {
+        init(dictionaryEntryID: Int64, surface: String, dictionarySurface: String? = nil, kana: String?, meaning: String, note: String? = nil) {
+            self.dictionaryEntryID = dictionaryEntryID
             self.surface = surface
             self.dictionarySurface = dictionarySurface
             self.kana = kana
@@ -132,10 +137,7 @@ final class WordsStore: ObservableObject {
         var indexByKey: [String: Int] = [:]
         indexByKey.reserveCapacity(words.count)
         for (idx, w) in words.enumerated() {
-            let surface = w.surface.trimmingCharacters(in: .whitespacesAndNewlines)
-            let kana = w.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let normalizedKana = (kana?.isEmpty == false) ? kana : nil
-            let key = "\(surface)|\(normalizedKana ?? "")"
+            let key = "\(w.dictionaryEntryID)"
             indexByKey[key] = idx
         }
 
@@ -163,7 +165,7 @@ final class WordsStore: ObservableObject {
             guard s.isEmpty == false else { continue }
             guard m.isEmpty == false else { continue }
 
-            let key = "\(s)|\(normalizedKana ?? "")"
+            let key = "\(item.dictionaryEntryID)"
             if let existingIdx = indexByKey[key] {
                 var didChange = false
                 if words[existingIdx].dictionarySurface == nil, let normalizedDictionarySurface {
@@ -195,6 +197,7 @@ final class WordsStore: ObservableObject {
             }
 
             let newWord = Word(
+                dictionaryEntryID: item.dictionaryEntryID,
                 surface: s,
                 dictionarySurface: normalizedDictionarySurface,
                 kana: normalizedKana,

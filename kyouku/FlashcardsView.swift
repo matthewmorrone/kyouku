@@ -1,5 +1,11 @@
 import SwiftUI
 
+private struct FlashcardLiveContent {
+    let surface: String
+    let kana: String?
+    let meaning: String
+}
+
 struct FlashcardsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notes: NotesStore
@@ -47,6 +53,8 @@ struct FlashcardsView: View {
     @State private var direction: CardDirection = .kanjiToKana
     @State private var mostRecentCount: Int = 20
     @State private var selectedNoteID: UUID? = nil
+    @State private var liveContentByEntryID: [Int64: FlashcardLiveContent] = [:]
+    @State private var liveContentRequestToken: Int = 0
 
     var body: some View {
         NavigationStack {
@@ -128,6 +136,12 @@ struct FlashcardsView: View {
             }
         }
         .appThemedRoot()
+        .onAppear {
+            refreshLiveContent(for: store.words)
+        }
+        .onReceive(store.$words) { words in
+            refreshLiveContent(for: words)
+        }
         // Hide the Cards tab page dots while actively reviewing flashcards.
         .preference(key: CardsPageDotsHiddenPreferenceKey.self, value: session.isEmpty == false)
         // Disable swiping between study modes while a flashcard session is active.
@@ -160,6 +174,7 @@ struct FlashcardsView: View {
                 let isTop = (idx == topIndex)
                 FlashcardCard(
                     word: session[idx],
+                    liveContent: liveContentByEntryID[session[idx].dictionaryEntryID],
                     isTop: isTop,
                     direction: direction,
                     preferredNoteID: (scope == .fromNote ? selectedNoteID : nil),
@@ -428,10 +443,74 @@ struct FlashcardsView: View {
         }
         return base
     }
+
+    @MainActor
+    private func refreshLiveContent(for words: [Word]) {
+        let entryIDs = Array(Set(words.map(\.dictionaryEntryID)))
+        guard entryIDs.isEmpty == false else {
+            liveContentByEntryID = [:]
+            return
+        }
+
+        liveContentRequestToken &+= 1
+        let token = liveContentRequestToken
+
+        Task {
+            let details = (try? await DictionaryEntryDetailsCache.shared.details(for: entryIDs)) ?? []
+            var next: [Int64: FlashcardLiveContent] = [:]
+            next.reserveCapacity(details.count)
+
+            for detail in details {
+                var surface = ""
+                for form in detail.kanjiForms {
+                    let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty == false {
+                        surface = trimmed
+                        break
+                    }
+                }
+                if surface.isEmpty {
+                    for form in detail.kanaForms {
+                        let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty == false {
+                            surface = trimmed
+                            break
+                        }
+                    }
+                }
+
+                var kana: String?
+                for form in detail.kanaForms {
+                    let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty == false {
+                        kana = trimmed
+                        break
+                    }
+                }
+
+                let sortedSenses = detail.senses.sorted(by: { $0.orderIndex < $1.orderIndex })
+                var meaning = ""
+                if let firstSense = sortedSenses.first {
+                    let sortedGlosses = firstSense.glosses.sorted(by: { $0.orderIndex < $1.orderIndex })
+                    if let firstGloss = sortedGlosses.first {
+                        meaning = firstGloss.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+
+                next[detail.entryID] = FlashcardLiveContent(surface: surface, kana: kana, meaning: meaning)
+            }
+
+            await MainActor.run {
+                guard token == liveContentRequestToken else { return }
+                liveContentByEntryID = next
+            }
+        }
+    }
 }
 
 private struct FlashcardCard: View {
     let word: Word
+    let liveContent: FlashcardLiveContent?
     let isTop: Bool
     let direction: FlashcardsView.CardDirection
     let preferredNoteID: UUID?
@@ -638,20 +717,28 @@ private struct FlashcardCard: View {
 
     @ViewBuilder
     private var frontFace: some View {
-        let displaySurface = displaySurfaceForCard(word)
-        let displayKana = displayKanaForCard(word, displaySurface: displaySurface)
+        let hasLiveContent = (liveContent != nil)
+        let displaySurface = displaySurfaceForCard()
+        let displayKana = displayKanaForCard(displaySurface: displaySurface)
         VStack(alignment: .center, spacing: 10) {
             Spacer(minLength: 0)
 
-            switch direction {
-            case .kanjiToKana:
-                Text(displaySurface)
-                    .font(.largeTitle.weight(.bold))
+            if hasLiveContent == false {
+                Text("Entry unavailable")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-            case .kanaToEnglish:
-                Text((displayKana?.isEmpty == false) ? (displayKana ?? displaySurface) : displaySurface)
-                    .font(.largeTitle.weight(.bold))
-                    .multilineTextAlignment(.center)
+            } else {
+                switch direction {
+                case .kanjiToKana:
+                    Text(displaySurface)
+                        .font(.largeTitle.weight(.bold))
+                        .multilineTextAlignment(.center)
+                case .kanaToEnglish:
+                    Text((displayKana?.isEmpty == false) ? (displayKana ?? displaySurface) : displaySurface)
+                        .font(.largeTitle.weight(.bold))
+                        .multilineTextAlignment(.center)
+                }
             }
 
             Spacer(minLength: 0)
@@ -660,8 +747,9 @@ private struct FlashcardCard: View {
 
     @ViewBuilder
     private var backFace: some View {
-        let displaySurface = displaySurfaceForCard(word)
-        let displayKana = displayKanaForCard(word, displaySurface: displaySurface)
+        let displaySurface = displaySurfaceForCard()
+        let displayKana = displayKanaForCard(displaySurface: displaySurface)
+        let displayMeaning = displayMeaningForCard()
         VStack(alignment: .center, spacing: 10) {
             Spacer(minLength: 0)
 
@@ -684,8 +772,8 @@ private struct FlashcardCard: View {
 
             case .kanaToEnglish:
                 // Kana → English: back shows English meaning only.
-                if word.meaning.isEmpty == false {
-                    Text(word.meaning)
+                if displayMeaning.isEmpty == false {
+                    Text(displayMeaning)
                         .font(.title2.weight(.semibold))
                         .multilineTextAlignment(.center)
                 } else {
@@ -699,10 +787,14 @@ private struct FlashcardCard: View {
         }
     }
 
-    private func displaySurfaceForCard(_ word: Word) -> String {
-        let surface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func displaySurfaceForCard() -> String {
+        let surface = liveContent?.surface.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let kana = liveContent?.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKana = (kana?.isEmpty == false) ? kana : nil
+
+        guard surface.isEmpty == false else {
+            return "Entry unavailable"
+        }
 
         let candidateNoteID = preferredNoteID ?? word.sourceNoteIDs.first
         guard let noteID = candidateNoteID else {
@@ -722,8 +814,8 @@ private struct FlashcardCard: View {
         return surface
     }
 
-    private func displayKanaForCard(_ word: Word, displaySurface: String) -> String? {
-        if let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines), kana.isEmpty == false {
+    private func displayKanaForCard(displaySurface: String) -> String? {
+        if let kana = liveContent?.kana?.trimmingCharacters(in: .whitespacesAndNewlines), kana.isEmpty == false {
             return kana
         }
         // If the saved/displayed surface is kana-only, treat it as the kana line.
@@ -731,6 +823,10 @@ private struct FlashcardCard: View {
             return displaySurface
         }
         return nil
+    }
+
+    private func displayMeaningForCard() -> String {
+        liveContent?.meaning.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     private func noteContains(_ noteText: String, candidate: String) -> Bool {

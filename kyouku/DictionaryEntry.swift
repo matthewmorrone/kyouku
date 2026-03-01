@@ -33,3 +33,48 @@ struct DictionaryEntry: Identifiable, Hashable {
     var id: String { stableIdentifier }
 }
 
+actor DictionaryEntryDetailsCache {
+    static let shared = DictionaryEntryDetailsCache()
+
+    private var detailsByEntryID: [Int64: DictionaryEntryDetail] = [:]
+
+    func details(for entryIDs: [Int64]) async throws -> [DictionaryEntryDetail] {
+        let orderedIDs = uniqueOrdered(entryIDs)
+        guard orderedIDs.isEmpty == false else { return [] }
+
+        let missing = orderedIDs.filter { detailsByEntryID[$0] == nil }
+        if missing.isEmpty == false {
+            let fetched = try await DictionarySQLiteStore.shared.fetchEntryDetails(for: missing)
+            for detail in fetched {
+                detailsByEntryID[detail.entryID] = detail
+            }
+        }
+
+        return orderedIDs.compactMap { detailsByEntryID[$0] }
+    }
+
+    func detail(for entryID: Int64) async throws -> DictionaryEntryDetail? {
+        try await details(for: [entryID]).first
+    }
+
+    func warm(entryIDs: [Int64]) async {
+        _ = try? await details(for: entryIDs)
+    }
+
+    func clear() {
+        detailsByEntryID = [:]
+    }
+
+    private func uniqueOrdered(_ values: [Int64]) -> [Int64] {
+        guard values.isEmpty == false else { return [] }
+        var out: [Int64] = []
+        out.reserveCapacity(values.count)
+        var seen: Set<Int64> = []
+        for value in values {
+            guard seen.insert(value).inserted else { continue }
+            out.append(value)
+        }
+        return out
+    }
+}
+

@@ -70,6 +70,7 @@ enum DictionaryJLPTLevel: String, CaseIterable, Hashable, Identifiable {
 
 /// Lightweight view model for a merged dictionary result row.
 struct DictionaryResultRow: Identifiable {
+    let entryID: Int64
     let surface: String
     let kana: String?
     let gloss: String
@@ -126,6 +127,7 @@ struct DictionaryResultRow: Identifiable {
 
             let gloss = firstGlossFor(first)
             return DictionaryResultRow(
+                entryID: first.entryID,
                 surface: surface,
                 kana: displayKana,
                 gloss: gloss,

@@ -1,5 +1,11 @@
 import SwiftUI
 
+private struct SavedWordLiveContent {
+    let headword: String
+    let kana: String?
+    let meaning: String
+}
+
 struct WordsView: View {
     @EnvironmentObject var store: WordsStore
     @EnvironmentObject var notesStore: NotesStore
@@ -20,6 +26,9 @@ struct WordsView: View {
     @State private var cachedListCounts: [UUID: Int] = [:]
     @State private var listNamesByID: [UUID: String] = [:]
     @State private var noteTitlesByID: [UUID: String] = [:]
+    @State private var liveContentByEntryID: [Int64: SavedWordLiveContent] = [:]
+    @State private var liveContentRequestToken: Int = 0
+    @State private var savedEntryIDs: Set<Int64> = []
     @State private var savedSurfaceKeys: Set<String> = []
     @State private var savedSurfaceKanaKeys: Set<SurfaceKanaKey> = []
 
@@ -65,6 +74,7 @@ struct WordsView: View {
                 refreshListCaches()
                 refreshSortedWords()
                 refreshSavedWordCaches()
+                refreshLiveContent(for: store.words)
             }
             .onChange(of: selectedFilter) { _, _ in
                 refreshSortedWords()
@@ -74,6 +84,7 @@ struct WordsView: View {
                 refreshNoteListItems()
                 refreshListCounts()
                 refreshSavedWordCaches()
+                refreshLiveContent(for: store.words)
             }
             .onReceive(store.$lists) { _ in
                 refreshListNameCache()
@@ -331,9 +342,10 @@ struct WordsView: View {
         ) { request in
             NavigationStack {
                 if let word = store.word(id: request.wordID) {
+                    let live = liveContentByEntryID[word.dictionaryEntryID]
                     WordDefinitionView(
                         request: .init(
-                            term: .init(surface: word.dictionarySurface ?? displayHeadword(for: word), kana: word.kana),
+                            term: .init(entryID: word.dictionaryEntryID, surface: live?.headword ?? "", kana: live?.kana),
                             context: .init(sentence: nil, lemmaCandidates: [], tokenPartOfSpeech: nil, tokenParts: []),
                             metadata: .init(sourceNoteID: word.sourceNoteIDs.sorted { $0.uuidString < $1.uuidString }.first)
                         )
@@ -488,10 +500,11 @@ struct WordsView: View {
                     savedRow(word)
                         .tag(word.id)
                 } else {
+                    let live = liveContentByEntryID[word.dictionaryEntryID]
                     NavigationLink {
                         WordDefinitionView(
                             request: .init(
-                                term: .init(surface: word.dictionarySurface ?? displayHeadword(for: word), kana: word.kana),
+                                term: .init(entryID: word.dictionaryEntryID, surface: live?.headword ?? "", kana: live?.kana),
                                 context: .init(sentence: nil, lemmaCandidates: [], tokenPartOfSpeech: nil, tokenParts: []),
                                 metadata: .init(sourceNoteID: word.sourceNoteIDs.sorted { $0.uuidString < $1.uuidString }.first)
                             )
@@ -534,23 +547,29 @@ struct WordsView: View {
     }
 
     private func savedRow(_ word: Word) -> some View {
+        let live = liveContentByEntryID[word.dictionaryEntryID]
         let headword = displayHeadword(for: word)
         return HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(headword)
                     .font(.body.weight(.semibold))
                     .lineLimit(1)
-                if let kana = word.kana, kana.isEmpty == false, kana != headword {
+                if let kana = live?.kana, kana.isEmpty == false, kana != headword {
                     Text(kana)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                if word.meaning.isEmpty == false {
-                    Text(word.meaning)
+                if let meaning = live?.meaning, meaning.isEmpty == false {
+                    Text(meaning)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                } else if live == nil {
+                    Text("Entry unavailable")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
@@ -693,21 +712,28 @@ struct WordsView: View {
     }
 
     private func refreshSavedWordCaches() {
+        var entryIDs: Set<Int64> = []
         var surfaceKeys: Set<String> = []
         var surfaceKanaKeys: Set<SurfaceKanaKey> = []
+        entryIDs.reserveCapacity(store.words.count)
         surfaceKeys.reserveCapacity(store.words.count)
         surfaceKanaKeys.reserveCapacity(store.words.count)
         for word in store.words {
+            entryIDs.insert(word.dictionaryEntryID)
             let surfaceKey = kanaFoldToHiragana(word.surface)
             surfaceKeys.insert(surfaceKey)
             let kanaKey = kanaFoldToHiragana(word.kana ?? "")
             surfaceKanaKeys.insert(SurfaceKanaKey(surface: surfaceKey, kana: kanaKey))
         }
+        savedEntryIDs = entryIDs
         savedSurfaceKeys = surfaceKeys
         savedSurfaceKanaKeys = surfaceKanaKeys
     }
 
     private func isMergedRowAlreadySaved(_ row: DictionaryResultRow) -> Bool {
+        if savedEntryIDs.contains(row.entryID) {
+            return true
+        }
         let surface = row.surface.trimmingCharacters(in: .whitespacesAndNewlines)
         let reading = row.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         return hasSavedWord(surface: surface, reading: reading)
@@ -718,6 +744,9 @@ struct WordsView: View {
         let reading = row.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         func matchesSavedKey(_ word: Word) -> Bool {
+            if word.dictionaryEntryID == row.entryID {
+                return true
+            }
             guard kanaFoldToHiragana(word.surface) == kanaFoldToHiragana(surface) else { return false }
             // If we don't know the reading for this result, treat reading as a wildcard
             // so the star can still toggle.
@@ -739,12 +768,16 @@ struct WordsView: View {
 
         let meaning = row.gloss.trimmingCharacters(in: .whitespacesAndNewlines)
         guard surface.isEmpty == false, meaning.isEmpty == false else { return }
-        store.add(surface: surface, kana: reading, meaning: meaning)
+        store.add(dictionaryEntryID: row.entryID, surface: surface, kana: reading, meaning: meaning)
     }
 
     private func displayHeadword(for word: Word) -> String {
-        let surface = word.surface.trimmingCharacters(in: .whitespacesAndNewlines)
-        let kana = word.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let live = liveContentByEntryID[word.dictionaryEntryID] else {
+            return "Entry unavailable"
+        }
+
+        let surface = live.headword.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kana = live.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKana = (kana?.isEmpty == false) ? kana : nil
 
         guard let noteID = word.sourceNoteIDs.sorted(by: { $0.uuidString < $1.uuidString }).first else {
@@ -762,6 +795,69 @@ struct WordsView: View {
             return normalizedKana
         }
         return surface
+    }
+
+    @MainActor
+    private func refreshLiveContent(for words: [Word]) {
+        let entryIDs = Array(Set(words.map(\.dictionaryEntryID)))
+        guard entryIDs.isEmpty == false else {
+            liveContentByEntryID = [:]
+            return
+        }
+
+        liveContentRequestToken &+= 1
+        let token = liveContentRequestToken
+
+        Task {
+            let details = (try? await DictionaryEntryDetailsCache.shared.details(for: entryIDs)) ?? []
+            var next: [Int64: SavedWordLiveContent] = [:]
+            next.reserveCapacity(details.count)
+
+            for detail in details {
+                var headword = ""
+                for form in detail.kanjiForms {
+                    let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty == false {
+                        headword = trimmed
+                        break
+                    }
+                }
+                if headword.isEmpty {
+                    for form in detail.kanaForms {
+                        let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty == false {
+                            headword = trimmed
+                            break
+                        }
+                    }
+                }
+
+                var kana: String?
+                for form in detail.kanaForms {
+                    let trimmed = form.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty == false {
+                        kana = trimmed
+                        break
+                    }
+                }
+
+                let sortedSenses = detail.senses.sorted(by: { $0.orderIndex < $1.orderIndex })
+                var meaning = ""
+                if let firstSense = sortedSenses.first {
+                    let sortedGlosses = firstSense.glosses.sorted(by: { $0.orderIndex < $1.orderIndex })
+                    if let firstGloss = sortedGlosses.first {
+                        meaning = firstGloss.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+
+                next[detail.entryID] = SavedWordLiveContent(headword: headword, kana: kana, meaning: meaning)
+            }
+
+            await MainActor.run {
+                guard token == liveContentRequestToken else { return }
+                liveContentByEntryID = next
+            }
+        }
     }
 
     private func noteContains(_ noteText: String, candidate: String) -> Bool {
@@ -850,6 +946,9 @@ struct WordsView: View {
         let reading = row.kana?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return store.words.filter { word in
+            if word.dictionaryEntryID == row.entryID {
+                return true
+            }
             guard kanaFoldToHiragana(word.surface) == kanaFoldToHiragana(surface) else { return false }
             if let reading, reading.isEmpty == false {
                 return kanaFoldToHiragana(word.kana ?? "") == kanaFoldToHiragana(reading)
@@ -871,7 +970,7 @@ struct WordsView: View {
         }
         let meaning = row.gloss.trimmingCharacters(in: .whitespacesAndNewlines)
         guard row.surface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false, meaning.isEmpty == false else { return nil }
-        store.add(surface: row.surface, kana: row.kana, meaning: meaning)
+        store.add(dictionaryEntryID: row.entryID, surface: row.surface, kana: row.kana, meaning: meaning)
         return searchRowMatches(row).first
     }
 

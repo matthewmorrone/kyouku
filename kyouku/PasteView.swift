@@ -50,6 +50,8 @@ struct PasteView: View {
 
     @State private var toastText: String? = nil
     @State private var toastDismissWorkItem: DispatchWorkItem? = nil
+    @State private var pendingEndEditingRequestID: Int = 0
+    @State private var awaitingEditCommitBeforeViewMode: Bool = false
     @State private var isKaraokeImporterPresented: Bool = false
     @State private var karaokeImportMode: KaraokeImportMode? = nil
     @State private var isGeneratingKaraokeAlignment: Bool = false
@@ -59,9 +61,11 @@ struct PasteView: View {
     @State private var karaokeAudioPlayer: AVAudioPlayer? = nil
     @State private var karaokePlaybackTimer: Timer? = nil
     @State private var karaokeCurrentRange: NSRange? = nil
+    @State private var karaokeCurrentLineRange: NSRange? = nil
     @State private var karaokeScrollToSelectedRangeToken: Int = 0
     @State private var karaokeScheduledStartDeviceTime: TimeInterval? = nil
     @State private var karaokeStartOffsetSeconds: TimeInterval = 0
+    @State private var karaokePlaybackSecondsDisplay: TimeInterval = 0
     @State private var isKaraokeDebugDumpPresented: Bool = false
     @State private var karaokeDebugDumpText: String = ""
     @State private var karaokeDebugDumpFilePath: String = ""
@@ -722,6 +726,15 @@ struct PasteView: View {
         .coordinateSpace(name: Self.coordinateSpaceName)
     }
 
+    private var editModeBinding: Binding<Bool> {
+        Binding(
+            get: { isEditing },
+            set: { requested in
+                requestEditModeChange(requested)
+            }
+        )
+    }
+
     
 
     private var editorColumn: some View {
@@ -816,7 +829,7 @@ struct PasteView: View {
             furiganaSpans: furiganaSpans,
             semanticSpans: furiganaSemanticSpans,
             textSize: readingTextSize,
-            isEditing: $isEditing,
+            isEditing: editModeBinding,
             showFurigana: $showFurigana,
             wrapLines: $wrapLines,
             alternateTokenColors: $alternateTokenColors,
@@ -913,9 +926,46 @@ struct PasteView: View {
             },
             onResetDefaultSegmentationReading: {
                 resetCurrentNoteToDefaultSegmentationReading()
+            },
+            endEditingRequestID: pendingEndEditingRequestID,
+            onEditingCommitCompleted: {
+                completePendingExitEditModeIfNeeded()
             }
         )
         .simultaneousGesture(pinchToZoomGesture)
+    }
+
+    private func requestEditModeChange(_ requested: Bool) {
+        guard requested != isEditing else { return }
+
+        if requested {
+            awaitingEditCommitBeforeViewMode = false
+            setEditing(true)
+            return
+        }
+
+        awaitingEditCommitBeforeViewMode = true
+        hideKeyboard()
+        pendingEndEditingRequestID &+= 1
+    }
+
+    private func completePendingExitEditModeIfNeeded() {
+        guard awaitingEditCommitBeforeViewMode else { return }
+        awaitingEditCommitBeforeViewMode = false
+
+        let committedText = inputText
+        syncNoteForInputChange(committedText)
+        PasteBufferStore.save(committedText)
+
+        let base = NSAttributedString(string: committedText)
+        furiganaAttributedTextBase = base
+        furiganaAttributedText = base
+
+        setEditing(false)
+        triggerFuriganaRefreshIfNeeded(
+            reason: "mode switched to view",
+            recomputeSpans: true
+        )
     }
 
     private func showToast(_ message: String) {
@@ -1024,6 +1074,11 @@ struct PasteView: View {
         karaokeAudioPlayer?.isPlaying == true
     }
 
+    private var karaokePlaybackTimeText: String? {
+        guard karaokeIsPlaying else { return nil }
+        return String(format: "%.3fs", karaokePlaybackSecondsDisplay)
+    }
+
     private var editorSelectedRangeHighlight: NSRange? {
         if incrementalLookupEnabled {
             return incrementalSelectedCharacterRange
@@ -1069,14 +1124,16 @@ struct PasteView: View {
 
     @MainActor
     private func ensureCurrentNoteForKaraoke(requiresLyrics: Bool) -> Note? {
-        let trimmedLyrics = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard requiresLyrics == false || trimmedLyrics.isEmpty == false else {
+        let trimmedInputLyrics = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPersistedLyrics = currentNote?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasLyrics = trimmedInputLyrics.isEmpty == false || trimmedPersistedLyrics.isEmpty == false
+        guard requiresLyrics == false || hasLyrics else {
             showToast("Add lyrics text first")
             return nil
         }
 
         if currentNote == nil {
-            if trimmedLyrics.isEmpty {
+            if trimmedInputLyrics.isEmpty {
                 notes.addNote(title: nil, text: "")
                 if let newest = notes.notes.first {
                     currentNote = newest
@@ -1093,6 +1150,20 @@ struct PasteView: View {
             return nil
         }
         return note
+    }
+
+    private func resolvedKaraokeLyrics(for note: Note?) -> String {
+        let typedLyrics = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if typedLyrics.isEmpty == false {
+            return inputText
+        }
+
+        let persistedLyrics = note?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if persistedLyrics.isEmpty == false {
+            return note?.text ?? inputText
+        }
+
+        return inputText
     }
 
     @MainActor
@@ -1112,6 +1183,8 @@ struct PasteView: View {
         do {
             let persistedAudioURL = try persistImportedAudio(importedURL, noteID: note.id)
             karaokeGenerationProgress = 0.45
+            let effectiveLyrics = resolvedKaraokeLyrics(for: note)
+            let hasLyrics = effectiveLyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
 
             var updated = notes.notes.first(where: { $0.id == note.id }) ?? note
             updated.karaokeAudioFileName = persistedAudioURL.lastPathComponent
@@ -1119,9 +1192,36 @@ struct PasteView: View {
             notes.updateNote(updated)
             currentNote = updated
 
+            if hasLyrics {
+                appendKaraokeDiagnostic("Import audio triggering auto-alignment")
+                karaokeGenerationProgress = 0.62
+                let alignment = try await KaraokeSpeechAligner.align(
+                    lyrics: effectiveLyrics,
+                    audioURL: persistedAudioURL,
+                    localeIdentifier: "ja-JP"
+                )
+                karaokeDiagnosticsLog = alignment.diagnostics ?? []
+
+                updated = notes.notes.first(where: { $0.id == note.id }) ?? updated
+                updated.text = effectiveLyrics
+                updated.karaokeAudioFileName = persistedAudioURL.lastPathComponent
+                updated.karaokeAlignment = alignment
+                notes.updateNote(updated)
+                currentNote = updated
+
+                karaokeGenerationProgress = 1.0
+                let strategyLabel = karaokeStrategyLabel(alignment.strategy)
+                appendKaraokeDiagnostic("Import audio auto-alignment success strategy=\(strategyLabel) lines=\(alignment.segments.count)")
+                showToast("Audio imported and karaoke sync ready (\(alignment.segments.count) lines, \(strategyLabel))")
+                return
+            }
+
             karaokeGenerationProgress = 1.0
             appendKaraokeDiagnostic("Import audio success file=\(persistedAudioURL.lastPathComponent) alignmentCleared=true")
             showToast("Audio imported. Use Play/Pause or import SRT/JSON")
+        } catch let error as KaraokeSpeechAlignerError {
+            appendKaraokeDiagnostic("Import audio auto-alignment failed error=\(error.localizedDescription)")
+            showToast("Audio imported, but sync failed: \(error.localizedDescription)")
         } catch {
             appendKaraokeDiagnostic("Import audio failed error=\(error.localizedDescription)")
             showToast(error.localizedDescription)
@@ -1132,6 +1232,7 @@ struct PasteView: View {
     private func generateKaraokeAlignment(from importedURL: URL, usingPersistedAudio: Bool = false) async {
         guard isGeneratingKaraokeAlignment == false else { return }
         guard let note = ensureCurrentNoteForKaraoke(requiresLyrics: true) else { return }
+        let effectiveLyrics = resolvedKaraokeLyrics(for: note)
 
         appendKaraokeDiagnostic("Generate start file=\(importedURL.lastPathComponent)")
         isGeneratingKaraokeAlignment = true
@@ -1148,7 +1249,7 @@ struct PasteView: View {
             let persistedAudioURL = usingPersistedAudio ? importedURL : try persistImportedAudio(importedURL, noteID: note.id)
             karaokeGenerationProgress = max(karaokeGenerationProgress, 0.22)
             let alignment = try await KaraokeSpeechAligner.align(
-                lyrics: inputText,
+                lyrics: effectiveLyrics,
                 audioURL: persistedAudioURL,
                 localeIdentifier: "ja-JP"
             )
@@ -1156,7 +1257,7 @@ struct PasteView: View {
             karaokeGenerationProgress = 1.0
 
             var updated = notes.notes.first(where: { $0.id == note.id }) ?? note
-            updated.text = inputText
+            updated.text = effectiveLyrics
             updated.karaokeAudioFileName = persistedAudioURL.lastPathComponent
             updated.karaokeAlignment = alignment
             notes.updateNote(updated)
@@ -1214,6 +1315,7 @@ struct PasteView: View {
                 // Try Whisper JSON
                 entries = try SubtitleParser.parseWhisperJSON(content: content)
             }
+            let isWordSegmentImport = (fileExtension == "json") && whisperJSONHasWordSegments(content)
             karaokeGenerationProgress = 0.40
 
             let useContinuousSeed = entries.count > 30 || entries.allSatisfy { ($0.text as NSString).length <= 2 }
@@ -1228,7 +1330,12 @@ struct PasteView: View {
             }
             
             // Convert to KaraokeAlignment by matching text
-            let alignment = try createKaraokeAlignment(from: entries, lyrics: effectiveLyrics)
+            let alignment: KaraokeAlignment
+            if isWordSegmentImport {
+                alignment = try createWordLevelKaraokeAlignment(from: entries, lyrics: effectiveLyrics)
+            } else {
+                alignment = try createKaraokeAlignment(from: entries, lyrics: effectiveLyrics)
+            }
             karaokeGenerationProgress = 0.80
             
             // Update note
@@ -1242,6 +1349,8 @@ struct PasteView: View {
 
             let unmatchedCount = alignment.diagnostics?.first(where: { $0.hasPrefix("Unmatched entries count=") })
                 .flatMap { Int($0.replacingOccurrences(of: "Unmatched entries count=", with: "")) } ?? 0
+            let matchedEntryCount = max(0, entries.count - unmatchedCount)
+            let outputSegmentCount = alignment.segments.count
             if unmatchedCount > 0 {
                 if let sample = alignment.diagnostics?.first(where: { $0.hasPrefix("Unmatched sample:") }) {
                     appendKaraokeDiagnostic(sample)
@@ -1249,18 +1358,18 @@ struct PasteView: View {
                 appendKaraokeDiagnostic("Import subtitle unmatchedCount=\(unmatchedCount)")
             }
             
-            appendKaraokeDiagnostic("Import subtitle success entries=\(entries.count) matched=\(alignment.segments.count)")
+            appendKaraokeDiagnostic("Import subtitle success entries=\(entries.count) matchedEntries=\(matchedEntryCount) outputSegments=\(outputSegmentCount)")
             if updated.karaokeAudioFileName?.isEmpty == false {
                 if unmatchedCount > 0 {
-                    showToast("Imported \(alignment.segments.count) timings; \(unmatchedCount) unmatched (see logs)")
+                    showToast("Imported \(matchedEntryCount)/\(entries.count) entries into \(outputSegmentCount) segments; \(unmatchedCount) unmatched (see logs)")
                 } else {
-                    showToast("Imported \(alignment.segments.count) subtitle lines")
+                    showToast("Imported \(matchedEntryCount)/\(entries.count) entries into \(outputSegmentCount) segments")
                 }
             } else {
                 if unmatchedCount > 0 {
-                    showToast("Imported \(alignment.segments.count) timings; \(unmatchedCount) unmatched. Import audio (MP3) to play")
+                    showToast("Imported \(matchedEntryCount)/\(entries.count) entries into \(outputSegmentCount) segments; \(unmatchedCount) unmatched. Import audio (MP3) to play")
                 } else {
-                    showToast("Imported \(alignment.segments.count) subtitle lines. Import audio (MP3) to play")
+                    showToast("Imported \(matchedEntryCount)/\(entries.count) entries into \(outputSegmentCount) segments. Import audio (MP3) to play")
                 }
             }
         } catch let error as SubtitleParserError {
@@ -1275,8 +1384,16 @@ struct PasteView: View {
     private func createKaraokeAlignment(from entries: [SubtitleEntry], lyrics: String) throws -> KaraokeAlignment {
         let exact = exactSubtitleAlignment(entries: entries, lyrics: lyrics)
         let exactMatchRatio = entries.isEmpty ? 0 : (Double(exact.segments.count) / Double(entries.count))
+        let shortEntryCount = entries.reduce(into: 0) { count, entry in
+            let length = (entry.text as NSString).length
+            if length <= 2 {
+                count += 1
+            }
+        }
+        let shortEntryRatio = entries.isEmpty ? 0 : (Double(shortEntryCount) / Double(entries.count))
+        let exactThreshold: Double = shortEntryRatio >= 0.70 ? 0.95 : 0.75
 
-        if exact.segments.isEmpty == false && exactMatchRatio >= 0.75 {
+        if exact.segments.isEmpty == false && exactMatchRatio >= exactThreshold {
             return KaraokeAlignment(
                 generatedAt: Date(),
                 localeIdentifier: "ja-JP",
@@ -1304,6 +1421,103 @@ struct PasteView: View {
             segments: forced.segments,
             diagnostics: forced.diagnostics
         )
+    }
+
+    private func whisperJSONHasWordSegments(_ content: String) -> Bool {
+        guard let data = content.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let wordSegments = json["word_segments"] as? [[String: Any]] else {
+            return false
+        }
+        return wordSegments.isEmpty == false
+    }
+
+    private func createWordLevelKaraokeAlignment(from entries: [SubtitleEntry], lyrics: String) throws -> KaraokeAlignment {
+        let baseAlignment = try createKaraokeAlignment(from: entries, lyrics: lyrics)
+        let tokenized = exactWordTokenSegments(entries: entries, lyrics: lyrics)
+
+        guard tokenized.segments.isEmpty == false else {
+            var fallbackDiagnostics = baseAlignment.diagnostics ?? []
+            fallbackDiagnostics.append("Word-level import fallback: no exact token matches")
+            return KaraokeAlignment(
+                generatedAt: baseAlignment.generatedAt,
+                localeIdentifier: baseAlignment.localeIdentifier,
+                audioDurationSeconds: baseAlignment.audioDurationSeconds,
+                strategy: baseAlignment.strategy,
+                version: baseAlignment.version,
+                granularities: baseAlignment.granularities,
+                segments: baseAlignment.segments,
+                diagnostics: fallbackDiagnostics
+            )
+        }
+
+        let mappedSegments = baseAlignment.segments.map { line in
+            let lineRange = line.textRange.nsRange
+            let tokenSegments = tokenized.segments.filter { token in
+                NSIntersectionRange(token.textRange.nsRange, lineRange).length > 0
+            }
+
+            return KaraokeAlignmentSegment(
+                textRange: lineRange,
+                startSeconds: line.startSeconds,
+                endSeconds: line.endSeconds,
+                confidence: line.confidence,
+                phraseSegments: line.phraseSegments,
+                tokenSegments: tokenSegments.isEmpty ? nil : tokenSegments
+            )
+        }
+
+        var diagnostics = baseAlignment.diagnostics ?? []
+        diagnostics.append("Word-level import tokenMatches=\(tokenized.segments.count)")
+        diagnostics.append("Word-level import tokenUnmatched=\(tokenized.unmatchedCount)")
+
+        return KaraokeAlignment(
+            generatedAt: baseAlignment.generatedAt,
+            localeIdentifier: baseAlignment.localeIdentifier,
+            audioDurationSeconds: baseAlignment.audioDurationSeconds,
+            strategy: baseAlignment.strategy,
+            version: baseAlignment.version,
+            granularities: [.line, .token],
+            segments: mappedSegments,
+            diagnostics: diagnostics
+        )
+    }
+
+    private func exactWordTokenSegments(entries: [SubtitleEntry], lyrics: String) -> (segments: [KaraokeAlignmentChildSegment], unmatchedCount: Int) {
+        let nsLyrics = lyrics as NSString
+        var currentPosition = 0
+        var unmatched = 0
+        var segments: [KaraokeAlignmentChildSegment] = []
+        segments.reserveCapacity(entries.count)
+
+        for entry in entries {
+            let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.isEmpty == false else { continue }
+            guard currentPosition < nsLyrics.length else {
+                unmatched += 1
+                continue
+            }
+
+            let searchRange = NSRange(location: currentPosition, length: nsLyrics.length - currentPosition)
+            let range = nsLyrics.range(of: text, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
+            guard range.location != NSNotFound else {
+                unmatched += 1
+                continue
+            }
+
+            segments.append(
+                KaraokeAlignmentChildSegment(
+                    granularity: .token,
+                    textRange: range,
+                    startSeconds: entry.startSeconds,
+                    endSeconds: max(entry.startSeconds, entry.endSeconds),
+                    confidence: 1.0
+                )
+            )
+            currentPosition = NSMaxRange(range)
+        }
+
+        return (segments, unmatched)
     }
 
     private func exactSubtitleAlignment(entries: [SubtitleEntry], lyrics: String) -> (segments: [KaraokeAlignmentSegment], diagnostics: [String]) {
@@ -1484,19 +1698,51 @@ struct PasteView: View {
             }
         }
 
+        let displayRanges = karaokeDisplayRanges(for: lyrics)
         var segments: [KaraokeAlignmentSegment] = []
-        segments.reserveCapacity(lyricCount)
-        for index in 0..<lyricCount {
-            guard let timing = assignedTimes[index] else { continue }
-            let lyricUnit = lyricUnits[alignableLyricIndices[index]]
+        segments.reserveCapacity(max(8, displayRanges.count))
+
+        for displayRange in displayRanges {
+            var starts: [Double] = []
+            var ends: [Double] = []
+            starts.reserveCapacity(8)
+            ends.reserveCapacity(8)
+
+            for index in 0..<lyricCount {
+                let lyricUnit = lyricUnits[alignableLyricIndices[index]]
+                let unitRange = lyricUnit.range
+                let intersects = NSIntersectionRange(unitRange, displayRange).length > 0
+                guard intersects else { continue }
+                guard let timing = assignedTimes[index] else { continue }
+                starts.append(timing.start)
+                ends.append(timing.end)
+            }
+
+            guard let start = starts.min(), let end = ends.max() else { continue }
             segments.append(
                 KaraokeAlignmentSegment(
-                    textRange: lyricUnit.range,
-                    startSeconds: timing.start,
-                    endSeconds: max(timing.end, timing.start + 0.01),
+                    textRange: displayRange,
+                    startSeconds: start,
+                    endSeconds: max(end, start + 0.01),
                     confidence: 0.7
                 )
             )
+        }
+
+        if segments.isEmpty {
+            segments.reserveCapacity(lyricCount)
+            for index in 0..<lyricCount {
+                guard let timing = assignedTimes[index] else { continue }
+                let lyricUnit = lyricUnits[alignableLyricIndices[index]]
+                segments.append(
+                    KaraokeAlignmentSegment(
+                        textRange: lyricUnit.range,
+                        startSeconds: timing.start,
+                        endSeconds: max(timing.end, timing.start + 0.01),
+                        confidence: 0.7
+                    )
+                )
+            }
         }
 
         let mismatchIndices = Set(unmatchedTimedIndices + substitutedTimedIndices)
@@ -1506,12 +1752,73 @@ struct PasteView: View {
             .map { timedUnits[$0].text.replacingOccurrences(of: "\n", with: " ") }
             .joined(separator: " | ")
         let diagnostics: [String] = [
-            "Forced alignment enabled entries=\(entries.count) lyricUnits=\(lyricCount) timedUnits=\(timedCount) matched=\(segments.count)",
+            "Forced alignment enabled entries=\(entries.count) lyricUnits=\(lyricCount) timedUnits=\(timedCount) outputSegments=\(segments.count)",
             "Unmatched entries count=\(mismatchIndices.count)",
             mismatchSample.isEmpty ? "Unmatched sample: (none)" : "Unmatched sample: \(mismatchSample)"
         ]
 
         return (segments, diagnostics)
+    }
+
+    private func karaokeDisplayRanges(for lyrics: String) -> [NSRange] {
+        let nsLyrics = lyrics as NSString
+
+        let semanticRanges: [NSRange] = furiganaSemanticSpans
+            .map(\ .range)
+            .filter { range in
+                range.location != NSNotFound && range.length > 0 && NSMaxRange(range) <= nsLyrics.length
+            }
+            .sorted { lhs, rhs in
+                if lhs.location != rhs.location { return lhs.location < rhs.location }
+                return lhs.length < rhs.length
+            }
+
+        let filteredSemantic = semanticRanges.filter { range in
+            let surface = nsLyrics.substring(with: range)
+            return isHardBoundaryOnly(surface) == false
+        }
+        if filteredSemantic.isEmpty == false {
+            return filteredSemantic
+        }
+
+        var lineRanges: [NSRange] = []
+        lineRanges.reserveCapacity(12)
+
+        var lineStart = 0
+        var index = 0
+        while index < nsLyrics.length {
+            let charRange = nsLyrics.rangeOfComposedCharacterSequence(at: index)
+            let token = nsLyrics.substring(with: charRange)
+            if token == "\n" || token == "\r" {
+                let length = charRange.location - lineStart
+                if length > 0 {
+                    let range = NSRange(location: lineStart, length: length)
+                    let surface = nsLyrics.substring(with: range)
+                    if isHardBoundaryOnly(surface) == false {
+                        lineRanges.append(range)
+                    }
+                }
+                lineStart = NSMaxRange(charRange)
+            }
+            index = NSMaxRange(charRange)
+        }
+
+        if lineStart < nsLyrics.length {
+            let tailRange = NSRange(location: lineStart, length: nsLyrics.length - lineStart)
+            let surface = nsLyrics.substring(with: tailRange)
+            if isHardBoundaryOnly(surface) == false {
+                lineRanges.append(tailRange)
+            }
+        }
+
+        if lineRanges.isEmpty == false {
+            return lineRanges
+        }
+
+        if nsLyrics.length > 0 {
+            return [NSRange(location: 0, length: nsLyrics.length)]
+        }
+        return []
     }
 
     private func makeLyricAlignmentUnits(from lyrics: String) -> [LyricAlignmentUnit] {
@@ -1612,6 +1919,7 @@ struct PasteView: View {
             karaokeAudioPlayer?.pause()
             stopKaraokePlaybackTimer()
             karaokeStartOffsetSeconds = karaokeAudioPlayer?.currentTime ?? karaokeStartOffsetSeconds
+            karaokePlaybackSecondsDisplay = karaokeStartOffsetSeconds
             karaokeScheduledStartDeviceTime = nil
             return
         }
@@ -1640,6 +1948,7 @@ struct PasteView: View {
                 player.play()
                 karaokeScheduledStartDeviceTime = nil
             }
+            karaokePlaybackSecondsDisplay = karaokeStartOffsetSeconds
             updateKaraokeHighlight(at: karaokeStartOffsetSeconds)
             startKaraokePlaybackTimer()
         } catch {
@@ -1681,6 +1990,7 @@ struct PasteView: View {
                 karaokeScheduledStartDeviceTime = nil
             }
 
+            karaokePlaybackSecondsDisplay = 0
             updateKaraokeHighlight(at: 0)
             startKaraokePlaybackTimer()
         } catch {
@@ -1692,6 +2002,7 @@ struct PasteView: View {
     private func recomputeKaraokeFromCurrentAudio() async {
         guard isGeneratingKaraokeAlignment == false else { return }
         guard let note = ensureCurrentNoteForKaraoke(requiresLyrics: true) else { return }
+                let effectiveLyrics = resolvedKaraokeLyrics(for: note)
         guard let fileName = note.karaokeAudioFileName,
               let audioURL = karaokeAudioURL(fileName: fileName),
               FileManager.default.fileExists(atPath: audioURL.path) else {
@@ -1713,7 +2024,7 @@ struct PasteView: View {
         do {
             karaokeGenerationProgress = max(karaokeGenerationProgress, 0.20)
             let alignment = try await KaraokeSpeechAligner.align(
-                lyrics: inputText,
+                lyrics: effectiveLyrics,
                 audioURL: audioURL,
                 localeIdentifier: "ja-JP"
             )
@@ -1721,7 +2032,7 @@ struct PasteView: View {
             karaokeGenerationProgress = 1.0
 
             var updated = notes.notes.first(where: { $0.id == note.id }) ?? note
-            updated.text = inputText
+            updated.text = effectiveLyrics
             updated.karaokeAlignment = alignment
             notes.updateNote(updated)
             currentNote = updated
@@ -1754,6 +2065,7 @@ struct PasteView: View {
         karaokeAudioPlayer?.stop()
         stopKaraokePlaybackTimer()
         karaokeCurrentRange = nil
+        karaokeCurrentLineRange = nil
         karaokeScheduledStartDeviceTime = nil
         karaokeStartOffsetSeconds = 0
 
@@ -1794,6 +2106,9 @@ struct PasteView: View {
                 if player.isPlaying == false {
                     if player.currentTime >= player.duration {
                         karaokeCurrentRange = nil
+                        karaokePlaybackSecondsDisplay = player.duration
+                    } else {
+                        karaokePlaybackSecondsDisplay = player.currentTime
                     }
                     stopKaraokePlaybackTimer()
                     karaokeScheduledStartDeviceTime = nil
@@ -1812,6 +2127,7 @@ struct PasteView: View {
                     playbackSeconds = player.currentTime
                 }
 
+                karaokePlaybackSecondsDisplay = playbackSeconds
                 updateKaraokeHighlight(at: playbackSeconds)
             }
         }
@@ -1905,17 +2221,30 @@ struct PasteView: View {
     private func updateKaraokeHighlight(at seconds: TimeInterval) {
         guard let alignment = karaokeAlignmentForCurrentNote else {
             karaokeCurrentRange = nil
+            karaokeCurrentLineRange = nil
             return
         }
 
-        let previousRange = karaokeCurrentRange
+        let previousLineRange = karaokeCurrentLineRange
         if let active = alignment.segments.first(where: { seconds >= $0.startSeconds && seconds < $0.endSeconds }) {
-            let activeRange = active.textRange.nsRange
-            if previousRange != activeRange {
-                karaokeCurrentRange = activeRange
-                if karaokeIsPlaying {
-                    karaokeScrollToSelectedRangeToken &+= 1
-                }
+            let lineRange = active.textRange.nsRange
+            karaokeCurrentLineRange = lineRange
+
+            let activeTokenRange = active.tokenSegments?
+                .first(where: { seconds >= $0.startSeconds && seconds < $0.endSeconds })?
+                .textRange
+                .nsRange
+
+            let activePhraseRange = active.phraseSegments?
+                .first(where: { seconds >= $0.startSeconds && seconds < $0.endSeconds })?
+                .textRange
+                .nsRange
+
+            let resolvedRange = activeTokenRange ?? activePhraseRange ?? lineRange
+            karaokeCurrentRange = resolvedRange
+
+            if previousLineRange != lineRange, karaokeIsPlaying {
+                karaokeScrollToSelectedRangeToken &+= 1
             }
             return
         }
@@ -1923,6 +2252,7 @@ struct PasteView: View {
         if let last = alignment.segments.last,
            seconds >= last.endSeconds {
             karaokeCurrentRange = nil
+            karaokeCurrentLineRange = nil
         }
     }
 
@@ -2124,6 +2454,7 @@ struct PasteView: View {
             karaokeProgress: karaokeGenerationProgress,
             isKaraokeReady: karaokePlaybackAvailable,
             isKaraokePlaying: karaokeIsPlaying,
+            karaokePlaybackTimeText: karaokePlaybackTimeText,
             showTokensSheet: $showTokensPopover,
             tokenListSheet: {
                 PasteTokenListSheet(
@@ -2630,7 +2961,6 @@ struct PasteView: View {
     }
 
     func clearSelection(resetPersistent: Bool = true) {
-        let hadSelection = selectionController.tokenSelection != nil
         selectionController.clearSelection(resetPersistent: resetPersistent)
         isDictionarySheetPresented = false
         Task { @MainActor in
@@ -2870,6 +3200,9 @@ struct PasteView: View {
         let preferredKana = kanaFoldToHiragana(preferredReading)
         return words.words.contains { word in
             guard word.isAssociated(with: noteID) else { return false }
+            if word.dictionaryEntryID == entry.entryID {
+                return true
+            }
             let savedSurface = kanaFoldToHiragana(word.surface)
             let savedDictionarySurface = kanaFoldToHiragana(word.dictionarySurface)
             // New shape: surface matches note token; legacy shape: surface matches dictionary headword.
@@ -2898,6 +3231,9 @@ struct PasteView: View {
 
         func matchesSavedKey(_ word: Word) -> Bool {
             guard word.isAssociated(with: noteID) else { return false }
+            if word.dictionaryEntryID == entry.entryID {
+                return true
+            }
             let savedSurface = kanaFoldToHiragana(word.surface)
             let savedDictionarySurface = kanaFoldToHiragana(word.dictionarySurface)
             guard savedSurface == tokenSurface || savedSurface == dictionarySurface || savedDictionarySurface == dictionarySurface else { return false }
@@ -2921,7 +3257,7 @@ struct PasteView: View {
             let resolvedKana = normalizedReading(preferredReading) ?? normalizedReading(entry.kana)
             // Store surface as it appears in the note so Extract Words and other token-based
             // UIs can reliably recognize the saved state.
-            words.add(surface: s, dictionarySurface: resolvedDictionarySurface, kana: resolvedKana, meaning: meaning, note: nil, sourceNoteID: noteID)
+            words.add(dictionaryEntryID: entry.entryID, surface: s, dictionarySurface: resolvedDictionarySurface, kana: resolvedKana, meaning: meaning, note: nil, sourceNoteID: noteID)
         } else {
             if let noteID {
                 words.removeWords(ids: matchingIDs, fromNoteID: noteID)
@@ -3255,7 +3591,7 @@ struct PasteView: View {
                 // Save with the preferred reading (custom override) when present.
                 let kana = reading ?? normalizedReading(entry.kana)
                 let resolvedDictionarySurface = resolvedSurface(from: entry, fallback: context.surface)
-                words.add(surface: surface, dictionarySurface: resolvedDictionarySurface, kana: kana, meaning: meaning, note: nil, sourceNoteID: noteID)
+                words.add(dictionaryEntryID: entry.entryID, surface: surface, dictionarySurface: resolvedDictionarySurface, kana: kana, meaning: meaning, note: nil, sourceNoteID: noteID)
             }
         }
     }
@@ -3299,6 +3635,7 @@ struct PasteView: View {
                 let kana = reading ?? normalizedReading(entry.kana)
                 let dictionarySurface = resolvedSurface(from: entry, fallback: surface)
                 let payload = WordsStore.WordToAdd(
+                    dictionaryEntryID: entry.entryID,
                     surface: surface,
                     dictionarySurface: dictionarySurface,
                     kana: kana,
@@ -3365,7 +3702,7 @@ struct PasteView: View {
 
         let entryIDs = Array(Set(candidates.map { $0.entryID }))
         let priority = (try? await store.fetchEntryPriorityScores(for: entryIDs)) ?? [:]
-        let details = (try? await store.fetchEntryDetails(for: entryIDs)) ?? []
+        let details = (try? await DictionaryEntryDetailsCache.shared.details(for: entryIDs)) ?? []
         let detailsByID: [Int64: DictionaryEntryDetail] = details.reduce(into: [:]) { partialResult, detail in
             partialResult[detail.entryID] = detail
         }
@@ -3704,7 +4041,7 @@ struct PasteView: View {
                 guard meaning.isEmpty == false else { continue }
                 let kana = normalizedReading(entry.kana)
                 let surface = resolvedSurface(from: entry, fallback: item.surface)
-                toAdd.append(WordsStore.WordToAdd(surface: surface, kana: kana, meaning: meaning))
+                toAdd.append(WordsStore.WordToAdd(dictionaryEntryID: entry.entryID, surface: surface, kana: kana, meaning: meaning))
             }
 
             await MainActor.run {

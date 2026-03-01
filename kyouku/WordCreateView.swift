@@ -213,41 +213,56 @@ struct WordCreateView: View {
         let nTrim = note.trimmingCharacters(in: .whitespacesAndNewlines)
         let n: String? = nTrim.isEmpty ? nil : nTrim
 
-        switch listSelection {
-        case .createNew:
-            // Should be rare (prompt is immediate), but be defensive.
-            store.add(
-                surface: s,
-                dictionarySurface: ds,
-                kana: k,
-                meaning: m,
-                note: n,
-                sourceNoteID: nil,
-                listIDs: []
-            )
-            dismiss()
-        case .none:
-            store.add(
-                surface: s,
-                dictionarySurface: ds,
-                kana: k,
-                meaning: m,
-                note: n,
-                sourceNoteID: nil,
-                listIDs: []
-            )
-            dismiss()
-        case .existing(let id):
-            store.add(
-                surface: s,
-                dictionarySurface: ds,
-                kana: k,
-                meaning: m,
-                note: n,
-                sourceNoteID: nil,
-                listIDs: [id]
-            )
-            dismiss()
+        let selection = listSelection
+
+        Task {
+            guard let entry = await resolveEntryForSave(surface: s, dictionarySurface: ds, kana: k) else {
+                await MainActor.run {
+                    errorMessage = "No dictionary entry found for this word. Save from a dictionary result or refine Kanji/Kana."
+                }
+                return
+            }
+
+            await MainActor.run {
+                switch selection {
+                case .createNew:
+                    store.add(
+                        dictionaryEntryID: entry.entryID,
+                        surface: s,
+                        dictionarySurface: ds,
+                        kana: k,
+                        meaning: m,
+                        note: n,
+                        sourceNoteID: nil,
+                        listIDs: []
+                    )
+                    dismiss()
+                case .none:
+                    store.add(
+                        dictionaryEntryID: entry.entryID,
+                        surface: s,
+                        dictionarySurface: ds,
+                        kana: k,
+                        meaning: m,
+                        note: n,
+                        sourceNoteID: nil,
+                        listIDs: []
+                    )
+                    dismiss()
+                case .existing(let id):
+                    store.add(
+                        dictionaryEntryID: entry.entryID,
+                        surface: s,
+                        dictionarySurface: ds,
+                        kana: k,
+                        meaning: m,
+                        note: n,
+                        sourceNoteID: nil,
+                        listIDs: [id]
+                    )
+                    dismiss()
+                }
+            }
         }
     }
 
@@ -502,6 +517,61 @@ struct WordCreateView: View {
         }
 
         return best?.entry ?? rows.first
+    }
+
+    private func resolveEntryForSave(surface: String, dictionarySurface: String?, kana: String?) async -> DictionaryEntry? {
+        var candidateTerms: [String] = []
+        if let dictionarySurface, dictionarySurface.isEmpty == false {
+            candidateTerms.append(dictionarySurface)
+        }
+        if surface.isEmpty == false {
+            candidateTerms.append(surface)
+        }
+        if let kana, kana.isEmpty == false {
+            candidateTerms.append(kana)
+        }
+
+        var seenTerms: Set<String> = []
+        for term in candidateTerms {
+            guard seenTerms.insert(term).inserted else { continue }
+            let key = DictionaryKeyPolicy.keys(forDisplayKey: term).lookupKey
+            guard key.isEmpty == false else { continue }
+            guard let rows = try? await DictionarySQLiteStore.shared.lookupExact(term: key, limit: 32), rows.isEmpty == false else {
+                continue
+            }
+
+            if let kana, kana.isEmpty == false {
+                let foldedTarget = kanaFoldToHiragana(kana)
+                if let matchedKana = rows.first(where: {
+                    let candidateKana = ($0.kana ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    return candidateKana.isEmpty == false && kanaFoldToHiragana(candidateKana) == foldedTarget
+                }) {
+                    return matchedKana
+                }
+            }
+
+            if let dictionarySurface, dictionarySurface.isEmpty == false {
+                if let matchedSurface = rows.first(where: {
+                    $0.kanji.trimmingCharacters(in: .whitespacesAndNewlines) == dictionarySurface ||
+                    ($0.kana?.trimmingCharacters(in: .whitespacesAndNewlines) == dictionarySurface)
+                }) {
+                    return matchedSurface
+                }
+            }
+
+            if let best = bestAutofillMatch(in: rows, forQuery: key) {
+                return best
+            }
+            if let first = rows.first {
+                return first
+            }
+        }
+
+        return nil
+    }
+
+    private func kanaFoldToHiragana(_ value: String) -> String {
+        value.applyingTransform(.hiraganaToKatakana, reverse: true) ?? value
     }
 
     private func firstGloss(_ gloss: String) -> String {

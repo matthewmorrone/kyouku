@@ -2305,8 +2305,6 @@ final class TokenOverlayTextView: UITextView, UIContextMenuInteractionDelegate, 
         let visibleRectInContent = CGRect(origin: contentOffset, size: bounds.size)
             .insetBy(dx: -4, dy: -extraY)
 
-        let backing = attributedText.string as NSString
-
         var logged = 0
         let maxLogsPerPass = 24
         let maxTokens = min(semanticSpans.count, 1024)
